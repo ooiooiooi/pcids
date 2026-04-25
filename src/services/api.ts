@@ -1,0 +1,198 @@
+/**
+ * API 服务封装
+ */
+import axios, { AxiosInstance } from 'axios'
+import { message } from 'antd'
+
+const API_BASE_URL = '/api'
+
+// 创建 axios 实例
+const request: AxiosInstance = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 30000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+})
+
+// 请求拦截器
+request.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
+  (error) => {
+    return Promise.reject(error)
+  }
+)
+
+// 响应拦截器
+request.interceptors.response.use(
+  (response) => {
+    return response.data
+  },
+  (error) => {
+    if (error.response) {
+      const { status, data } = error.response
+
+      if (status === 401) {
+        const currentHash = window.location.hash
+        if (!currentHash.startsWith('#/login')) {
+          localStorage.removeItem('token')
+          localStorage.removeItem('user')
+          window.location.href = '#/login'
+        }
+      } else if (status === 403) {
+        message.error('无权限访问')
+      } else if (status === 404) {
+        message.error('资源不存在')
+      } else {
+        message.error(data?.detail || '请求失败')
+      }
+    } else {
+      message.error('网络错误，请检查后端服务是否启动')
+    }
+    return Promise.reject(error)
+  }
+)
+
+export default request
+
+// 认证服务
+export const authApi = {
+  login: (username: string, password: string) => {
+    const params = new URLSearchParams()
+    params.append('username', username)
+    params.append('password', password)
+    return request.post('/auth/login', params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    })
+  },
+  getMe: () => request.get('/auth/me'),
+}
+
+// 用户服务
+export const userApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; role_id?: number; status?: number }) =>
+    request.get('/users', { params }),
+  getById: (id: number) => request.get(`/users/${id}`),
+  create: (data: { username: string; password: string; email?: string; role_id?: number }) =>
+    request.post('/users', data),
+  update: (id: number, data: { email?: string; role_id?: number; status?: number }) =>
+    request.put(`/users/${id}`, data),
+  delete: (id: number) => request.delete(`/users/${id}`),
+  resetPassword: (id: number) => request.put(`/users/${id}/reset-password`),
+}
+
+// 角色服务
+export const roleApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+    request.get('/roles', { params }),
+  create: (data: { name: string; description?: string; permission_ids?: number[] }) =>
+    request.post('/roles', data),
+  update: (id: number, data: { name?: string; description?: string; permission_ids?: number[] }) =>
+    request.put(`/roles/${id}`, data),
+  delete: (id: number) => request.delete(`/roles/${id}`),
+}
+
+// 产品服务
+export const productApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; chip_type?: string }) =>
+    request.get('/products', { params }),
+  create: (data: { name: string; chip_type: string }) =>
+    request.post('/products', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/products/${id}`, data),
+  delete: (id: number) => request.delete(`/products/${id}`),
+}
+
+// 烧录器服务
+export const burnerApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; status?: number }) =>
+    request.get('/burners', { params }),
+  create: (data: { name: string; type: string }) =>
+    request.post('/burners', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/burners/${id}`, data),
+  delete: (id: number) => request.delete(`/burners/${id}`),
+  scan: () => request.post('/burners/scan'),
+}
+
+// 脚本服务
+export const scriptApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+    request.get('/scripts', { params }),
+  create: (data: { name: string; type: string; content: string }) =>
+    request.post('/scripts', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/scripts/${id}`, data),
+  delete: (id: number) => request.delete(`/scripts/${id}`),
+  getContent: (id: number) => request.get(`/scripts/${id}/content`),
+}
+
+// 烧录任务服务
+export const taskApi = {
+  getList: (params?: { page?: number; page_size?: number; status?: number }) =>
+    request.get('/tasks', { params }),
+  create: (data: { software_name: string }) =>
+    request.post('/tasks', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/tasks/${id}`, data),
+  delete: (id: number) => request.delete(`/tasks/${id}`),
+  getById: (id: number) => request.get(`/tasks/${id}`),
+}
+
+// 履历记录服务
+export const recordApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+    request.get('/records', { params }),
+  create: (data: Record<string, any>) =>
+    request.post('/records', data),
+}
+
+// 日志服务
+export const logApi = {
+  getLoginLogs: (params?: { page?: number; page_size?: number; user_id?: number; start_date?: string; end_date?: string }) =>
+    request.get('/logs/login', { params }),
+  getOperationLogs: (params?: { page?: number; page_size?: number; module?: string; start_date?: string; end_date?: string }) =>
+    request.get('/logs/operation', { params }),
+}
+
+// 制品仓库服务
+export const repositoryApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+    request.get('/repositories', { params }),
+  create: (data: { name: string; repo_id?: string; tenant?: string; description?: string }) =>
+    request.post('/repositories', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/repositories/${id}`, data),
+  delete: (id: number) => request.delete(`/repositories/${id}`),
+  getById: (id: number) => request.get(`/repositories/${id}`),
+}
+
+// 异常注入服务
+export const injectionApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; status?: number }) =>
+    request.get('/injections', { params }),
+  create: (data: { type: string; target: string; config?: string }) =>
+    request.post('/injections', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/injections/${id}`, data),
+  delete: (id: number) => request.delete(`/injections/${id}`),
+  getById: (id: number) => request.get(`/injections/${id}`),
+}
+
+// 通信协议测试服务
+export const protocolTestApi = {
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; result?: string }) =>
+    request.get('/protocol-tests', { params }),
+  create: (data: { target: string; address?: string; data?: string }) =>
+    request.post('/protocol-tests', data),
+  update: (id: number, data: Record<string, any>) =>
+    request.put(`/protocol-tests/${id}`, data),
+  delete: (id: number) => request.delete(`/protocol-tests/${id}`),
+  getById: (id: number) => request.get(`/protocol-tests/${id}`),
+}

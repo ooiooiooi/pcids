@@ -1,0 +1,12 @@
+Use the guide below to see how you can use and share the downloaded offline prototype presentation package:
+
+1. How can you preview your project offline using the prototype package?
+Locate the offline prototype presentation package you downloaded, unzip it and open the "index.html" to preview the prototype offline.
+
+2. What best practices should you follow to use or share the package?
+● Never delete or move any file inside the package;
+● Share the entire package instead of any file inside;
+● Deleting or modifying any of the package files might result in an error.
+
+3. Have any questions? 
+Please feel free to contact us: https://www.mockplus.com/support 
