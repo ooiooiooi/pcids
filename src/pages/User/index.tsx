@@ -5,6 +5,8 @@ import { userApi, roleApi } from '../../services/api'
 import { Permission } from '../../hooks'
 import dayjs from 'dayjs'
 
+const { Title } = Typography
+
 const User: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
