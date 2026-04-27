@@ -14,7 +14,6 @@ import Record from './pages/Record'
 import Product from './pages/Product'
 import Burner from './pages/Burner'
 import Script from './pages/Script'
-import IDE from './pages/IDE'
 import LoginLog from './pages/LoginLog'
 import OperationLog from './pages/OperationLog'
 import User from './pages/User'
@@ -67,7 +66,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             <Route path="product" element={<Product />} />
             <Route path="burner" element={<Burner />} />
             <Route path="script" element={<Script />} />
-            <Route path="ide" element={<IDE />} />
             <Route path="log/login" element={<LoginLog />} />
             <Route path="log/operation" element={<OperationLog />} />
             <Route path="user" element={<User />} />

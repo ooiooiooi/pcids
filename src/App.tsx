@@ -59,7 +59,6 @@ const pathIconMap: Record<string, React.ReactNode> = {
   '/product': <CodeOutlined />,
   '/burner': <FireOutlined />,
   '/script': <FileProtectOutlined />,
-  '/ide': <CodeOutlined />,
   '/burning': <FireOutlined />,
   '/record': <FileTextOutlined />,
   '/injection': <BugOutlined />,
@@ -111,7 +110,6 @@ const App: React.FC = () => {
       getItem('制品仓库', '/repository', <DatabaseOutlined />),
       getItem('资产管理', 'asset', <InboxOutlined />, [
         getItem('产品管理', '/product', <CodeOutlined />),
-        getItem('IDE管理', '/ide', <CodeOutlined />),
         getItem('烧录器管理', '/burner', <FireOutlined />),
         getItem('脚本管理', '/script', <FileProtectOutlined />),
       ]),

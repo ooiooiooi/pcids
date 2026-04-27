@@ -333,20 +333,53 @@ const Product: React.FC = () => {
         {formBody(editForm, editImageUrl, setEditImageUrl, handleUpdate)}
       </Modal>
 
-      <Modal title="板卡详情" open={isDetailOpen} onCancel={() => setIsDetailOpen(false)} footer={null}>
+      <Modal title="产品详情" open={isDetailOpen} onCancel={() => setIsDetailOpen(false)} footer={<Button type="primary" onClick={() => setIsDetailOpen(false)}>关闭</Button>} width={600}>
         {detailProduct && (
-          <div>
-            <p><strong>板卡名称：</strong>{detailProduct.name}</p>
-            <p><strong>芯片类型：</strong>{detailProduct.chip_type}</p>
-            <p><strong>板卡序列号：</strong>{detailProduct.serial_number || '-'}</p>
-            <p><strong>工作电压：</strong>{detailProduct.voltage || '-'}</p>
-            <p><strong>工作温度范围：</strong>{detailProduct.temp_range || '-'}</p>
-            <p><strong>通信接口：</strong>{detailProduct.interface || '-'}</p>
-            <p><strong>配置说明：</strong>{detailProduct.config_description || '-'}</p>
-            <p><strong>使用说明：</strong>{detailProduct.usage_description || '-'}</p>
-            <p><strong>修改时间：</strong>{formatTime(detailProduct.updated_at) || '-'}</p>
-            <p><strong>修改人：</strong>{detailProduct.modified_by || '-'}</p>
-            <p><strong>板卡图片：</strong>{detailProduct.board_image ? <img src={detailProduct.board_image} alt="board" style={{ width: 160, height: 110, objectFit: 'cover', borderRadius: 6 }} /> : '-'}</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20, paddingTop: 10 }}>
+            {detailProduct.board_image ? (
+              <div style={{ textAlign: 'center' }}>
+                <img src={detailProduct.board_image} alt="board" style={{ maxWidth: '100%', maxHeight: 240, objectFit: 'contain', borderRadius: 8 }} />
+              </div>
+            ) : (
+              <div style={{ height: 160, backgroundColor: '#f5f5f5', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+                暂无图片
+              </div>
+            )}
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontSize: 18, fontWeight: 500 }}>{detailProduct.name}</span>
+              <Tag color={chipColorMap[detailProduct.chip_type] || 'blue'} style={{ margin: 0, borderRadius: 10 }}>
+                {detailProduct.chip_type}
+              </Tag>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px 24px' }}>
+              <div style={{ display: 'flex' }}>
+                <span style={{ color: '#666', width: 80, flexShrink: 0 }}>序列号</span>
+                <span style={{ color: '#333', wordBreak: 'break-all' }}>{detailProduct.serial_number || '-'}</span>
+              </div>
+              <div style={{ display: 'flex' }}>
+                <span style={{ color: '#666', width: 80, flexShrink: 0 }}>通信接口</span>
+                <span style={{ color: '#333', wordBreak: 'break-all' }}>{detailProduct.interface || '-'}</span>
+              </div>
+              <div style={{ display: 'flex' }}>
+                <span style={{ color: '#666', width: 80, flexShrink: 0 }}>工作电压</span>
+                <span style={{ color: '#333', wordBreak: 'break-all' }}>{detailProduct.voltage || '-'}</span>
+              </div>
+              <div style={{ display: 'flex' }}>
+                <span style={{ color: '#666', width: 80, flexShrink: 0 }}>工作温度范围</span>
+                <span style={{ color: '#333', wordBreak: 'break-all' }}>{detailProduct.temp_range || '-'}</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex' }}>
+              <span style={{ color: '#666', width: 80, flexShrink: 0 }}>配置说明</span>
+              <span style={{ color: '#333', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{detailProduct.config_description || '-'}</span>
+            </div>
+            <div style={{ display: 'flex' }}>
+              <span style={{ color: '#666', width: 80, flexShrink: 0 }}>使用说明</span>
+              <span style={{ color: '#333', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{detailProduct.usage_description || '-'}</span>
+            </div>
           </div>
         )}
       </Modal>

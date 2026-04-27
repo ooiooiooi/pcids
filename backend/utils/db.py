@@ -98,7 +98,6 @@ def init_menus_and_permissions(db):
 
         # 二级菜单 - 资产管理下
         {"id": 31, "name": "产品管理", "path": "/product", "icon": "CodeOutlined", "parent_id": 3, "sort_order": 1},
-        {"id": 34, "name": "IDE管理", "path": "/ide", "icon": "CodeOutlined", "parent_id": 3, "sort_order": 2},
         {"id": 32, "name": "烧录器管理", "path": "/burner", "icon": "FireOutlined", "parent_id": 3, "sort_order": 3},
         {"id": 33, "name": "脚本管理", "path": "/script", "icon": "FileProtectOutlined", "parent_id": 3, "sort_order": 4},
 
@@ -148,11 +147,6 @@ def init_menus_and_permissions(db):
         {"name": "编辑脚本", "code": "script:edit", "type": "button", "menu_id": 33},
         {"name": "删除脚本", "code": "script:delete", "type": "button", "menu_id": 33},
         {"name": "执行脚本", "code": "script:execute", "type": "button", "menu_id": 33},
-
-        # IDE管理
-        {"name": "IDE管理查看", "code": "ide:view", "type": "menu", "menu_id": 34},
-        {"name": "编辑IDE", "code": "ide:edit", "type": "button", "menu_id": 34},
-        {"name": "删除IDE", "code": "ide:delete", "type": "button", "menu_id": 34},
 
         # 烧录安装管理
         {"name": "烧录管理查看", "code": "burning:view", "type": "menu", "menu_id": 4},
