@@ -76,8 +76,13 @@ const Script: React.FC = () => {
         productApi.getList({ page: 1, page_size: 1000 }),
         burnerApi.getList({ page: 1, page_size: 1000 })
       ])
-      if (prodRes.code === 0) setProducts(prodRes.data || [])
-      if (burnerRes.code === 0) setBurners(burnerRes.data || [])
+      
+      // Update logic: directly use data array, ensure we handle missing res gracefully
+      const productsData = prodRes?.data || []
+      const burnersData = burnerRes?.data || []
+      
+      setProducts(productsData)
+      setBurners(burnersData)
     } catch {
       // ignore
     }
@@ -240,6 +245,9 @@ const Script: React.FC = () => {
               placeholder="请选择烧录器"
               allowClear
               options={burners.map((b) => ({ value: b.name, label: b.name }))}
+              onDropdownVisibleChange={(open) => {
+                if (open && burners.length === 0) fetchDependencies()
+              }}
             />
           </Form.Item>
         </Col>
@@ -261,6 +269,9 @@ const Script: React.FC = () => {
               placeholder="请选择关联板卡"
               allowClear
               options={products.map((p) => ({ value: p.name, label: p.name }))}
+              onDropdownVisibleChange={(open) => {
+                if (open && products.length === 0) fetchDependencies()
+              }}
             />
           </Form.Item>
         </Col>
