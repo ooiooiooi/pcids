@@ -1,10 +1,11 @@
 import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Popconfirm, Tabs, Row, Col, Checkbox, InputNumber, Radio } from 'antd'
-import { SearchOutlined, EditOutlined, CaretRightOutlined, PlusOutlined } from '@ant-design/icons'
+import { SearchOutlined, EditOutlined, CaretRightOutlined, PlusOutlined, ApiOutlined, DatabaseOutlined, DisconnectOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { injectionApi, productApi } from '../../services/api'
 import { Permission } from '../../hooks'
 
 const Injection: React.FC = () => {
+  // @ts-expect-error unused
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const [isConfigOpen, setIsConfigOpen] = useState(false)
@@ -22,6 +23,7 @@ const Injection: React.FC = () => {
   const [form] = Form.useForm()
   const [execForm] = Form.useForm()
 
+  // @ts-expect-error unused
   const injectionTypes = [
     { value: 'power_off', label: '断电模拟' },
     { value: 'storage_full', label: '存储不足' },
@@ -95,6 +97,13 @@ const Injection: React.FC = () => {
         config.duration = values.network_duration
         if (values.network_duration === 'custom') config.custom_duration = values.network_custom_duration
         config.strategy = values.network_strategy
+      } else if (injectionType === 'permission_error') {
+        config.target = values.permission_target
+        config.type = values.permission_type
+        config.scope = values.permission_scope
+        config.duration = values.permission_duration
+        config.recovery = values.permission_recovery
+        config.backup = values.permission_backup
       }
 
       const payload = {
@@ -153,6 +162,7 @@ const Injection: React.FC = () => {
     }
   }
 
+  // @ts-expect-error unused
   const scenarioColumns = [
     {
       title: '异常类型', dataIndex: 'type', key: 'type',
@@ -296,11 +306,11 @@ const Injection: React.FC = () => {
         {activeTab === 'scenario' && (
           <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
             {scenarioCards.map(item => (
-              <Col xs={24} sm={12} md={8} lg={6} key={item.id}>
+              <Col xs={24} sm={12} md={8} lg={6} key={item.id} style={{ display: 'flex' }}>
                 <Card 
                   hoverable 
-                  bodyStyle={{ padding: 20 }} 
-                  style={{ borderRadius: 8, height: '100%', display: 'flex', flexDirection: 'column' }}
+                  bodyStyle={{ padding: 20, display: 'flex', flexDirection: 'column', height: '100%' }} 
+                  style={{ borderRadius: 8, flex: 1, display: 'flex', flexDirection: 'column' }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
                     <div style={{ 
@@ -309,7 +319,10 @@ const Injection: React.FC = () => {
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       marginRight: 12
                     }}>
-                      <SearchOutlined style={{ fontSize: 16 }} />
+                      {item.type === 'power_off' && <ApiOutlined style={{ fontSize: 16 }} />}
+                      {item.type === 'storage_full' && <DatabaseOutlined style={{ fontSize: 16 }} />}
+                      {item.type === 'network_error' && <DisconnectOutlined style={{ fontSize: 16 }} />}
+                      {item.type === 'permission_error' && <SafetyCertificateOutlined style={{ fontSize: 16 }} />}
                     </div>
                     <div style={{ fontSize: 16, fontWeight: 'bold' }}>{item.title}</div>
                   </div>
@@ -318,7 +331,7 @@ const Injection: React.FC = () => {
                     {getScenarioConfig(item.type, item.config_json)}
                   </div>
                   
-                  <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ display: 'flex', gap: 12, marginTop: 'auto' }}>
                     <Button 
                       type="primary" 
                       icon={<CaretRightOutlined />} 
@@ -357,6 +370,15 @@ const Injection: React.FC = () => {
                               network_duration: [10, 30].includes(c.duration) ? c.duration : 'custom',
                               network_custom_duration: [10, 30].includes(c.duration) ? undefined : c.duration,
                               network_strategy: c.strategy,
+                            })
+                          } else if (item.type === 'permission_error') {
+                            form.setFieldsValue({
+                              permission_target: c.target || { burn_dir: true },
+                              permission_type: c.type || { remove_write: true },
+                              permission_scope: c.scope || { current_user: true },
+                              permission_duration: c.duration || { '5min': true },
+                              permission_recovery: c.recovery || { auto: true },
+                              permission_backup: c.backup || { auto: true }
                             })
                           }
                         } catch {}
@@ -401,11 +423,11 @@ const Injection: React.FC = () => {
       </Card>
 
       <Modal
-        title={selectedRecord?.title + "编辑"}
+        title={selectedRecord?.title?.replace('模拟', '') + "编辑"}
         open={isConfigOpen}
         onOk={() => form.submit()}
         onCancel={() => { setIsConfigOpen(false); form.resetFields(); setInjectionType('') }}
-        width={500}
+        width={650}
       >
         <Form form={form} layout="vertical" onFinish={handleCreate} initialValues={{ 
           power_duration: 5, power_strategy: 'auto',
@@ -496,21 +518,76 @@ const Injection: React.FC = () => {
           {injectionType === 'permission_error' && (
             <>
               <div style={{ fontWeight: 'bold', marginBottom: 16 }}>参数配置</div>
-              <Form.Item label="权限变更对象" name="permission_target" style={{ marginBottom: 16 }}>
-                <Radio.Group>
-                  <Radio value="burn_dir">烧录目录</Radio>
-                </Radio.Group>
-              </Form.Item>
-              <Form.Item label="变更类型" name="permission_type" style={{ marginBottom: 16 }}>
-                <Radio.Group>
-                  <Radio value="remove_write">移除写权限</Radio>
-                </Radio.Group>
-              </Form.Item>
-              <Form.Item label="影响范围" name="permission_scope" style={{ marginBottom: 24 }}>
-                <Radio.Group>
-                  <Radio value="current_user">当前用户</Radio>
-                </Radio.Group>
-              </Form.Item>
+              
+              <div style={{ display: 'flex', marginBottom: 16 }}>
+                <div style={{ width: 100, marginTop: 5 }}>权限变更对象</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <Space size="large">
+                      <Form.Item name={['permission_target', 'burn_dir']} valuePropName="checked" noStyle><Checkbox>烧录目录</Checkbox></Form.Item>
+                      <Form.Item name={['permission_target', 'config_file']} valuePropName="checked" noStyle><Checkbox>配置文件</Checkbox></Form.Item>
+                      <Form.Item name={['permission_target', 'log_dir']} valuePropName="checked" noStyle><Checkbox>日志目录</Checkbox></Form.Item>
+                    </Space>
+                    <Space>
+                      <Form.Item name={['permission_target', 'custom']} valuePropName="checked" noStyle><Checkbox>自定义路径</Checkbox></Form.Item>
+                      <Form.Item name={['permission_target', 'custom_path']} noStyle><Input placeholder="/path/to/dir" style={{ width: 200 }} size="small" /></Form.Item>
+                    </Space>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', marginBottom: 16 }}>
+                <div style={{ width: 100, marginTop: 5 }}>变更类型</div>
+                <div style={{ flex: 1 }}>
+                  <Space size="large">
+                    <Form.Item name={['permission_type', 'remove_write']} valuePropName="checked" noStyle><Checkbox>移除写权限</Checkbox></Form.Item>
+                    <Form.Item name={['permission_type', 'remove_read']} valuePropName="checked" noStyle><Checkbox>移除读权限</Checkbox></Form.Item>
+                    <Form.Item name={['permission_type', 'remove_exec']} valuePropName="checked" noStyle><Checkbox>移除执行权限</Checkbox></Form.Item>
+                  </Space>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', marginBottom: 16 }}>
+                <div style={{ width: 100, marginTop: 5 }}>影响范围</div>
+                <div style={{ flex: 1 }}>
+                  <Space size="large">
+                    <Form.Item name={['permission_scope', 'current_user']} valuePropName="checked" noStyle><Checkbox>当前用户</Checkbox></Form.Item>
+                    <Form.Item name={['permission_scope', 'all_users']} valuePropName="checked" noStyle><Checkbox>所有用户</Checkbox></Form.Item>
+                    <Space>
+                      <Form.Item name={['permission_scope', 'specific_group']} valuePropName="checked" noStyle><Checkbox>特定组</Checkbox></Form.Item>
+                      <Form.Item name={['permission_scope', 'group_name']} noStyle><Input style={{ width: 120 }} size="small" /></Form.Item>
+                    </Space>
+                  </Space>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', marginBottom: 24 }}>
+                <div style={{ width: 100, marginTop: 5 }}>持续时长</div>
+                <div style={{ flex: 1 }}>
+                  <Space size="large">
+                    <Form.Item name={['permission_duration', '5min']} valuePropName="checked" noStyle><Checkbox>5分钟</Checkbox></Form.Item>
+                    <Form.Item name={['permission_duration', '10min']} valuePropName="checked" noStyle><Checkbox>10分钟</Checkbox></Form.Item>
+                    <Form.Item name={['permission_duration', 'manual']} valuePropName="checked" noStyle><Checkbox>手动停止</Checkbox></Form.Item>
+                  </Space>
+                </div>
+              </div>
+
+              <div style={{ fontWeight: 'bold', marginBottom: 16 }}>恢复策略</div>
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+                <Form.Item name={['permission_recovery', 'auto']} valuePropName="checked" noStyle><Checkbox>操作完成后自动恢复原始权限</Checkbox></Form.Item>
+                <Form.Item name={['permission_recovery', 'manual']} valuePropName="checked" noStyle><Checkbox>保持权限变更，需管理员手动恢复</Checkbox></Form.Item>
+              </div>
+
+              <div style={{ marginLeft: 24, marginTop: -8, marginBottom: 24 }}>
+                <div style={{ marginBottom: 8 }}>备份策略</div>
+                <div style={{ marginLeft: 24 }}>
+                  <Space size="large">
+                    <Form.Item name={['permission_backup', 'auto']} valuePropName="checked" noStyle><Checkbox>自动备份ACL</Checkbox></Form.Item>
+                    <Form.Item name={['permission_backup', 'none']} valuePropName="checked" noStyle><Checkbox>无备份</Checkbox></Form.Item>
+                  </Space>
+                </div>
+              </div>
             </>
           )}
         </Form>

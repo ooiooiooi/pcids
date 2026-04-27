@@ -1,4 +1,4 @@
-import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Popconfirm, Switch, Checkbox, Typography, Row, Col } from 'antd'
+import { Table, Button, Space, Input, Modal, Form, message, Tag, Select, Popconfirm, Switch, Checkbox, Typography, Row, Col } from 'antd'
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { userApi, roleApi } from '../../services/api'
@@ -156,10 +156,10 @@ const User: React.FC = () => {
 
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16, gap: 16 }}>
         <Select defaultValue="所有角色" style={{ width: 180 }} allowClear
-          onChange={(val) => setParams({ ...params, role_id: val })}
+          onChange={(val) => setParams({ ...params, role_id: val ? Number(val) : undefined })}
           options={roles.map((r) => ({ value: r.id, label: r.name }))} />
         <Select defaultValue="所有状态" style={{ width: 180 }} allowClear
-          onChange={(val) => setParams({ ...params, status: val })}
+          onChange={(val) => setParams({ ...params, status: val !== undefined ? Number(val) : undefined })}
           options={[{ value: 1, label: '启用' }, { value: 0, label: '禁用' }]} />
         <Input prefix={<SearchOutlined />} placeholder="请输入用户名" style={{ width: 240 }}
           onPressEnter={(e: any) => setParams({ ...params, page: 1, keyword: e.target.value })} 
