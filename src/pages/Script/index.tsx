@@ -1,8 +1,17 @@
-import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Switch } from 'antd'
+import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Switch, Checkbox, Row, Col } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
-import { scriptApi } from '../../services/api'
+import { scriptApi, productApi, burnerApi } from '../../services/api'
 import { Permission } from '../../hooks'
+
+const IDE_OPTIONS = [
+  'Code Composer Studio',
+  'IAR Embedded Workbench',
+  'Keil uVision',
+  'MPLAB',
+  'STM32CubeIDE',
+  'Vitis',
+]
 
 const SCRIPT_TYPES = [
   'PowerShell',
@@ -48,10 +57,31 @@ const Script: React.FC = () => {
   const [isBasicEditOpen, setIsBasicEditOpen] = useState(false)
   const [basicEditForm] = Form.useForm()
   const [editingBasicId, setEditingBasicId] = useState<number | null>(null)
+  const [keepAdding, setKeepAdding] = useState(false)
+
+  const [products, setProducts] = useState<any[]>([])
+  const [burners, setBurners] = useState<any[]>([])
 
   useEffect(() => {
     fetchScripts()
   }, [params])
+
+  useEffect(() => {
+    fetchDependencies()
+  }, [])
+
+  const fetchDependencies = async () => {
+    try {
+      const [prodRes, burnerRes]: any = await Promise.all([
+        productApi.getList({ page: 1, page_size: 1000 }),
+        burnerApi.getList({ page: 1, page_size: 1000 })
+      ])
+      if (prodRes.code === 0) setProducts(prodRes.data || [])
+      if (burnerRes.code === 0) setBurners(burnerRes.data || [])
+    } catch {
+      // ignore
+    }
+  }
 
   const fetchScripts = async () => {
     setLoading(true)
@@ -70,10 +100,16 @@ const Script: React.FC = () => {
 
   const handleCreate = async (values: any) => {
     try {
-      const res: any = await scriptApi.create(values)
+      const payload = {
+        ...values,
+        status: values.status ? 0 : 2 // 0: 启用(空闲), 2: 禁用(离线)
+      }
+      const res: any = await scriptApi.create(payload)
       if (res.code === 0) {
         message.success('创建成功')
-        setIsModalOpen(false)
+        if (!keepAdding) {
+          setIsModalOpen(false)
+        }
         form.resetFields()
         fetchScripts()
       }
@@ -131,7 +167,11 @@ const Script: React.FC = () => {
   const handleBasicEdit = async (values: any) => {
     if (!editingBasicId) return
     try {
-      const res: any = await scriptApi.update(editingBasicId, values)
+      const payload = {
+        ...values,
+        status: values.status ? 0 : 2
+      }
+      const res: any = await scriptApi.update(editingBasicId, payload)
       if (res.code === 0) {
         message.success('更新成功')
         setIsBasicEditOpen(false)
@@ -149,9 +189,10 @@ const Script: React.FC = () => {
       name: record.name,
       type: record.type,
       associated_ide: record.associated_ide,
-      ide_name: record.ide_name,
       associated_board: record.associated_board,
       associated_burner: record.associated_burner,
+      status: record.status !== 2, // 2 is disabled/offline
+      description: record.description,
     })
     setIsBasicEditOpen(true)
   }
@@ -168,6 +209,78 @@ const Script: React.FC = () => {
       // error handled by interceptor
     }
   }
+
+  const formBody = (form: any, isCreate: boolean, onFinish: (values: any) => void) => (
+    <Form form={form} layout="horizontal" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }} onFinish={onFinish}>
+      <Form.Item
+        label="脚本名称"
+        name="name"
+        rules={[{ required: true, message: '请输入脚本名称' }]}
+        labelCol={{ span: 3 }}
+        wrapperCol={{ span: 21 }}
+      >
+        <Input placeholder="请输入脚本名称" />
+      </Form.Item>
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item
+            label="脚本类型"
+            name="type"
+            rules={[{ required: true, message: '请选择脚本类型' }]}
+          >
+            <Select
+              placeholder="请选择脚本类型"
+              options={SCRIPT_TYPES.map((t) => ({ value: t, label: t }))}
+            />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="关联烧录器" name="associated_burner">
+            <Select
+              placeholder="请选择烧录器"
+              allowClear
+              options={burners.map((b) => ({ value: b.name, label: b.name }))}
+            />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="关联IDE" name="associated_ide">
+            <Select
+              placeholder="请选择关联IDE"
+              allowClear
+              options={IDE_OPTIONS.map((ide) => ({ value: ide, label: ide }))}
+            />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="关联板卡" name="associated_board">
+            <Select
+              placeholder="请选择关联板卡"
+              allowClear
+              options={products.map((p) => ({ value: p.name, label: p.name }))}
+            />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Form.Item label="状态" name="status" valuePropName="checked" initialValue={true} labelCol={{ span: 3 }} wrapperCol={{ span: 21 }}>
+        <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+      </Form.Item>
+
+      <Form.Item label="描述" name="description" labelCol={{ span: 3 }} wrapperCol={{ span: 21 }}>
+        <Input.TextArea rows={3} placeholder="脚本描述和备注信息" />
+      </Form.Item>
+
+      {isCreate && (
+        <Form.Item label="脚本内容" name="content" labelCol={{ span: 3 }} wrapperCol={{ span: 21 }}>
+          <Input.TextArea rows={8} placeholder="请输入脚本内容" />
+        </Form.Item>
+      )}
+    </Form>
+  )
 
   const columns = [
     {
@@ -317,43 +430,21 @@ const Script: React.FC = () => {
         onCancel={() => {
           setIsModalOpen(false)
           form.resetFields()
+          setKeepAdding(false)
         }}
-        width={600}
+        width={700}
+        okText="新增" cancelText="取消"
+        footer={(_, { OkBtn, CancelBtn }) => (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Checkbox checked={keepAdding} onChange={(e) => setKeepAdding(e.target.checked)}>继续新增</Checkbox>
+            <div>
+              <CancelBtn />
+              <OkBtn />
+            </div>
+          </div>
+        )}
       >
-        <Form form={form} layout="vertical" onFinish={handleCreate}>
-          <Form.Item
-            label="脚本名称"
-            name="name"
-            rules={[{ required: true, message: '请输入脚本名称' }]}
-          >
-            <Input placeholder="请输入脚本名称" />
-          </Form.Item>
-          <Form.Item
-            label="脚本类型"
-            name="type"
-            rules={[{ required: true, message: '请选择脚本类型' }]}
-          >
-            <Select
-              placeholder="请选择脚本类型"
-              options={SCRIPT_TYPES.map((t) => ({ value: t, label: t }))}
-            />
-          </Form.Item>
-          <Form.Item label="关联IDE" name="associated_ide">
-            <Input placeholder="请输入关联IDE" />
-          </Form.Item>
-          <Form.Item label="IDE名称" name="ide_name">
-            <Input placeholder="请输入IDE名称" />
-          </Form.Item>
-          <Form.Item label="关联板卡" name="associated_board">
-            <Input placeholder="请输入关联板卡" />
-          </Form.Item>
-          <Form.Item label="关联烧录器" name="associated_burner">
-            <Input placeholder="请输入关联烧录器" />
-          </Form.Item>
-          <Form.Item label="脚本内容" name="content">
-            <Input.TextArea rows={8} placeholder="请输入脚本内容" />
-          </Form.Item>
-        </Form>
+        {formBody(form, true, handleCreate)}
       </Modal>
 
       <Modal
@@ -381,28 +472,10 @@ const Script: React.FC = () => {
           setIsBasicEditOpen(false)
           basicEditForm.resetFields()
         }}
-        width={600}
+        width={700}
+        okText="保存" cancelText="取消"
       >
-        <Form form={basicEditForm} layout="vertical" onFinish={handleBasicEdit}>
-          <Form.Item label="脚本名称" name="name" rules={[{ required: true, message: '请输入脚本名称' }]}>
-            <Input placeholder="请输入脚本名称" />
-          </Form.Item>
-          <Form.Item label="脚本类型" name="type" rules={[{ required: true, message: '请选择脚本类型' }]}>
-            <Select placeholder="请选择脚本类型" options={SCRIPT_TYPES.map((t) => ({ value: t, label: t }))} />
-          </Form.Item>
-          <Form.Item label="关联IDE" name="associated_ide">
-            <Input placeholder="请输入关联IDE" />
-          </Form.Item>
-          <Form.Item label="IDE名称" name="ide_name">
-            <Input placeholder="请输入IDE名称" />
-          </Form.Item>
-          <Form.Item label="关联板卡" name="associated_board">
-            <Input placeholder="请输入关联板卡" />
-          </Form.Item>
-          <Form.Item label="关联烧录器" name="associated_burner">
-            <Input placeholder="请输入关联烧录器" />
-          </Form.Item>
-        </Form>
+        {formBody(basicEditForm, false, handleBasicEdit)}
       </Modal>
     </div>
   )
