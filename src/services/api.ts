@@ -164,7 +164,7 @@ export const scriptApi = {
 
 // 烧录任务服务
 export const taskApi = {
-  getList: (params?: { page?: number; page_size?: number; status?: number }) =>
+  getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string }) =>
     request.get('/tasks', { params }),
   create: (data: { software_name: string; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number }) =>
     request.post('/tasks', data),

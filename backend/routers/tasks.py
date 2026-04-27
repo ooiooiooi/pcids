@@ -504,15 +504,26 @@ async def get_tasks(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     status: Optional[int] = None,
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """获取烧录任务列表"""
+    from sqlalchemy import desc, asc
     query = db.query(BurningTask)
     query = _apply_task_scope(query, current_user)
 
     if status is not None:
         query = query.filter(BurningTask.status == status)
+
+    # 排序处理
+    if sort_field and hasattr(BurningTask, sort_field):
+        order_func = desc if sort_order == "desc" else asc
+        query = query.order_by(order_func(getattr(BurningTask, sort_field)))
+    else:
+        # 默认按创建时间倒序
+        query = query.order_by(desc(BurningTask.created_at))
 
     total = query.count()
     tasks = query.offset((page - 1) * page_size).limit(page_size).all()

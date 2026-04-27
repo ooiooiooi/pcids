@@ -26,7 +26,7 @@ const Burning: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
   const [total, setTotal] = useState(0)
-  const [params, setParams] = useState({ page: 1, page_size: 10, status: undefined as number | undefined })
+  const [params, setParams] = useState({ page: 1, page_size: 10, status: undefined as number | undefined, sort_field: 'created_at', sort_order: 'desc' })
   const [detailTask, setDetailTask] = useState<any>(null)
   const [consistencyTask, setConsistencyTask] = useState<any>(null)
   const [isConsistencyOpen, setIsConsistencyOpen] = useState(false)
@@ -167,7 +167,13 @@ const Burning: React.FC = () => {
         )
       },
     },
-    { title: '时间', dataIndex: 'created_at', key: 'created_at', render: (t: string) => t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-' },
+    { 
+      title: '执行时间', 
+      dataIndex: 'created_at', 
+      key: 'created_at', 
+      sorter: true,
+      render: (t: string) => t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-' 
+    },
     {
       title: '执行人',
       dataIndex: 'executor',
@@ -491,12 +497,20 @@ const Burning: React.FC = () => {
         dataSource={dataSource} 
         rowKey="id" 
         loading={loading}
+        onChange={(pagination, _filters, sorter: any) => {
+          setParams({
+            ...params,
+            page: pagination.current || 1,
+            page_size: pagination.pageSize || 10,
+            sort_field: sorter.field || 'created_at',
+            sort_order: sorter.order === 'ascend' ? 'asc' : 'desc'
+          })
+        }}
         pagination={{ 
           total, 
           pageSize: params.page_size, 
           current: params.page,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (page) => setParams({ ...params, page }) 
+          showTotal: (t) => `共 ${t} 条`
         }} 
       />
 
