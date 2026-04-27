@@ -77,11 +77,14 @@ async def get_scripts(
     page_size: int = Query(10, ge=1, le=100),
     keyword: Optional[str] = None,
     script_type: Optional[str] = None,
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """获取脚本列表"""
     ensure_schema()
+    from sqlalchemy import desc, asc
     query = db.query(Script)
 
     if keyword:
@@ -90,7 +93,14 @@ async def get_scripts(
         query = query.filter(Script.type == script_type)
 
     total = query.count()
-    scripts = query.order_by(Script.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    
+    if sort_field and hasattr(Script, sort_field):
+        order_func = desc if sort_order == "desc" else asc
+        query = query.order_by(order_func(getattr(Script, sort_field)))
+    else:
+        query = query.order_by(Script.updated_at.desc())
+        
+    scripts = query.offset((page - 1) * page_size).limit(page_size).all()
 
     return {
         "code": 0,

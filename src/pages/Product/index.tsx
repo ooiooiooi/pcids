@@ -11,7 +11,7 @@ const Product: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
   const [total, setTotal] = useState(0)
-  const [params, setParams] = useState({ page: 1, page_size: 10, keyword: '', chip_type: undefined as string | undefined })
+  const [params, setParams] = useState({ page: 1, page_size: 10, keyword: '', chip_type: undefined as string | undefined, sort_field: 'updated_at', sort_order: 'desc' })
   const [editingProduct, setEditingProduct] = useState<any>(null)
   const [detailProduct, setDetailProduct] = useState<any>(null)
   const [createForm] = Form.useForm()
@@ -111,7 +111,7 @@ const Product: React.FC = () => {
       ellipsis: true,
     },
     { title: '芯片类型', dataIndex: 'chip_type', key: 'chip_type', width: 120, render: (type: string) => <Tag color={chipColorMap[type] || 'default'}>{type}</Tag> },
-    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 180, render: (val: string) => formatTime(val) },
+    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 180, sorter: true, render: (val: string) => formatTime(val) },
     { title: '修改人', dataIndex: 'modified_by', key: 'modified_by', width: 120, render: (v: string) => v || '-' },
     {
       title: '板卡图片',
@@ -288,16 +288,27 @@ const Product: React.FC = () => {
             <Button type="primary" onClick={() => setParams({ ...params, page: 1, keyword: searchName, chip_type: filterChipType })}>搜索</Button>
           </div>
         </div>
-        <Table columns={columns} dataSource={dataSource} rowKey="id" loading={loading}
-          pagination={{
-            total,
-            pageSize: params.page_size,
+        <Table 
+          columns={columns} 
+          dataSource={dataSource} 
+          rowKey="id" 
+          loading={loading}
+          onChange={(pagination, _filters, sorter: any) => {
+            setParams({
+              ...params,
+              page: pagination.current || 1,
+              page_size: pagination.pageSize || 10,
+              sort_field: sorter.field || 'updated_at',
+              sort_order: sorter.order === 'ascend' ? 'asc' : 'desc'
+            })
+          }}
+          pagination={{ 
+            total, 
+            pageSize: params.page_size, 
             current: params.page,
-            showSizeChanger: false,
-            showQuickJumper: false,
-            showTotal: (t) => `共 ${t} 条`,
-            onChange: (page) => setParams({ ...params, page }),
-          }} />
+            showTotal: (t) => `共 ${t} 条`
+          }} 
+        />
       </Card>
 
       <Modal

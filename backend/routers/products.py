@@ -68,20 +68,29 @@ async def get_products(
     page_size: int = Query(10, ge=1, le=1000),
     keyword: Optional[str] = None,
     chip_type: Optional[str] = None,
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """获取产品列表"""
     ensure_schema()
+    from sqlalchemy import desc, asc
     query = db.query(Product)
 
     if keyword:
         query = query.filter(Product.name.contains(keyword))
-        query = query.filter(Product.name.contains(keyword))
+    if chip_type:
         query = query.filter(Product.chip_type == chip_type)
-        query = query.filter(Product.chip_type == chip_type)
+
     total = query.count()
-    query = query.order_by(Product.updated_at.desc())
+    
+    if sort_field and hasattr(Product, sort_field):
+        order_func = desc if sort_order == "desc" else asc
+        query = query.order_by(order_func(getattr(Product, sort_field)))
+    else:
+        query = query.order_by(Product.updated_at.desc())
+        
     products = query.offset((page - 1) * page_size).limit(page_size).all()
 
     def product_to_dict(p):

@@ -78,16 +78,28 @@ async def get_records(
     type: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    os_name: Optional[str] = None,
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("record:view")),
 ):
     """获取履历记录列表"""
+    from sqlalchemy import desc, asc
     query = db.query(Record)
     query = _apply_record_scope(query, db, current_user)
 
     if serial_number:
-        query = query.filter(Record.serial_number.contains(serial_number))
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                Record.serial_number.contains(serial_number),
+                Record.ip_address.contains(serial_number),
+                Record.software_name.contains(serial_number),
+                Record.operator.contains(serial_number),
+            )
+        )
     if software_name:
         query = query.filter(Record.software_name.contains(software_name))
     if operator:
@@ -96,13 +108,21 @@ async def get_records(
         query = query.filter(Record.result == result)
     if type:
         query = query.filter(Record.type == type)
+    if os_name:
+        query = query.filter(Record.log_data.contains(os_name))
     if start_date:
         query = query.filter(Record.operation_time >= start_date)
     if end_date:
         query = query.filter(Record.operation_time <= end_date)
 
-    query = query.order_by(Record.operation_time.desc())
     total = query.count()
+    
+    if sort_field and hasattr(Record, sort_field):
+        order_func = desc if sort_order == "desc" else asc
+        query = query.order_by(order_func(getattr(Record, sort_field)))
+    else:
+        query = query.order_by(Record.operation_time.desc())
+        
     records = query.offset((page - 1) * page_size).limit(page_size).all()
 
     return {

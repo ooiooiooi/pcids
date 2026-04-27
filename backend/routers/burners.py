@@ -40,11 +40,14 @@ async def get_burners(
     keyword: Optional[str] = None,
     status: Optional[int] = None,
     burner_type: Optional[str] = None,
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """获取烧录器列表"""
     ensure_schema()
+    from sqlalchemy import desc, asc
     query = db.query(Burner)
 
     if keyword:
@@ -55,6 +58,13 @@ async def get_burners(
         query = query.filter(Burner.type == burner_type)
 
     total = query.count()
+    
+    if sort_field and hasattr(Burner, sort_field):
+        order_func = desc if sort_order == "desc" else asc
+        query = query.order_by(order_func(getattr(Burner, sort_field)))
+    else:
+        query = query.order_by(Burner.updated_at.desc())
+        
     burners = query.offset((page - 1) * page_size).limit(page_size).all()
 
     return {

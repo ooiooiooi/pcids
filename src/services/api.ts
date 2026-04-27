@@ -114,7 +114,7 @@ export const roleApi = {
 
 // 产品服务
 export const productApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string; chip_type?: string }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; chip_type?: string; sort_field?: string; sort_order?: string }) =>
     request.get('/products', { params }),
   create: (data: {
     name: string
@@ -140,7 +140,7 @@ export const productApi = {
 
 // 烧录器服务
 export const burnerApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string; status?: number }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; status?: number; sort_field?: string; sort_order?: string }) =>
     request.get('/burners', { params }),
   create: (data: { name: string; type: string }) =>
     request.post('/burners', data),
@@ -152,7 +152,7 @@ export const burnerApi = {
 
 // 脚本服务
 export const scriptApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; sort_field?: string; sort_order?: string }) =>
     request.get('/scripts', { params }),
   create: (data: { name: string; type: string; content: string }) =>
     request.post('/scripts', data),
@@ -176,7 +176,7 @@ export const taskApi = {
 
 // 履历记录服务
 export const recordApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; sort_field?: string; sort_order?: string; serial_number?: string; start_date?: string; end_date?: string; os_name?: string }) =>
     request.get('/records', { params }),
   create: (data: Record<string, any>) =>
     request.post('/records', data),

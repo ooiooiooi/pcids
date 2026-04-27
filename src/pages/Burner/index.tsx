@@ -10,7 +10,7 @@ const Burner: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
   const [total, setTotal] = useState(0)
-  const [params, setParams] = useState({ page: 1, page_size: 10, keyword: '', status: undefined as number | undefined })
+  const [params, setParams] = useState({ page: 1, page_size: 10, keyword: '', status: undefined as number | undefined, sort_field: 'updated_at', sort_order: 'desc' })
   const [editingBurner, setEditingBurner] = useState<any>(null)
   const [createForm] = Form.useForm()
   const [editForm] = Form.useForm()
@@ -95,7 +95,7 @@ const Burner: React.FC = () => {
         return record.strategy === 1 ? record.sn : record.port
       }
     },
-    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 160, render: (val: string) => val ? val.replace('T', ' ').substring(0, 16) : '-' },
+    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 160, sorter: true, render: (val: string) => val ? val.replace('T', ' ').substring(0, 16) : '-' },
     { title: '修改人', dataIndex: 'modified_by', key: 'modified_by', width: 100 },
     { title: '状态', dataIndex: 'status', key: 'status', width: 80, render: (s: number, record: any) => {
       // In the prototype, if it's disabled, it should be shown as disabled
@@ -212,9 +212,27 @@ const Burner: React.FC = () => {
         </div>
         <div style={{ marginBottom: 8, color: 'rgba(51,51,51,1)', fontSize: 13 }}>共 {total} 条</div>
         <div style={{ color: '#999', fontSize: 12, marginBottom: 8 }}>状态说明: 空闲=启用且设备在线; 离线=启用且设备离线; 占用=启用且正在烧录; 禁用=设备被逻辑禁用</div>
-        <Table columns={columns} dataSource={dataSource} rowKey="id" loading={loading}
-          pagination={{ total, pageSize: params.page_size, current: params.page,
-            onChange: (page) => setParams({ ...params, page }) }} />
+        <Table 
+          columns={columns} 
+          dataSource={dataSource} 
+          rowKey="id" 
+          loading={loading}
+          onChange={(pagination, _filters, sorter: any) => {
+            setParams({
+              ...params,
+              page: pagination.current || 1,
+              page_size: pagination.pageSize || 10,
+              sort_field: sorter.field || 'updated_at',
+              sort_order: sorter.order === 'ascend' ? 'asc' : 'desc'
+            })
+          }}
+          pagination={{ 
+            total, 
+            pageSize: params.page_size, 
+            current: params.page,
+            showTotal: (t) => `共 ${t} 条`
+          }} 
+        />
       </Card>
 
       <Modal title="新增烧录器" open={isCreateModalOpen} onOk={() => createForm.submit()}

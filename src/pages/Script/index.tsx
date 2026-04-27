@@ -50,6 +50,8 @@ const Script: React.FC = () => {
     page_size: 10,
     keyword: '',
     script_type: undefined as string | undefined,
+    sort_field: 'updated_at',
+    sort_order: 'desc',
   })
   const [form] = Form.useForm()
   const [editForm] = Form.useForm()
@@ -318,11 +320,8 @@ const Script: React.FC = () => {
       title: '修改时间',
       dataIndex: 'updated_at',
       key: 'updated_at',
-      render: (val: string) => {
-        if (!val) return '-'
-        const d = new Date(val)
-        return `${String(d.getFullYear()).slice(2)}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
-      }
+      sorter: true,
+      render: (val: string) => val ? val.replace('T', ' ').substring(0, 16) : '-'
     },
     {
       title: '状态',
@@ -398,17 +397,26 @@ const Script: React.FC = () => {
 
         <div style={{ marginBottom: 8, color: 'rgba(51,51,51,1)', fontSize: 13 }}>共 {total} 条</div>
 
-        <Table
-          columns={columns}
-          dataSource={dataSource}
-          rowKey="id"
+        <Table 
+          columns={columns} 
+          dataSource={dataSource} 
+          rowKey="id" 
           loading={loading}
-          pagination={{
-            total,
-            pageSize: params.page_size,
-            current: params.page,
-            onChange: (page) => setParams({ ...params, page }),
+          onChange={(pagination, _filters, sorter: any) => {
+            setParams({
+              ...params,
+              page: pagination.current || 1,
+              page_size: pagination.pageSize || 10,
+              sort_field: sorter.field || 'updated_at',
+              sort_order: sorter.order === 'ascend' ? 'asc' : 'desc'
+            })
           }}
+          pagination={{ 
+            total, 
+            pageSize: params.page_size, 
+            current: params.page,
+            showTotal: (t) => `共 ${t} 条`
+          }} 
         />
       </Card>
 
