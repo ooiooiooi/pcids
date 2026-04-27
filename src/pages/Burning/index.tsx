@@ -28,6 +28,8 @@ const Burning: React.FC = () => {
   const [total, setTotal] = useState(0)
   const [params, setParams] = useState({ page: 1, page_size: 10, status: undefined as number | undefined })
   const [detailTask, setDetailTask] = useState<any>(null)
+  const [consistencyTask, setConsistencyTask] = useState<any>(null)
+  const [isConsistencyOpen, setIsConsistencyOpen] = useState(false)
 
   // Wizard state
   const [isWizardOpen, setIsWizardOpen] = useState(false)
@@ -179,22 +181,14 @@ const Burning: React.FC = () => {
         </Space>
       ),
     },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      render: (s: number) => (
-        <span style={{ color: statusMap[s]?.color === 'success' ? '#52c41a' : statusMap[s]?.color === 'processing' ? '#1890ff' : '#f5222d' }}>
-          <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', backgroundColor: 'currentColor', marginRight: 6 }}></span>
-          {statusMap[s]?.text}
-        </span>
-      ),
-    },
-    { title: '版本一致性报告', dataIndex: 'consistency_report', key: 'consistency_report', render: () => <a href="#">查看报告</a> },
-    {
-      title: '操作',
-      key: 'action',
-      render: (_: any, record: any) => (
+    { title: '状态', dataIndex: 'status', key: 'status', render: (s: number) => (
+      <span style={{ color: statusMap[s]?.color === 'success' ? '#52c41a' : statusMap[s]?.color === 'processing' ? '#1890ff' : '#f5222d' }}>
+        <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', backgroundColor: 'currentColor', marginRight: 6 }}></span>
+        {statusMap[s]?.text}
+      </span>
+    ) },
+    { title: '版本一致性报告', dataIndex: 'consistency_report', key: 'consistency_report', render: (_: any, record: any) => <a onClick={() => { setConsistencyTask(record); setIsConsistencyOpen(true) }}>查看报告</a> },
+    { title: '操作', key: 'action', render: (_: any, record: any) => (
         <Space>
           <a onClick={() => { setDetailTask(record); setIsDetailOpen(true) }}>详情</a>
           <Permission code="burning:delete">
@@ -514,6 +508,54 @@ const Burning: React.FC = () => {
             <p><strong>状态：</strong><Tag color={statusMap[detailTask.status]?.color}>{statusMap[detailTask.status]?.text}</Tag></p>
             {detailTask.config_json && <p><strong>配置：</strong><pre>{detailTask.config_json}</pre></p>}
             <p><strong>创建时间：</strong>{detailTask.created_at?.replace('T', ' ').substring(0, 19)}</p>
+          </div>
+        )}
+      </Modal>
+
+      <Modal 
+        title={
+          <Space>
+            <span>一致性报告</span>
+            <Tag color="success" style={{ borderRadius: 10, margin: 0 }}>通过</Tag>
+          </Space>
+        }
+        open={isConsistencyOpen} 
+        onCancel={() => setIsConsistencyOpen(false)} 
+        footer={null} 
+        width={400}
+      >
+        {consistencyTask && (
+          <div style={{ paddingTop: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+              <span style={{ color: '#666' }}>烧录安装目标</span>
+              <span style={{ fontWeight: 'bold' }}>{consistencyTask.board_name || consistencyTask.target_ip || '-'}</span>
+            </div>
+            
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ color: '#666' }}>当前版本</span>
+                <Space>
+                  <span style={{ fontWeight: 'bold' }}>{consistencyTask.software_name}</span>
+                  <Tag color="blue" style={{ borderRadius: 10, margin: 0 }}>{consistencyTask.software_version || 'v1.0.1'}</Tag>
+                </Space>
+              </div>
+              <div style={{ border: '1px solid #91caff', background: '#e6f7ff', padding: '4px 8px', borderRadius: 4, fontSize: 12, color: '#1890ff', wordBreak: 'break-all' }}>
+                校验码：{consistencyTask.current_md5 || '44504b103e36f18c61dbc41916933a2c'}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ color: '#666' }}>历史版本</span>
+                <Space>
+                  <span style={{ fontWeight: 'bold' }}>{consistencyTask.software_name}</span>
+                  <Tag color="blue" style={{ borderRadius: 10, margin: 0 }}>{consistencyTask.software_version || 'v1.0.1'}</Tag>
+                </Space>
+              </div>
+              <div style={{ border: '1px solid #91caff', background: '#e6f7ff', padding: '4px 8px', borderRadius: 4, fontSize: 12, color: '#1890ff', wordBreak: 'break-all' }}>
+                校验码：{consistencyTask.history_checksum || '44504b103e36f18c61dbc41916933a2c'}
+              </div>
+            </div>
           </div>
         )}
       </Modal>
