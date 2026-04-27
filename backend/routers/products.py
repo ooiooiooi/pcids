@@ -65,7 +65,7 @@ async def get_product_image(filename: str):
 @router.get("", response_model=PaginatedResponse)
 async def get_products(
     page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=1000),
     keyword: Optional[str] = None,
     chip_type: Optional[str] = None,
     db: Session = Depends(get_db),

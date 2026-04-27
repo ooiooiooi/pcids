@@ -36,7 +36,7 @@ def burner_to_dict(b):
 @router.get("", response_model=PaginatedResponse)
 async def get_burners(
     page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=1000),
     keyword: Optional[str] = None,
     status: Optional[int] = None,
     burner_type: Optional[str] = None,
