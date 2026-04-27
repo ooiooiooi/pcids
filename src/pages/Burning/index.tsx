@@ -178,14 +178,17 @@ const Burning: React.FC = () => {
       title: '执行人',
       dataIndex: 'executor',
       key: 'executor',
-      render: (text: string) => (
-        <Space>
-          <div style={{ width: 20, height: 20, borderRadius: '50%', backgroundColor: '#4f46e5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10 }}>
-            {(text || '张三').substring(0, 1)}
-          </div>
-          {text || '张三'}
-        </Space>
-      ),
+      render: (text: string) => {
+        const name = text || '张三'
+        return (
+          <Space>
+            <div style={{ width: 20, height: 20, borderRadius: '50%', backgroundColor: '#4f46e5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10 }}>
+              {name.substring(Math.max(0, name.length - 2))}
+            </div>
+            {name}
+          </Space>
+        )
+      },
     },
     { title: '状态', dataIndex: 'status', key: 'status', render: (s: number) => (
       <span style={{ color: statusMap[s]?.color === 'success' ? '#52c41a' : statusMap[s]?.color === 'processing' ? '#1890ff' : '#f5222d' }}>
@@ -210,12 +213,15 @@ const Burning: React.FC = () => {
   const fileColumns = [
     { title: '软件名称及版本', dataIndex: 'label' },
     { title: '版本', dataIndex: 'version', render: (v: string) => <Tag color="blue" style={{ borderRadius: 10 }}>{v}</Tag> },
-    { title: '项目责任人', dataIndex: 'responsible', render: (text: string) => (
-      <Space>
-        <div style={{ width: 20, height: 20, borderRadius: '50%', backgroundColor: '#4f46e5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10 }}>{text.substring(0, 1)}</div>
-        {text}
-      </Space>
-    ) },
+    { title: '项目责任人', dataIndex: 'responsible', render: (text: string) => {
+      const name = text || '张三'
+      return (
+        <Space>
+          <div style={{ width: 20, height: 20, borderRadius: '50%', backgroundColor: '#4f46e5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10 }}>{name.substring(Math.max(0, name.length - 2))}</div>
+          {name}
+        </Space>
+      )
+    } },
     { title: '发布时间', dataIndex: 'publishTime' },
     { title: '路径', dataIndex: 'path' },
   ]

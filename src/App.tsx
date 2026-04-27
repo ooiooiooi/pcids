@@ -257,7 +257,7 @@ const App: React.FC = () => {
           <div style={{ display: 'flex', gap: 40, marginTop: 16 }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 120 }}>
               <div style={{ width: 80, height: 80, borderRadius: '50%', backgroundColor: '#4f46e5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, marginBottom: 16, overflow: 'hidden' }}>
-                {userInfo.avatar_url ? <img src={userInfo.avatar_url} alt="avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : (userInfo.username || username || '管理').substring(0, 2)}
+                {userInfo.avatar_url ? <img src={userInfo.avatar_url} alt="avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : (userInfo.username || username || '管理').substring(Math.max(0, (userInfo.username || username || '管理').length - 2))}
               </div>
               <Upload
                 showUploadList={false}
@@ -375,7 +375,7 @@ const App: React.FC = () => {
         >
           <span style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }} onClick={() => setIsProfileOpen(true)}>
             <div style={{ width: 24, height: 24, borderRadius: '50%', backgroundColor: '#4f46e5', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, marginRight: 8, overflow: 'hidden' }}>
-              {userInfo.avatar_url ? <img src={userInfo.avatar_url} alt="avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : (userInfo.username || username || '管理').substring(0, 2)}
+              {userInfo.avatar_url ? <img src={userInfo.avatar_url} alt="avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : (userInfo.username || username || '管理').substring(Math.max(0, (userInfo.username || username || '管理').length - 2))}
             </div>
           </span>
           <Badge count={unreadCount} size="small">
