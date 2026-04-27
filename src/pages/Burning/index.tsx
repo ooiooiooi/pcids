@@ -1,4 +1,4 @@
-import { Table, Button, Space, Modal, message, Tag, Popconfirm, Select, Input, Row, Col, Typography, Radio, Checkbox, InputNumber } from 'antd'
+import { Table, Button, Space, Modal, message, Tag, Popconfirm, Select, Input, Row, Col, Typography, Checkbox, InputNumber } from 'antd'
 import { PlusOutlined, SearchOutlined, DesktopOutlined, AppstoreOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { taskApi, productApi, burnerApi, scriptApi } from '../../services/api'
@@ -45,8 +45,19 @@ const Burning: React.FC = () => {
   const [boards, setBoards] = useState<any[]>([])
   const [burners, setBurners] = useState<any[]>([])
   const [scripts, setScripts] = useState<any[]>([])
+  const [filterBoards, setFilterBoards] = useState<any[]>([])
 
-  useEffect(() => { fetchTasks() }, [params])
+  useEffect(() => { 
+    fetchTasks()
+    fetchFilterBoards()
+  }, [params])
+
+  const fetchFilterBoards = async () => {
+    try {
+      const res: any = await productApi.getList({ page: 1, page_size: 100 })
+      setFilterBoards(res?.data || [])
+    } catch { /* ignore */ }
+  }
 
   const fetchTasks = async () => {
     setLoading(true)
@@ -110,6 +121,9 @@ const Burning: React.FC = () => {
         config_json: wizardData.config || '',
         target_ip: wizardData.targetIp,
         target_port: wizardData.targetPort ? Number(wizardData.targetPort) : undefined,
+        product_id: platform === 'board' ? wizardData.boardId : undefined,
+        burner_id: wizardData.burnerId,
+        script_id: wizardData.scriptId,
       })
       message.success('任务创建成功')
       setIsWizardOpen(false)
@@ -194,15 +208,7 @@ const Burning: React.FC = () => {
   ]
 
   const fileColumns = [
-    {
-      title: '软件名称及版本',
-      dataIndex: 'label',
-      render: (t: string, r: any) => (
-        <Radio checked={wizardData.software === r.value} onChange={() => setWizardData({ ...wizardData, software: r.value })}>
-          {t}
-        </Radio>
-      )
-    },
+    { title: '软件名称及版本', dataIndex: 'label' },
     { title: '版本', dataIndex: 'version', render: (v: string) => <Tag color="blue" style={{ borderRadius: 10 }}>{v}</Tag> },
     { title: '项目责任人', dataIndex: 'responsible', render: (text: string) => (
       <Space>
@@ -215,15 +221,7 @@ const Burning: React.FC = () => {
   ]
 
   const boardColumns = [
-    {
-      title: '板卡序列号',
-      dataIndex: 'serial_number',
-      render: (t: string, r: any) => (
-        <Radio checked={wizardData.boardId === r.id} onChange={() => setWizardData({ ...wizardData, boardId: r.id })}>
-          {t}
-        </Radio>
-      )
-    },
+    { title: '板卡序列号', dataIndex: 'serial_number' },
     { title: '板卡名称', dataIndex: 'name' },
     { title: '芯片类型', dataIndex: 'chip_type', render: (t: string) => <Tag color={t === 'ARM' ? 'blue' : t === 'FPGA' ? 'magenta' : 'purple'} style={{ borderRadius: 10 }}>{t}</Tag> },
     { title: '板卡图片', dataIndex: 'board_image', render: (img: string) => (
@@ -233,6 +231,14 @@ const Burning: React.FC = () => {
       </Space>
     ) },
   ]
+
+  const [boardFilter, setBoardFilter] = useState({ type: '全部', keyword: '' })
+
+  const filteredBoards = boards.filter(b => {
+    const matchType = boardFilter.type === '全部' || b.chip_type === boardFilter.type
+    const matchKeyword = !boardFilter.keyword || b.name?.includes(boardFilter.keyword) || b.serial_number?.includes(boardFilter.keyword)
+    return matchType && matchKeyword
+  })
 
   // Wizard UI
   if (isWizardOpen) {
@@ -276,7 +282,25 @@ const Burning: React.FC = () => {
                 <div style={{ fontWeight: 'bold' }}>选择可执行文件</div>
                 <Input prefix={<SearchOutlined />} placeholder="请输入可执行文件名称" style={{ width: 240 }} />
               </div>
-              <Table columns={fileColumns} dataSource={softwareOptions} pagination={false} rowKey="value" size="small" />
+              <Table 
+                columns={fileColumns} 
+                dataSource={softwareOptions} 
+                pagination={false} 
+                rowKey="value" 
+                size="small" 
+                rowSelection={{
+                  type: 'radio',
+                  selectedRowKeys: wizardData.software ? [wizardData.software] : [],
+                  onChange: (selectedRowKeys) => {
+                    setWizardData({ ...wizardData, software: selectedRowKeys[0] })
+                  },
+                }}
+                onRow={(record) => ({
+                  onClick: () => {
+                    setWizardData({ ...wizardData, software: record.value })
+                  }
+                })}
+              />
             </div>
             <div style={{ textAlign: 'right', marginTop: 24 }}>
               <Button type="primary" onClick={handleNext}>下一步 &gt;</Button>
@@ -290,7 +314,7 @@ const Burning: React.FC = () => {
               <div style={{ fontWeight: 'bold' }}>选择板卡</div>
               <Space>
                 <span style={{ color: '#666' }}>芯片类型</span>
-                <Select defaultValue="全部" style={{ width: 120 }}>
+                <Select value={boardFilter.type} onChange={v => setBoardFilter({ ...boardFilter, type: v })} style={{ width: 120 }}>
                   <Select.Option value="全部">全部</Select.Option>
                   <Select.Option value="ARM">ARM</Select.Option>
                   <Select.Option value="PIC">PIC</Select.Option>
@@ -298,10 +322,28 @@ const Burning: React.FC = () => {
                   <Select.Option value="FPGA">FPGA</Select.Option>
                   <Select.Option value="Altera-CPLD">Altera-CPLD</Select.Option>
                 </Select>
-                <Input prefix={<SearchOutlined />} placeholder="请输入板卡名称" style={{ width: 200 }} />
+                <Input prefix={<SearchOutlined />} placeholder="请输入板卡名称/序列号" value={boardFilter.keyword} onChange={e => setBoardFilter({ ...boardFilter, keyword: e.target.value })} style={{ width: 200 }} />
               </Space>
             </div>
-            <Table columns={boardColumns} dataSource={boards} pagination={{ total: boards.length, pageSize: 5 }} rowKey="id" size="small" />
+            <Table 
+              columns={boardColumns} 
+              dataSource={filteredBoards} 
+              pagination={{ total: filteredBoards.length, pageSize: 5 }} 
+              rowKey="id" 
+              size="small" 
+              rowSelection={{
+                type: 'radio',
+                selectedRowKeys: wizardData.boardId ? [wizardData.boardId] : [],
+                onChange: (selectedRowKeys) => {
+                  setWizardData({ ...wizardData, boardId: selectedRowKeys[0] })
+                },
+              }}
+              onRow={(record) => ({
+                onClick: () => {
+                  setWizardData({ ...wizardData, boardId: record.id })
+                }
+              })}
+            />
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24 }}>
               <Button onClick={handlePrev}>&lt; 上一步</Button>
               <Button type="primary" onClick={handleNext}>下一步 &gt;</Button>
@@ -371,15 +413,15 @@ const Burning: React.FC = () => {
               <Col span={14}>
                 <div style={{ marginBottom: 24 }}>
                   <div style={{ marginBottom: 8, fontWeight: 'bold' }}>选择IDE</div>
-                  <Select style={{ width: '100%' }} defaultValue="Code Composer Studio" options={[{ label: 'Code Composer Studio', value: 'Code Composer Studio' }]} />
+                  <Select style={{ width: '100%' }} value={wizardData.ide || 'Code Composer Studio'} onChange={v => setWizardData({ ...wizardData, ide: v })} options={[{ label: 'Code Composer Studio', value: 'Code Composer Studio' }]} />
                 </div>
                 <div style={{ marginBottom: 24 }}>
                   <div style={{ marginBottom: 8, fontWeight: 'bold' }}>选择烧录器</div>
-                  <Select style={{ width: '100%' }} placeholder="请选择烧录器" options={burners.map(b => ({ label: b.name, value: b.id }))} />
+                  <Select style={{ width: '100%' }} placeholder="请选择烧录器" value={wizardData.burnerId} onChange={v => setWizardData({ ...wizardData, burnerId: v })} options={burners.map(b => ({ label: b.name, value: b.id }))} />
                 </div>
                 <div style={{ marginBottom: 24 }}>
                   <div style={{ marginBottom: 8, fontWeight: 'bold' }}>选择烧录脚本</div>
-                  <Select style={{ width: '100%' }} placeholder="请选择脚本" options={scripts.map(s => ({ label: s.name, value: s.id }))} />
+                  <Select style={{ width: '100%' }} placeholder="请选择脚本" value={wizardData.scriptId} onChange={v => setWizardData({ ...wizardData, scriptId: v })} options={scripts.map(s => ({ label: s.name, value: s.id }))} />
                 </div>
                 <div>
                   <div style={{ marginBottom: 8, fontWeight: 'bold' }}>参数配置</div>
@@ -433,15 +475,16 @@ const Burning: React.FC = () => {
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16, gap: 16 }}>
-        <Select defaultValue="所有烧录安装目标" style={{ width: 180 }}>
-          <Select.Option value="所有烧录安装目标">所有烧录安装目标</Select.Option>
-          <Select.Option value="Cortex-A78 板卡">Cortex-A78 板卡</Select.Option>
-          <Select.Option value="TMS320F2833">TMS320F2833</Select.Option>
-          <Select.Option value="Cyclone V 并行">Cyclone V “并行...</Select.Option>
-          <Select.Option value="鸿蒙">鸿蒙</Select.Option>
-          <Select.Option value="银河麒麟">银河麒麟</Select.Option>
+        <Select defaultValue="all" style={{ width: 180 }} onChange={v => setParams({ ...params, board_name: v === 'all' ? undefined : v } as any)}>
+          <Select.Option value="all">所有烧录安装目标</Select.Option>
+          {filterBoards.map(b => (
+            <Select.Option key={b.id} value={b.name}>{b.name}</Select.Option>
+          ))}
+          {osList.map(o => (
+            <Select.Option key={`os_${o.id}`} value={o.name}>{o.name}</Select.Option>
+          ))}
         </Select>
-        <Select defaultValue="所有状态" style={{ width: 120 }} onChange={v => setParams({ ...params, status: v === 'all' ? undefined : Number(v) })}>
+        <Select defaultValue="all" style={{ width: 120 }} onChange={v => setParams({ ...params, status: v === 'all' ? undefined : Number(v) })}>
           <Select.Option value="all">所有状态</Select.Option>
           <Select.Option value="1">执行中</Select.Option>
           <Select.Option value="2">完成</Select.Option>

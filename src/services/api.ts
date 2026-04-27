@@ -166,7 +166,7 @@ export const scriptApi = {
 export const taskApi = {
   getList: (params?: { page?: number; page_size?: number; status?: number }) =>
     request.get('/tasks', { params }),
-  create: (data: { software_name: string; board_name?: string; config_json?: string; target_ip?: string; target_port?: number }) =>
+  create: (data: { software_name: string; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number }) =>
     request.post('/tasks', data),
   update: (id: number, data: Record<string, any>) =>
     request.put(`/tasks/${id}`, data),
