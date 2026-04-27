@@ -74,6 +74,18 @@ export const authApi = {
     })
   },
   getMe: () => request.get('/auth/me'),
+  updateMe: (data: any) => request.put('/auth/me', data),
+  updatePassword: (data: any) => request.put('/auth/password', data),
+  uploadAvatar: (data: FormData) => request.post('/auth/avatar', data, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  }),
+}
+
+// 消息服务
+export const messageApi = {
+  getList: (params?: { page?: number; page_size?: number; is_read?: number }) =>
+    request.get('/messages', { params }),
+  readAll: () => request.put('/messages/read-all'),
 }
 
 // 用户服务

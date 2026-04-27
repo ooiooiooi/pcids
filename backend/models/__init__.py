@@ -11,6 +11,7 @@ from .task import BurningTask
 from .log import Record, Injection, InjectionRun, ProtocolTest, ProtocolSession, ProtocolLog, LoginLog, OperationLog
 from .permission import Menu, Permission, RolePermission
 from .repository import Repository
+from .message import Message
 
 __all__ = [
     "Base",
@@ -33,4 +34,5 @@ __all__ = [
     "Permission",
     "RolePermission",
     "Repository",
+    "Message",
 ]

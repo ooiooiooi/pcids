@@ -3,8 +3,12 @@
 """
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+import shutil
+import uuid
+import os
+from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
@@ -200,6 +204,47 @@ async def get_me(current_user: User = Depends(get_current_user)):
             "username": current_user.username,
             "email": current_user.email,
             "role_id": current_user.role_id,
+            "avatar_url": current_user.avatar_url,
             "permissions": current_user.get_permissions(),
         }
     }
+
+class UpdateMeRequest(BaseModel):
+    email: Optional[str] = None
+
+class UpdatePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+@router.put("/me", response_model=Response)
+async def update_me(request_data: UpdateMeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """更新当前用户信息"""
+    if request_data.email is not None:
+        current_user.email = request_data.email
+    db.commit()
+    return {"code": 0, "message": "success", "data": None}
+
+@router.put("/password", response_model=Response)
+async def update_password(request_data: UpdatePasswordRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """修改密码"""
+    if not current_user.verify_password(request_data.old_password):
+        raise HTTPException(status_code=400, detail="原密码错误")
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    current_user.password_hash = pwd_context.hash(request_data.new_password)
+    db.commit()
+    return {"code": 0, "message": "success", "data": None}
+
+@router.post("/avatar", response_model=Response)
+async def upload_avatar(file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """上传头像"""
+    ext = file.filename.split('.')[-1]
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    filepath = os.path.join("uploads", filename)
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    avatar_url = f"http://127.0.0.1:8000/uploads/{filename}"
+    current_user.avatar_url = avatar_url
+    db.commit()
+    return {"code": 0, "message": "success", "data": avatar_url}

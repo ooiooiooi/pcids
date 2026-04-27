@@ -12,7 +12,7 @@ import uvicorn
 
 from backend.utils.db import init_db, SessionLocal
 from backend.models.log import OperationLog
-from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories
+from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, messages
 from backend.routers.auth import SECRET_KEY, ALGORITHM
 from jose import jwt, JWTError
 
@@ -109,6 +109,7 @@ app.include_router(records.router, prefix="/api/records", tags=["履历记录"])
 app.include_router(injections.router, prefix="/api/injections", tags=["异常注入"])
 app.include_router(protocol_tests.router, prefix="/api/protocol-tests", tags=["通信协议测试"])
 app.include_router(repositories.router, prefix="/api/repositories", tags=["制品仓库"])
+app.include_router(messages.router, prefix="/api/messages", tags=["消息中心"])
 
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
