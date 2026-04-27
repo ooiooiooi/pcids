@@ -467,10 +467,31 @@ const Script: React.FC = () => {
           editForm.resetFields()
         }}
         width={800}
+        okText="保存"
+        cancelText="取消"
+        footer={(_, { OkBtn, CancelBtn }) => (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Button onClick={() => message.info('测试功能开发中')}>测试</Button>
+            <div>
+              <CancelBtn />
+              <OkBtn />
+            </div>
+          </div>
+        )}
       >
         <Form form={editForm} layout="vertical" onFinish={handleEdit}>
-          <Form.Item label="脚本内容" name="content">
-            <Input.TextArea rows={20} placeholder="请输入脚本内容" />
+          <Form.Item name="content" style={{ marginBottom: 0 }}>
+            <Input.TextArea
+              rows={20}
+              placeholder="请输入脚本内容"
+              style={{
+                backgroundColor: '#282c34',
+                color: '#abb2bf',
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                border: 'none',
+                padding: '16px'
+              }}
+            />
           </Form.Item>
         </Form>
       </Modal>
