@@ -1,5 +1,5 @@
-import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select } from 'antd'
-import { PlusOutlined } from '@ant-design/icons'
+import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Radio, Switch, Checkbox, Alert } from 'antd'
+import { PlusOutlined, SyncOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { burnerApi } from '../../services/api'
 import { Permission } from '../../hooks'
@@ -14,6 +14,9 @@ const Burner: React.FC = () => {
   const [editingBurner, setEditingBurner] = useState<any>(null)
   const [createForm] = Form.useForm()
   const [editForm] = Form.useForm()
+  const [keepAdding, setKeepAdding] = useState(false)
+  const [createStrategy, setCreateStrategy] = useState(1)
+  const [editStrategy, setEditStrategy] = useState(1)
 
   useEffect(() => { fetchBurners() }, [params])
 
@@ -28,10 +31,19 @@ const Burner: React.FC = () => {
 
   const handleCreate = async (values: any) => {
     try {
-      await burnerApi.create(values)
+      const payload = { ...values, strategy: createStrategy, is_enabled: values.is_enabled }
+      // The name logic is currently handled differently in the prototype,
+      // it seems they use `type` as the "烧录器" dropdown and no name field. 
+      // Let's ensure name is set (if missing) to type + random or just type
+      if (!payload.name) payload.name = payload.type
+      
+      await burnerApi.create(payload)
       message.success('创建成功')
-      setIsCreateModalOpen(false)
+      if (!keepAdding) {
+        setIsCreateModalOpen(false)
+      }
       createForm.resetFields()
+      setCreateStrategy(1)
       fetchBurners()
     } catch (e: any) {
       if (!e?.errorFields) message.error(e?.response?.data?.detail || '创建失败')
@@ -40,7 +52,10 @@ const Burner: React.FC = () => {
 
   const handleUpdate = async (values: any) => {
     try {
-      await burnerApi.update(editingBurner.id, values)
+      const payload = { ...values, strategy: editStrategy, is_enabled: values.is_enabled }
+      if (!payload.name) payload.name = payload.type
+      
+      await burnerApi.update(editingBurner.id, payload)
       message.success('更新成功')
       setIsEditModalOpen(false)
       fetchBurners()
@@ -63,13 +78,6 @@ const Burner: React.FC = () => {
     { value: 2, label: '占用' },
   ]
 
-  const statusEditOptions = [
-    { value: 0, label: '空闲' },
-    { value: 1, label: '离线' },
-    { value: 2, label: '占用' },
-    { value: 3, label: '禁用' },
-  ]
-
   const statusMap: Record<number, { color: string; text: string }> = {
     0: { color: 'success', text: '空闲' },
     1: { color: 'default', text: '离线' },
@@ -78,15 +86,38 @@ const Burner: React.FC = () => {
   }
 
   const columns = [
-    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 160 },
     { title: '烧录器名称', dataIndex: 'name', key: 'name', width: 140 },
+    { 
+      title: 'SN/物理端口', 
+      key: 'sn_port', 
+      width: 200,
+      render: (_: any, record: any) => {
+        return record.strategy === 1 ? record.sn : record.port
+      }
+    },
+    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 160, render: (val: string) => val ? val.replace('T', ' ').substring(0, 16) : '-' },
     { title: '修改人', dataIndex: 'modified_by', key: 'modified_by', width: 100 },
+    { title: '状态', dataIndex: 'status', key: 'status', width: 80, render: (s: number, record: any) => {
+      // In the prototype, if it's disabled, it should be shown as disabled
+      if (record.is_enabled === false) {
+        return <Tag color="error">禁用</Tag>
+      }
+      return <Tag color={statusMap[s]?.color}>{statusMap[s]?.text}</Tag>
+    } },
     {
       title: '操作', key: 'action', width: 140,
       render: (_: any, record: any) => (
         <Space>
           <Permission code="burner:edit">
-            <Button type="link" onClick={() => { setEditingBurner(record); editForm.setFieldsValue(record); setIsEditModalOpen(true) }}>编辑</Button>
+            <Button type="link" onClick={() => { 
+              setEditingBurner(record)
+              editForm.setFieldsValue({
+                ...record,
+                is_enabled: record.is_enabled ?? true
+              })
+              setEditStrategy(record.strategy || 1)
+              setIsEditModalOpen(true) 
+            }}>编辑</Button>
           </Permission>
           <Permission code="burner:delete">
             <Button type="link" danger onClick={() => handleDelete(record.id)}>删除</Button>
@@ -94,8 +125,73 @@ const Burner: React.FC = () => {
         </Space>
       ),
     },
-    { title: '状态', dataIndex: 'status', key: 'status', width: 80, render: (s: number) => <Tag color={statusMap[s]?.color}>{statusMap[s]?.text}</Tag> },
   ]
+
+  const formBody = (form: any, strategy: number, setStrategy: (val: number) => void, onFinish: (values: any) => void) => (
+    <Form form={form} layout="horizontal" labelCol={{ span: 5 }} wrapperCol={{ span: 18 }} onFinish={onFinish}>
+      <Alert 
+        message="物理端口位置识别的烧录器发生物理位置更改时，请重新获取新的物理位置并保存" 
+        type="info" 
+        showIcon={false}
+        style={{ marginBottom: 20, color: '#2b52d9', backgroundColor: '#eef2ff', borderColor: '#d0d8fb' }}
+      />
+      <Form.Item label="烧录器" name="type" rules={[{ required: true, message: '请选择烧录器' }]} required>
+        <Select placeholder="请选择类型" options={[
+          { value: 'J_LINK V11', label: 'J_LINK V11' }, { value: 'PWLINK V2', label: 'PWLINK V2' },
+          { value: 'GDLINK', label: 'GDLINK' }, { value: 'ST_LINK', label: 'ST_LINK' }, { value: 'AL321', label: 'AL321' }
+        ]} />
+      </Form.Item>
+      
+      <Form.Item label="物理位置" name="location">
+        <Input placeholder="例如：USB插槽1" />
+      </Form.Item>
+
+      <Form.Item label="识别策略">
+        <Radio.Group value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+          <Radio value={1}>按SN序列号识别</Radio>
+          <Radio value={2}>按物理端口位置识别</Radio>
+        </Radio.Group>
+      </Form.Item>
+
+      {strategy === 1 && (
+        <Form.Item 
+          label="SN标识码" 
+          name="sn" 
+          required 
+          rules={[{ required: true, message: '请输入SN标识码' }]}
+          extra={<div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>推荐 J-LINK、ST-LINK 等支持序列号的设备使用</div>}
+        >
+          <Input 
+            placeholder="例如：37FF71064E573436F2FC1443" 
+            suffix={<a style={{ display: 'flex', alignItems: 'center', gap: 4 }}><SyncOutlined /> 获取标识码</a>}
+          />
+        </Form.Item>
+      )}
+
+      {strategy === 2 && (
+        <Form.Item 
+          label="物理端口" 
+          name="port" 
+          required 
+          rules={[{ required: true, message: '请输入物理端口' }]}
+          extra={<div style={{ color: '#ff4d4f', fontSize: 12, marginTop: 4 }}>无SN设备专用。绑定后严禁更换电脑USB插口，以防热插拔漂移导致错烧</div>}
+        >
+          <Input 
+            placeholder="例如：Pot#0003.Hub#0001" 
+            suffix={<a style={{ display: 'flex', alignItems: 'center', gap: 4 }}><SyncOutlined /> 获取当前位置</a>}
+          />
+        </Form.Item>
+      )}
+
+      <Form.Item label="启用" name="is_enabled" valuePropName="checked" initialValue={true}>
+        <Switch />
+      </Form.Item>
+
+      <Form.Item label="描述" name="description">
+        <Input.TextArea rows={3} placeholder="烧录器描述和备注信息" />
+      </Form.Item>
+    </Form>
+  )
 
   return (
     <div>
@@ -122,38 +218,27 @@ const Burner: React.FC = () => {
       </Card>
 
       <Modal title="新增烧录器" open={isCreateModalOpen} onOk={() => createForm.submit()}
-        onCancel={() => { setIsCreateModalOpen(false); createForm.resetFields() }}>
-        <Form form={createForm} layout="vertical" onFinish={handleCreate}>
-          <Form.Item label="烧录器名称" name="name" rules={[{ required: true, message: '请输入烧录器名称' }]}><Input /></Form.Item>
-          <Form.Item label="类型" name="type" rules={[{ required: true, message: '请选择烧录器类型' }]}>
-            <Select placeholder="请选择类型" options={[
-              { value: 'J-Link', label: 'J-Link' }, { value: 'ST-Link', label: 'ST-Link' },
-              { value: 'DAPLink', label: 'DAPLink' }, { value: 'Other', label: 'Other' },
-            ]} />
-          </Form.Item>
-          <Form.Item label="SN" name="sn"><Input placeholder="例如：37FF71064E573436" /></Form.Item>
-          <Form.Item label="物理端口" name="port"><Input placeholder="例如：USB 插槽 1" /></Form.Item>
-          <Form.Item label="描述" name="description"><Input.TextArea rows={3} /></Form.Item>
-        </Form>
+        okText="新增" cancelText="取消"
+        width={600}
+        onCancel={() => { setIsCreateModalOpen(false); createForm.resetFields(); setCreateStrategy(1); setKeepAdding(false) }}
+        footer={(_, { OkBtn, CancelBtn }) => (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Checkbox checked={keepAdding} onChange={(e) => setKeepAdding(e.target.checked)}>继续新增</Checkbox>
+            <div>
+              <CancelBtn />
+              <OkBtn />
+            </div>
+          </div>
+        )}
+      >
+        {formBody(createForm, createStrategy, setCreateStrategy, handleCreate)}
       </Modal>
 
       <Modal title="编辑烧录器" open={isEditModalOpen} onOk={() => editForm.submit()}
+        okText="保存" cancelText="取消"
+        width={600}
         onCancel={() => setIsEditModalOpen(false)}>
-        <Form form={editForm} layout="vertical" onFinish={handleUpdate}>
-          <Form.Item label="烧录器名称" name="name" rules={[{ required: true, message: '请输入烧录器名称' }]}><Input /></Form.Item>
-          <Form.Item label="类型" name="type" rules={[{ required: true, message: '请选择烧录器类型' }]}>
-            <Select placeholder="请选择类型" options={[
-              { value: 'J-Link', label: 'J-Link' }, { value: 'ST-Link', label: 'ST-Link' },
-              { value: 'DAPLink', label: 'DAPLink' }, { value: 'Other', label: 'Other' },
-            ]} />
-          </Form.Item>
-          <Form.Item label="SN" name="sn"><Input /></Form.Item>
-          <Form.Item label="物理端口" name="port"><Input /></Form.Item>
-          <Form.Item label="状态" name="status">
-            <Select options={statusEditOptions} />
-          </Form.Item>
-          <Form.Item label="描述" name="description"><Input.TextArea rows={3} /></Form.Item>
-        </Form>
+        {formBody(editForm, editStrategy, setEditStrategy, handleUpdate)}
       </Modal>
     </div>
   )

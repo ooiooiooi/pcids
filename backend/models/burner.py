@@ -16,5 +16,9 @@ class Burner(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String(50))
     sn: Mapped[Optional[str]] = mapped_column(String(100))
     port: Mapped[Optional[str]] = mapped_column(String(100))
+    location: Mapped[Optional[str]] = mapped_column(String(100))
+    strategy: Mapped[int] = mapped_column(Integer, default=1)  # 1: SN, 2: Port
+    is_enabled: Mapped[bool] = mapped_column(Integer, default=1)
     status: Mapped[int] = mapped_column(Integer, default=0)
     description: Mapped[Optional[str]] = mapped_column(Text)
+    modified_by: Mapped[Optional[str]] = mapped_column(String(50))

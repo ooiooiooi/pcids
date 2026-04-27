@@ -158,6 +158,9 @@ class BurnerBase(BaseModel):
     type: str
     sn: Optional[str] = None
     port: Optional[str] = None
+    location: Optional[str] = None
+    strategy: int = 1
+    is_enabled: bool = True
     status: int = 0
     description: Optional[str] = None
 
@@ -173,6 +176,9 @@ class BurnerUpdate(BaseModel):
     type: Optional[str] = None
     sn: Optional[str] = None
     port: Optional[str] = None
+    location: Optional[str] = None
+    strategy: Optional[int] = None
+    is_enabled: Optional[bool] = None
     status: Optional[int] = None
     description: Optional[str] = None
 

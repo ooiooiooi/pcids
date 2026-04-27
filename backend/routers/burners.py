@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from backend.utils.db import get_db
+from backend.utils.db import get_db, ensure_schema
 from backend.models.user import User
 from backend.models.burner import Burner
 from backend.schemas import BurnerCreate, BurnerUpdate, Response, PaginatedResponse
@@ -22,8 +22,12 @@ def burner_to_dict(b):
         "type": b.type,
         "sn": b.sn,
         "port": b.port,
+        "location": b.location,
+        "strategy": b.strategy,
+        "is_enabled": b.is_enabled,
         "status": b.status,
         "description": b.description,
+        "modified_by": b.modified_by,
         "created_at": b.created_at,
         "updated_at": b.updated_at,
     }
@@ -40,6 +44,7 @@ async def get_burners(
     current_user: User = Depends(get_current_user)
 ):
     """获取烧录器列表"""
+    ensure_schema()
     query = db.query(Burner)
 
     if keyword:
@@ -70,15 +75,19 @@ async def create_burner(
     _: None = Depends(require_permission("burner:add")),
 ):
     """创建新烧录器"""
-    burner = Burner(**burner_data.model_dump())
+    ensure_schema()
+    payload = burner_data.model_dump()
+    payload["modified_by"] = current_user.username
+    burner = Burner(**payload)
     db.add(burner)
+    db.flush()
+    burner_id = burner.id
     db.commit()
-    db.refresh(burner)
 
     return {
         "code": 0,
         "message": "创建成功",
-        "data": {"id": burner.id}
+        "data": {"id": burner_id}
     }
 
 
@@ -91,12 +100,15 @@ async def update_burner(
     _: None = Depends(require_permission("burner:edit")),
 ):
     """更新烧录器"""
+    ensure_schema()
     burner = db.query(Burner).filter(Burner.id == burner_id).first()
     if not burner:
         raise HTTPException(status_code=404, detail="烧录器不存在")
 
     for key, value in burner_data.model_dump(exclude_unset=True).items():
         setattr(burner, key, value)
+    
+    burner.modified_by = current_user.username
 
     db.commit()
     db.refresh(burner)
@@ -115,6 +127,7 @@ async def delete_burner(
     _: None = Depends(require_permission("burner:delete")),
 ):
     """删除烧录器"""
+    ensure_schema()
     burner = db.query(Burner).filter(Burner.id == burner_id).first()
     if not burner:
         raise HTTPException(status_code=404, detail="烧录器不存在")
