@@ -78,20 +78,36 @@ async def get_users(
     keyword: Optional[str] = None,
     role_id: Optional[int] = None,
     status: Optional[int] = None,
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """获取用户列表（支持分页和搜索）"""
+    from sqlalchemy import desc, asc
     query = db.query(User)
 
     if keyword:
-        query = query.filter(User.username.contains(keyword))
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                User.username.contains(keyword),
+                User.display_name.contains(keyword)
+            )
+        )
     if role_id is not None:
         query = query.filter(User.role_id == role_id)
     if status is not None:
         query = query.filter(User.status == status)
 
     total = query.count()
+    
+    if sort_field and hasattr(User, sort_field):
+        order_func = desc if sort_order == "desc" else asc
+        query = query.order_by(order_func(getattr(User, sort_field)))
+    else:
+        query = query.order_by(User.created_at.desc())
+        
     users = query.offset((page - 1) * page_size).limit(page_size).all()
 
     return {
@@ -101,6 +117,7 @@ async def get_users(
             {
                 "id": u.id,
                 "username": u.username,
+                "display_name": u.display_name,
                 "email": u.email,
                 "role_id": u.role_id,
                 "status": u.status,
@@ -157,10 +174,11 @@ async def create_user(
     # 创建用户
     user = User(
         username=user_data.username,
+        display_name=user_data.display_name or user_data.username,
         password_hash=pwd_context.hash(user_data.password),
         email=user_data.email,
         role_id=user_data.role_id,
-        status=1,
+        status=user_data.status if user_data.status is not None else 1,
     )
     db.add(user)
     db.commit()
@@ -187,6 +205,8 @@ async def update_user(
         raise HTTPException(status_code=404, detail="用户不存在")
 
     # 更新字段
+    if user_data.display_name is not None:
+        user.display_name = user_data.display_name
     if user_data.email is not None:
         user.email = user_data.email
     if user_data.role_id is not None:

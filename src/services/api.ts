@@ -90,7 +90,7 @@ export const messageApi = {
 
 // 用户服务
 export const userApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string; role_id?: number; status?: number }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; role_id?: number; status?: number; sort_field?: string; sort_order?: string }) =>
     request.get('/users', { params }),
   getById: (id: number) => request.get(`/users/${id}`),
   create: (data: { username: string; password: string; email?: string; role_id?: number }) =>

@@ -13,6 +13,7 @@ class User(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    display_name: Mapped[Optional[str]] = mapped_column(String(100), default=None)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(100), default=None)
     role_id: Mapped[Optional[int]] = mapped_column(

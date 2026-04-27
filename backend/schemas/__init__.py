@@ -30,17 +30,21 @@ class LoginRequest(BaseModel):
 class UserBase(BaseModel):
     """用户基础模式"""
     username: str = Field(..., min_length=1, max_length=50)
+    display_name: Optional[str] = None
     email: Optional[str] = None
     role_id: Optional[int] = None
+    status: Optional[int] = 1
 
 
 class UserCreate(UserBase):
     """创建用户请求"""
     password: str = Field(..., min_length=6)
+    remark: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
     """更新用户请求"""
+    display_name: Optional[str] = None
     email: Optional[str] = None
     role_id: Optional[int] = None
     status: Optional[int] = None
