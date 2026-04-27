@@ -468,6 +468,8 @@ def ensure_schema():
     ensure_column("burners", "modified_by", "VARCHAR(50)")
     ensure_column("products", "usage_description", "TEXT")
     ensure_column("products", "board_image", "VARCHAR(500)")
+    ensure_column("scripts", "associated_ide", "VARCHAR(100)")
+    ensure_column("scripts", "description", "TEXT")
     ensure_column("products", "created_by", "VARCHAR(50)")
     ensure_column("products", "modified_by", "VARCHAR(50)")
     ensure_column("repositories", "version", "VARCHAR(100)")

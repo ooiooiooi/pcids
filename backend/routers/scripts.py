@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from backend.utils.db import get_db
+from backend.utils.db import get_db, ensure_schema
 from backend.models.user import User
 from backend.models.script import Script
 from backend.schemas import ScriptCreate, ScriptUpdate, Response, PaginatedResponse
@@ -59,8 +59,10 @@ def script_to_dict(s):
         "type": s.type,
         "content": s.content,
         "ide_name": s.ide_name,
+        "associated_ide": s.associated_ide,
         "associated_board": s.associated_board,
         "associated_burner": s.associated_burner,
+        "description": s.description,
         "modified_by": s.modified_by,
         "status": getattr(s, "status", 0),
         "result": getattr(s, "result", None),
@@ -79,6 +81,7 @@ async def get_scripts(
     current_user: User = Depends(get_current_user)
 ):
     """获取脚本列表"""
+    ensure_schema()
     query = db.query(Script)
 
     if keyword:
@@ -107,7 +110,10 @@ async def create_script(
     _: None = Depends(require_permission("script:add")),
 ):
     """创建新脚本"""
-    script = Script(**script_data.model_dump())
+    ensure_schema()
+    payload = script_data.model_dump()
+    payload["modified_by"] = current_user.username
+    script = Script(**payload)
     db.add(script)
     db.commit()
     db.refresh(script)
@@ -128,12 +134,15 @@ async def update_script(
     _: None = Depends(require_permission("script:edit")),
 ):
     """更新脚本"""
+    ensure_schema()
     script = db.query(Script).filter(Script.id == script_id).first()
     if not script:
         raise HTTPException(status_code=404, detail="脚本不存在")
 
     for key, value in script_data.model_dump(exclude_unset=True).items():
         setattr(script, key, value)
+        
+    script.modified_by = current_user.username
 
     db.commit()
     db.refresh(script)

@@ -201,8 +201,11 @@ class ScriptBase(BaseModel):
     type: str
     content: str
     ide_name: Optional[str] = None
+    associated_ide: Optional[str] = None
     associated_board: Optional[str] = None
     associated_burner: Optional[str] = None
+    status: Optional[int] = 0
+    description: Optional[str] = None
     modified_by: Optional[str] = None
 
 
@@ -217,8 +220,11 @@ class ScriptUpdate(BaseModel):
     type: Optional[str] = None
     content: Optional[str] = None
     ide_name: Optional[str] = None
+    associated_ide: Optional[str] = None
     associated_board: Optional[str] = None
     associated_burner: Optional[str] = None
+    status: Optional[int] = None
+    description: Optional[str] = None
     modified_by: Optional[str] = None
 
 
