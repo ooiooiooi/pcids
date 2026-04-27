@@ -104,7 +104,6 @@ def init_menus_and_permissions(db):
         # 二级菜单 - 系统管理下
         {"id": 81, "name": "用户管理", "path": "/user", "icon": "TeamOutlined", "parent_id": 8, "sort_order": 1},
         {"id": 82, "name": "角色管理", "path": "/role", "icon": "TeamOutlined", "parent_id": 8, "sort_order": 2},
-        {"id": 83, "name": "权限管理", "path": "/permission", "icon": "SafetyOutlined", "parent_id": 8, "sort_order": 3},
         {"id": 84, "name": "登录日志", "path": "/log/login", "icon": "BarChartOutlined", "parent_id": 8, "sort_order": 4},
         {"id": 85, "name": "操作日志", "path": "/log/operation", "icon": "FileTextOutlined", "parent_id": 8, "sort_order": 5},
     ]
@@ -188,11 +187,6 @@ def init_menus_and_permissions(db):
         {"name": "编辑角色", "code": "role:edit", "type": "button", "menu_id": 82},
         {"name": "删除角色", "code": "role:delete", "type": "button", "menu_id": 82},
         {"name": "分配权限", "code": "role:assign", "type": "button", "menu_id": 82},
-
-        # 系统管理 - 权限管理
-        {"name": "权限管理查看", "code": "permission:view", "type": "menu", "menu_id": 83},
-        {"name": "新增权限点", "code": "permission:add", "type": "button", "menu_id": 83},
-        {"name": "删除权限点", "code": "permission:delete", "type": "button", "menu_id": 83},
 
         # 系统管理 - 日志
         {"name": "日志查看", "code": "log:view", "type": "menu", "menu_id": 84},

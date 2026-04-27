@@ -193,6 +193,7 @@ const User: React.FC = () => {
       {/* Create Modal */}
       <Modal title="新增用户" open={isCreateModalOpen}
         width={500}
+        maskClosable={false}
         onCancel={() => { setIsCreateModalOpen(false); createForm.resetFields() }}
         footer={[
           <div key="footer-wrapper" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -224,6 +225,7 @@ const User: React.FC = () => {
 
       {/* Edit Modal */}
       <Modal title="编辑用户" open={isEditModalOpen}
+        maskClosable={false}
         onOk={() => editForm.submit()}
         onCancel={() => setIsEditModalOpen(false)}>
         <Form form={editForm} layout="vertical" onFinish={handleUpdate}>
