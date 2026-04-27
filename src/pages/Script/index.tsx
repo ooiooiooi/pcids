@@ -242,7 +242,7 @@ const Script: React.FC = () => {
         <Col span={12}>
           <Form.Item label="关联烧录器" name="associated_burner">
             <Select
-              placeholder="请选择烧录器"
+              placeholder="请选择关联烧录器"
               allowClear
               options={burners.map((b) => ({ value: b.name, label: b.name }))}
               onDropdownVisibleChange={(open) => {
