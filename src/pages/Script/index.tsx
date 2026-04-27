@@ -1,5 +1,5 @@
 import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Switch, Checkbox, Row, Col } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
+import { PlusOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { scriptApi, productApi, burnerApi } from '../../services/api'
 import { Permission } from '../../hooks'
@@ -202,19 +202,6 @@ const Script: React.FC = () => {
     setIsBasicEditOpen(true)
   }
 
-  const handleToggleStatus = async (record: any) => {
-    try {
-      const newStatus = record.status === 0 ? 2 : 0
-      const res: any = await scriptApi.update(record.id, { status: newStatus })
-      if (res.code === 0) {
-        message.success(newStatus === 0 ? '启用成功' : '禁用成功')
-        fetchScripts()
-      }
-    } catch {
-      // error handled by interceptor
-    }
-  }
-
   const formBody = (form: any, isCreate: boolean, onFinish: (values: any) => void) => (
     <Form form={form} layout="horizontal" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }} onFinish={onFinish}>
       <Form.Item
@@ -295,26 +282,9 @@ const Script: React.FC = () => {
 
   const columns = [
     {
-      title: '脚本名称',
+      title: 'IDE名称',
       dataIndex: 'name',
       key: 'name',
-    },
-    {
-      title: '关联IDE',
-      dataIndex: 'associated_ide',
-      key: 'associated_ide',
-      render: (value: string) =>
-        value ? <Tag>{value}</Tag> : null,
-    },
-    {
-      title: 'IDE名称',
-      dataIndex: 'ide_name',
-      key: 'ide_name',
-    },
-    {
-      title: '关联板卡',
-      dataIndex: 'associated_board',
-      key: 'associated_board',
     },
     {
       title: '脚本类型',
@@ -325,9 +295,34 @@ const Script: React.FC = () => {
       ),
     },
     {
+      title: '关联IDE',
+      dataIndex: 'associated_ide',
+      key: 'associated_ide',
+    },
+    {
       title: '关联烧录器',
       dataIndex: 'associated_burner',
       key: 'associated_burner',
+    },
+    {
+      title: '关联板卡',
+      dataIndex: 'associated_board',
+      key: 'associated_board',
+    },
+    {
+      title: '修改人',
+      dataIndex: 'modified_by',
+      key: 'modified_by',
+    },
+    {
+      title: '修改时间',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      render: (val: string) => {
+        if (!val) return '-'
+        const d = new Date(val)
+        return `${String(d.getFullYear()).slice(2)}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+      }
     },
     {
       title: '状态',
@@ -339,40 +334,22 @@ const Script: React.FC = () => {
       },
     },
     {
-      title: '修改时间',
-      dataIndex: 'updated_at',
-      key: 'updated_at',
-    },
-    {
-      title: '修改人',
-      dataIndex: 'modified_by',
-      key: 'modified_by',
-    },
-    {
       title: '操作',
       key: 'action',
       render: (_: any, record: any) => (
         <Space>
           <Permission code="script:edit">
-            <Switch
-              checked={record.status === 0}
-              checkedChildren="启用"
-              unCheckedChildren="禁用"
-              onChange={() => handleToggleStatus(record)}
-            />
-          </Permission>
-          <Permission code="script:edit">
-            <Button type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
-              脚本编辑
-            </Button>
-          </Permission>
-          <Permission code="script:edit">
-            <Button type="link" icon={<PlusOutlined />} onClick={() => openBasicEdit(record)}>
+            <Button type="link" onClick={() => openBasicEdit(record)} style={{ padding: 0 }}>
               编辑
             </Button>
           </Permission>
+          <Permission code="script:edit">
+            <Button type="link" onClick={() => openEdit(record)} style={{ padding: 0 }}>
+              脚本编辑
+            </Button>
+          </Permission>
           <Permission code="script:delete">
-            <Button type="link" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record.id)}>
+            <Button type="link" danger onClick={() => handleDelete(record.id)} style={{ padding: 0 }}>
               删除
             </Button>
           </Permission>
@@ -383,22 +360,13 @@ const Script: React.FC = () => {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'center' }}>
         <div>
           <h1 style={{ fontSize: 16, margin: 0 }}>脚本管理</h1>
           <p style={{ color: 'rgba(0, 0, 0, 0.5)' }}>管理烧录脚本和执行逻辑</p>
         </div>
+        
         <div style={{ display: 'flex', gap: 12 }}>
-          <Permission code="script:add">
-            <Button icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
-              新增脚本
-            </Button>
-          </Permission>
-        </div>
-      </div>
-
-      <Card>
-        <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
           <Input
             placeholder="请输入脚本名称"
             style={{ width: 200 }}
@@ -408,7 +376,7 @@ const Script: React.FC = () => {
           />
           <Select
             placeholder="请选择类型"
-            style={{ width: 200 }}
+            style={{ width: 150 }}
             allowClear
             options={SCRIPT_TYPES.map((t) => ({ value: t, label: t }))}
             onChange={(val) => setParams({ ...params, script_type: val })}
@@ -416,6 +384,16 @@ const Script: React.FC = () => {
           <Button type="primary" onClick={() => setParams({ ...params, page: 1 })}>
             搜索
           </Button>
+        </div>
+      </div>
+
+      <Card>
+        <div style={{ marginBottom: 16 }}>
+          <Permission code="script:add">
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
+              新增脚本
+            </Button>
+          </Permission>
         </div>
 
         <div style={{ marginBottom: 8, color: 'rgba(51,51,51,1)', fontSize: 13 }}>共 {total} 条</div>

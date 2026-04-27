@@ -90,7 +90,7 @@ async def get_scripts(
         query = query.filter(Script.type == script_type)
 
     total = query.count()
-    scripts = query.offset((page - 1) * page_size).limit(page_size).all()
+    scripts = query.order_by(Script.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
     return {
         "code": 0,
