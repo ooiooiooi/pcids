@@ -115,21 +115,21 @@ async def create_product(
     _: None = Depends(require_permission("product:add")),
 ):
     """创建新产品"""
-    product = Product(**product_data.model_dump())
     ensure_schema()
     payload = product_data.model_dump()
     payload["created_by"] = current_user.username
     payload["modified_by"] = current_user.username
     product = Product(**payload)
+    db.add(product)
+    db.flush()
+    product_id = product.id
     db.commit()
-    db.refresh(product)
 
     return {
         "code": 0,
         "message": "创建成功",
-        "data": {"id": product.id}
+        "data": {"id": product_id}
     }
-
 
 @router.put("/{product_id}", response_model=Response)
 async def update_product(
