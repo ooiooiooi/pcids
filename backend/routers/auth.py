@@ -3,13 +3,14 @@
 """
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from backend.utils.db import get_db
 from backend.models.user import User
+from backend.models.log import LoginLog
 from backend.schemas import Token, LoginRequest, TokenData, Response
 
 router = APIRouter()
@@ -39,7 +40,7 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ) -> User:
-    """获取当前登录用户"""
+    """获取当前登录用户，并校验并发License"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无法验证凭据",
@@ -65,11 +66,32 @@ async def get_current_user(
             detail="账户已被禁用"
         )
 
+    # License 浮动并发验证
+    now = datetime.utcnow()
+    five_mins_ago = now - timedelta(minutes=5)
+    
+    # 判断当前用户是否已经是活跃用户（最近5分钟内活跃过）
+    is_active = user.last_active_at and user.last_active_at >= five_mins_ago
+    
+    if not is_active:
+        # 如果当前用户不活跃，准备分配一个新许可
+        # 查询当前有多少个活跃用户
+        active_count = db.query(User).filter(User.last_active_at >= five_mins_ago).count()
+        if active_count >= 5:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="系统并发浮动License已满（最大5个），请等待其他用户下线释放许可"
+            )
+            
+    # 更新最后活跃时间（心跳维持）
+    user.last_active_at = now
+    db.commit()
+
     return user
 
 
 @router.post("/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     """
     用户登录
     - username: 用户名
@@ -77,7 +99,17 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     """
     # 验证用户
     user = db.query(User).filter(User.username == form_data.username).first()
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
     if not user or not user.verify_password(form_data.password):
+        if user:
+            db.add(LoginLog(
+                user_id=user.id,
+                ip_address=ip,
+                log_type="login",
+                login_time=datetime.utcnow(),
+                result="用户名或密码错误"
+            ))
+            db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -85,10 +117,43 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
         )
 
     if user.status != 1:
+        db.add(LoginLog(
+            user_id=user.id,
+            ip_address=ip,
+            log_type="login",
+            login_time=datetime.utcnow(),
+            result="账户已被禁用"
+        ))
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账户已被禁用"
         )
+
+    # License 浮动并发验证
+    now = datetime.utcnow()
+    five_mins_ago = now - timedelta(minutes=5)
+    
+    is_active = user.last_active_at and user.last_active_at >= five_mins_ago
+    if not is_active:
+        active_count = db.query(User).filter(User.last_active_at >= five_mins_ago).count()
+        if active_count >= 5:
+            db.add(LoginLog(
+                user_id=user.id,
+                ip_address=ip,
+                log_type="login",
+                login_time=datetime.utcnow(),
+                result="系统并发浮动License已满（最大5个）"
+            ))
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="系统并发浮动License已满（最大5个），请等待其他用户下线释放许可"
+            )
+            
+    # 更新活跃时间
+    user.last_active_at = now
+    db.commit()
 
     # 创建 Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -97,18 +162,31 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
         expires_delta=access_token_expires
     )
 
-    # 记录登录日志
-    from backend.models.log import LoginLog
-    login_log = LoginLog(
+    db.add(LoginLog(
         user_id=user.id,
-        ip_address="127.0.0.1",  # TODO: 获取真实 IP
+        ip_address=ip,
+        log_type="login",
         login_time=datetime.utcnow(),
-        result="success"
-    )
-    db.add(login_log)
+        result="登录成功"
+    ))
     db.commit()
 
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/logout", response_model=Response)
+async def logout(request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    db.add(LoginLog(
+        user_id=current_user.id,
+        ip_address=ip,
+        log_type="logout",
+        login_time=datetime.utcnow(),
+        result="登出成功"
+    ))
+    current_user.last_active_at = None
+    db.commit()
+    return {"code": 0, "message": "success", "data": None}
 
 
 @router.get("/me", response_model=Response)

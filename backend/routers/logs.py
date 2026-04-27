@@ -1,6 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from backend.utils.db import get_db
 from backend.models.user import User
@@ -12,11 +13,14 @@ from backend.utils.permission import require_permission
 router = APIRouter()
 
 
-def login_log_to_dict(log):
+def login_log_to_dict(log, db: Session):
+    user = db.query(User).filter(User.id == log.user_id).first()
     return {
         "id": log.id,
         "user_id": log.user_id,
+        "username": user.username if user else "未知用户",
         "ip_address": log.ip_address,
+        "log_type": log.log_type,
         "login_time": log.login_time,
         "result": log.result,
         "created_at": log.created_at,
@@ -24,10 +28,13 @@ def login_log_to_dict(log):
     }
 
 
-def operation_log_to_dict(log):
+def operation_log_to_dict(log, db: Session):
+    user = db.query(User).filter(User.id == log.user_id).first()
     return {
         "id": log.id,
         "user_id": log.user_id,
+        "username": user.username if user else "未知用户",
+        "ip_address": log.ip_address,
         "module": log.module,
         "action": log.action,
         "content": log.content,
@@ -43,6 +50,8 @@ async def get_login_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     user_id: Optional[int] = None,
+    keyword: Optional[str] = None,
+    log_type: Optional[str] = Query(None, alias="type"),
     result: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -54,6 +63,15 @@ async def get_login_logs(
 
     if user_id:
         query = query.filter(LoginLog.user_id == user_id)
+    if keyword:
+        query = query.join(User, User.id == LoginLog.user_id, isouter=True).filter(
+            or_(
+                User.username.contains(keyword),
+                LoginLog.ip_address.contains(keyword),
+            )
+        )
+    if log_type:
+        query = query.filter(LoginLog.log_type == log_type)
     if result:
         query = query.filter(LoginLog.result == result)
     if start_date:
@@ -68,7 +86,7 @@ async def get_login_logs(
     return {
         "code": 0,
         "message": "success",
-        "data": [login_log_to_dict(log) for log in logs],
+        "data": [login_log_to_dict(log, db) for log in logs],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -80,6 +98,7 @@ async def get_operation_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     user_id: Optional[int] = None,
+    keyword: Optional[str] = None,
     module: Optional[str] = None,
     result: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -92,6 +111,15 @@ async def get_operation_logs(
 
     if user_id:
         query = query.filter(OperationLog.user_id == user_id)
+    if keyword:
+        query = query.join(User, User.id == OperationLog.user_id, isouter=True).filter(
+            or_(
+                User.username.contains(keyword),
+                OperationLog.ip_address.contains(keyword),
+                OperationLog.module.contains(keyword),
+                OperationLog.action.contains(keyword),
+            )
+        )
     if module:
         query = query.filter(OperationLog.module.contains(module))
     if result:
@@ -108,7 +136,7 @@ async def get_operation_logs(
     return {
         "code": 0,
         "message": "success",
-        "data": [operation_log_to_dict(log) for log in logs],
+        "data": [operation_log_to_dict(log, db) for log in logs],
         "total": total,
         "page": page,
         "page_size": page_size,

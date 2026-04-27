@@ -4,7 +4,9 @@
 import axios, { AxiosInstance } from 'axios'
 import { message } from 'antd'
 
-const API_BASE_URL = '/api'
+const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
+  ? 'http://127.0.0.1:8000/api' 
+  : '/api'
 
 // 创建 axios 实例
 const request: AxiosInstance = axios.create({
@@ -91,9 +93,9 @@ export const userApi = {
 export const roleApi = {
   getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
     request.get('/roles', { params }),
-  create: (data: { name: string; description?: string; permission_ids?: number[] }) =>
+  create: (data: { name: string; description?: string; status?: number; data_scope?: string; permission_ids?: number[] }) =>
     request.post('/roles', data),
-  update: (id: number, data: { name?: string; description?: string; permission_ids?: number[] }) =>
+  update: (id: number, data: { name?: string; description?: string; status?: number; data_scope?: string; permission_ids?: number[] }) =>
     request.put(`/roles/${id}`, data),
   delete: (id: number) => request.delete(`/roles/${id}`),
 }
@@ -102,11 +104,26 @@ export const roleApi = {
 export const productApi = {
   getList: (params?: { page?: number; page_size?: number; keyword?: string; chip_type?: string }) =>
     request.get('/products', { params }),
-  create: (data: { name: string; chip_type: string }) =>
+  create: (data: {
+    name: string
+    chip_type: string
+    serial_number: string
+    voltage?: string
+    temp_range?: string
+    interface?: string
+    config_description?: string
+    usage_description?: string
+    board_image: string
+  }) =>
     request.post('/products', data),
   update: (id: number, data: Record<string, any>) =>
     request.put(`/products/${id}`, data),
   delete: (id: number) => request.delete(`/products/${id}`),
+  uploadImage: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request.post('/products/upload-image', form, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
 }
 
 // 烧录器服务
@@ -171,11 +188,25 @@ export const repositoryApi = {
     request.put(`/repositories/${id}`, data),
   delete: (id: number) => request.delete(`/repositories/${id}`),
   getById: (id: number) => request.get(`/repositories/${id}`),
+  getTree: (params?: { mode?: 'online' | 'offline' }) => request.get('/repositories/tree', { params }),
+  getCodeartsConfig: () => request.get('/repositories/codearts/config'),
+  setCodeartsConfig: (data: Record<string, any>) => request.post('/repositories/codearts/config', data),
+  importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; name?: string; version?: string; description?: string }) =>
+    request.post('/repositories/codearts/import', data),
+  listProjectMembers: (projectKey: string) => request.get(`/repositories/projects/${projectKey}/members`),
+  inviteProjectMember: (projectKey: string, data: { username: string; role?: 'admin' | 'member' }) =>
+    request.post(`/repositories/projects/${projectKey}/members`, data),
+  updateProjectMemberRole: (projectKey: string, userId: number, data: { role: 'admin' | 'member' }) =>
+    request.put(`/repositories/projects/${projectKey}/members/${userId}`, data),
+  deleteProjectMember: (projectKey: string, userId: number) => request.delete(`/repositories/projects/${projectKey}/members/${userId}`),
+  getProjectPermissions: (projectKey: string) => request.get(`/repositories/projects/${projectKey}/permissions`),
+  setProjectPermissions: (projectKey: string, data: Record<string, any>) => request.put(`/repositories/projects/${projectKey}/permissions`, data),
+  deleteProject: (projectKey: string) => request.delete(`/repositories/projects/${projectKey}`),
 }
 
 // 异常注入服务
 export const injectionApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string; status?: number }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; status?: number; type?: string }) =>
     request.get('/injections', { params }),
   create: (data: { type: string; target: string; config?: string }) =>
     request.post('/injections', data),
@@ -183,6 +214,7 @@ export const injectionApi = {
     request.put(`/injections/${id}`, data),
   delete: (id: number) => request.delete(`/injections/${id}`),
   getById: (id: number) => request.get(`/injections/${id}`),
+  execute: (id: number) => request.post(`/injections/${id}/execute`),
 }
 
 // 通信协议测试服务

@@ -21,6 +21,8 @@ def _role_to_dict(role: Role) -> dict:
         "id": role.id,
         "name": role.name,
         "description": role.description,
+        "status": role.status,
+        "data_scope": role.data_scope,
         "permission_ids": [p.id for p in role.permissions],
         "created_at": role.created_at,
         "updated_at": role.updated_at,
@@ -73,7 +75,12 @@ async def create_role(
     if existing:
         raise HTTPException(status_code=400, detail="角色名已存在")
 
-    role = Role(name=role_data.name, description=role_data.description)
+    role = Role(
+        name=role_data.name,
+        description=role_data.description,
+        status=role_data.status,
+        data_scope=role_data.data_scope
+    )
     db.add(role)
     db.flush()
 
@@ -117,6 +124,10 @@ async def update_role(
         role.name = role_data.name
     if role_data.description is not None:
         role.description = role_data.description
+    if role_data.status is not None:
+        role.status = role_data.status
+    if role_data.data_scope is not None:
+        role.data_scope = role_data.data_scope
     if role_data.permission_ids is not None:
         _assign_permissions(db, role, role_data.permission_ids)
 

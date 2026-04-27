@@ -1,6 +1,7 @@
-import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Popconfirm } from 'antd'
+import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Popconfirm, Checkbox, Select, Tree } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
-import { useState, useEffect } from 'react'
+import type { DataNode } from 'antd/es/tree'
+import { useMemo, useState, useEffect } from 'react'
 import { roleApi } from '../../services/api'
 import { permissionApi } from '../../services/permission'
 import { Permission } from '../../hooks'
@@ -15,17 +16,22 @@ const Role: React.FC = () => {
   const [editingRole, setEditingRole] = useState<any>(null)
   const [createForm] = Form.useForm()
   const [editForm] = Form.useForm()
-  const [selectedPermissionIds, setSelectedPermissionIds] = useState<number[]>([])
   const [allPermissions, setAllPermissions] = useState<any[]>([])
+  const [allMenus, setAllMenus] = useState<any[]>([])
   const [searchName, setSearchName] = useState('')
+  const [keepAdding, setKeepAdding] = useState(true)
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([])
+  const [selectedTreeKeys, setSelectedTreeKeys] = useState<string[]>([])
+  const [checkedPermIds, setCheckedPermIds] = useState<number[]>([])
 
   useEffect(() => { fetchRoles() }, [params])
-  useEffect(() => { fetchPermissions() }, [])
+  useEffect(() => { fetchPermissionsAndMenus() }, [])
 
-  const fetchPermissions = async () => {
+  const fetchPermissionsAndMenus = async () => {
     try {
-      const res: any = await permissionApi.getPermissions()
-      if (res.code === 0) setAllPermissions(res.data || [])
+      const [permsRes, menusRes]: any = await Promise.all([permissionApi.getPermissions(), permissionApi.getMenus()])
+      if (permsRes?.code === 0) setAllPermissions(permsRes.data || [])
+      if (menusRes?.code === 0) setAllMenus(menusRes.data || [])
     } catch { /* ignore */ }
   }
 
@@ -40,11 +46,25 @@ const Role: React.FC = () => {
 
   const handleCreate = async (values: any) => {
     try {
-      await roleApi.create({ ...values, permission_ids: selectedPermissionIds })
+      const payload: any = {
+        name: String(values.name || '').trim(),
+        description: values.description || undefined,
+        status: values.disabled ? 0 : 1,
+        data_scope: values.data_scope,
+        permission_ids: checkedPermIds,
+      }
+      await roleApi.create(payload)
       message.success('创建成功')
-      setIsCreateModalOpen(false)
-      createForm.resetFields()
-      setSelectedPermissionIds([])
+      if (keepAdding) {
+        createForm.resetFields()
+        setCheckedPermIds([])
+        setSelectedTreeKeys([])
+      } else {
+        setIsCreateModalOpen(false)
+        createForm.resetFields()
+        setCheckedPermIds([])
+        setSelectedTreeKeys([])
+      }
       fetchRoles()
     } catch (e: any) {
       if (!e?.errorFields) message.error(e?.response?.data?.detail || '创建失败')
@@ -53,7 +73,14 @@ const Role: React.FC = () => {
 
   const handleUpdate = async (values: any) => {
     try {
-      await roleApi.update(editingRole.id, { ...values, permission_ids: selectedPermissionIds })
+      const payload: any = {
+        name: String(values.name || '').trim(),
+        description: values.description || undefined,
+        status: values.disabled ? 0 : 1,
+        data_scope: values.data_scope,
+        permission_ids: checkedPermIds,
+      }
+      await roleApi.update(editingRole.id, payload)
       message.success('更新成功')
       setIsEditModalOpen(false)
       fetchRoles()
@@ -70,12 +97,94 @@ const Role: React.FC = () => {
     } catch { /* ignore */ }
   }
 
-  const groupedPermissions: Record<string, any[]> = {}
-  allPermissions.forEach((p: any) => {
-    const module = p.code?.split(':')[0] || 'other'
-    if (!groupedPermissions[module]) groupedPermissions[module] = []
-    groupedPermissions[module].push(p)
-  })
+  const permByMenuId = useMemo(() => {
+    const map = new Map<number, any[]>()
+    for (const p of allPermissions || []) {
+      const mid = Number(p.menu_id || 0)
+      if (!mid) continue
+      const arr = map.get(mid) || []
+      arr.push(p)
+      map.set(mid, arr)
+    }
+    for (const [, arr] of map.entries()) {
+      arr.sort((a: any, b: any) => {
+        const ta = String(a.type || '')
+        const tb = String(b.type || '')
+        if (ta !== tb) return ta === 'menu' ? -1 : 1
+        return Number(a.id) - Number(b.id)
+      })
+    }
+    return map
+  }, [allPermissions])
+
+  type AnyNode = DataNode & { kind: 'group' | 'perm'; perm_id?: number }
+
+  const permissionTreeData: AnyNode[] = useMemo(() => {
+    const build = (menus: any[]): AnyNode[] => {
+      return (menus || []).map((m: any) => {
+        const menuId = Number(m.id)
+        const perms = (permByMenuId.get(menuId) || []).filter((p: any) => p.type === 'button')
+        const viewPerm = (permByMenuId.get(menuId) || []).find((p: any) => p.type === 'menu')
+        const childrenMenus = Array.isArray(m.children) ? m.children : []
+
+        const children: AnyNode[] = []
+        if (childrenMenus.length > 0) children.push(...build(childrenMenus))
+        if (perms.length > 0) {
+          children.push(
+            ...perms.map((p: any) => ({
+              key: `perm_${p.id}`,
+              title: p.name,
+              isLeaf: true,
+              kind: 'perm' as const,
+              perm_id: Number(p.id),
+            })),
+          )
+        }
+
+        if (viewPerm) {
+          return {
+            key: `perm_${viewPerm.id}`,
+            title: m.name,
+            children: children.length > 0 ? children : undefined,
+            kind: 'perm' as const,
+            perm_id: Number(viewPerm.id),
+          }
+        }
+
+        return {
+          key: `menu_${menuId}`,
+          title: m.name,
+          children: children.length > 0 ? children : undefined,
+          kind: 'group' as const,
+        }
+      })
+    }
+    return build(allMenus)
+  }, [allMenus, permByMenuId])
+
+  const allExpandableKeys = useMemo(() => {
+    const keys: string[] = []
+    const walk = (nodes: AnyNode[]) => {
+      for (const n of nodes) {
+        if (Array.isArray(n.children) && n.children.length > 0) {
+          keys.push(String(n.key))
+          walk(n.children as AnyNode[])
+        }
+      }
+    }
+    walk(permissionTreeData)
+    return keys
+  }, [permissionTreeData])
+
+  const allPermIds = useMemo(() => allPermissions.map((p: any) => Number(p.id)).filter((x: any) => Number.isFinite(x)), [allPermissions])
+  const isAllSelected = useMemo(() => allPermIds.length > 0 && allPermIds.every((id) => checkedPermIds.includes(id)), [allPermIds, checkedPermIds])
+
+  const checkedKeys = useMemo(() => checkedPermIds.map((id) => `perm_${id}`), [checkedPermIds])
+
+  const normalizeCheckedKeyList = (keys: any): string[] => {
+    const raw = Array.isArray(keys) ? keys : Array.isArray(keys?.checked) ? keys.checked : []
+    return raw.map((k: any) => String(k))
+  }
 
   const columns = [
     { title: '角色名称', dataIndex: 'name', key: 'name', width: 200 },
@@ -91,10 +200,32 @@ const Role: React.FC = () => {
       render: (_: any, record: any) => (
         <Space>
           <Permission code="role:edit">
+            <Button
+              type="link"
+              onClick={async () => {
+                const nextStatus = record.status === 1 ? 0 : 1
+                try {
+                  await roleApi.update(record.id, { status: nextStatus })
+                  message.success(nextStatus === 1 ? '启用成功' : '禁用成功')
+                  fetchRoles()
+                } catch { /* ignore */ }
+              }}
+            >
+              {record.status === 1 ? '禁用' : '启用'}
+            </Button>
+          </Permission>
+          <Permission code="role:edit">
             <Button type="link" onClick={() => {
               setEditingRole(record)
-              editForm.setFieldsValue({ name: record.name, description: record.description })
-              setSelectedPermissionIds(record.permission_ids || [])
+              editForm.setFieldsValue({
+                name: record.name,
+                description: record.description,
+                disabled: record.status !== 1,
+                data_scope: record.data_scope || 'all',
+              })
+              setCheckedPermIds(record.permission_ids || [])
+              setExpandedKeys(allExpandableKeys)
+              setSelectedTreeKeys([])
               setIsEditModalOpen(true)
             }}>编辑</Button>
           </Permission>
@@ -113,7 +244,14 @@ const Role: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div><h1 style={{ fontSize: 16, margin: 0 }}>角色管理</h1><p style={{ color: 'rgba(0, 0, 0, 0.5)' }}>管理系统角色和权限配置</p></div>
         <Permission code="role:add">
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsCreateModalOpen(true)}>新增角色</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+            createForm.resetFields()
+            createForm.setFieldsValue({ disabled: false, data_scope: 'all' })
+            setCheckedPermIds([])
+            setExpandedKeys(allExpandableKeys)
+            setSelectedTreeKeys([])
+            setIsCreateModalOpen(true)
+          }}>新增角色</Button>
         </Permission>
       </div>
 
@@ -132,26 +270,63 @@ const Role: React.FC = () => {
       </Card>
 
       {/* Create Modal */}
-      <PermissionEditModal
+      <RoleEditModal
         title="新增角色"
         open={isCreateModalOpen}
         form={createForm}
-        selectedPermissionIds={selectedPermissionIds}
-        setSelectedPermissionIds={setSelectedPermissionIds}
-        groupedPermissions={groupedPermissions}
+        isCreate
+        keepAdding={keepAdding}
+        setKeepAdding={setKeepAdding}
+        permissionTreeData={permissionTreeData}
+        expandedKeys={expandedKeys}
+        setExpandedKeys={setExpandedKeys}
+        selectedTreeKeys={selectedTreeKeys}
+        setSelectedTreeKeys={setSelectedTreeKeys}
+        checkedKeys={checkedKeys}
+        onTreeCheck={(keys) => {
+          const ids = normalizeCheckedKeyList(keys)
+            .filter((k) => k.startsWith('perm_'))
+            .map((k) => Number(k.slice('perm_'.length)))
+            .filter((n) => Number.isFinite(n))
+          setCheckedPermIds(ids)
+        }}
+        onTreeSelect={(keys) => setSelectedTreeKeys(keys as string[])}
+        onToggleExpandAll={() => setExpandedKeys((prev) => (prev.length > 0 ? [] : allExpandableKeys))}
+        onToggleCheckAll={() => setCheckedPermIds(isAllSelected ? [] : allPermIds)}
         onFinish={handleCreate}
         onOk={() => createForm.submit()}
-        onCancel={() => { setIsCreateModalOpen(false); createForm.resetFields(); setSelectedPermissionIds([]) }}
+        onCancel={() => {
+          setIsCreateModalOpen(false)
+          createForm.resetFields()
+          setCheckedPermIds([])
+          setSelectedTreeKeys([])
+        }}
       />
 
       {/* Edit Modal */}
-      <PermissionEditModal
+      <RoleEditModal
         title="编辑角色"
         open={isEditModalOpen}
         form={editForm}
-        selectedPermissionIds={selectedPermissionIds}
-        setSelectedPermissionIds={setSelectedPermissionIds}
-        groupedPermissions={groupedPermissions}
+        isCreate={false}
+        keepAdding={false}
+        setKeepAdding={() => {}}
+        permissionTreeData={permissionTreeData}
+        expandedKeys={expandedKeys}
+        setExpandedKeys={setExpandedKeys}
+        selectedTreeKeys={selectedTreeKeys}
+        setSelectedTreeKeys={setSelectedTreeKeys}
+        checkedKeys={checkedKeys}
+        onTreeCheck={(keys) => {
+          const ids = normalizeCheckedKeyList(keys)
+            .filter((k) => k.startsWith('perm_'))
+            .map((k) => Number(k.slice('perm_'.length)))
+            .filter((n) => Number.isFinite(n))
+          setCheckedPermIds(ids)
+        }}
+        onTreeSelect={(keys) => setSelectedTreeKeys(keys as string[])}
+        onToggleExpandAll={() => setExpandedKeys((prev) => (prev.length > 0 ? [] : allExpandableKeys))}
+        onToggleCheckAll={() => setCheckedPermIds(isAllSelected ? [] : allPermIds)}
         onFinish={handleUpdate}
         onOk={() => editForm.submit()}
         onCancel={() => setIsEditModalOpen(false)}
@@ -160,49 +335,105 @@ const Role: React.FC = () => {
   )
 }
 
-interface PermissionEditModalProps {
+interface RoleEditModalProps {
   title: string
   open: boolean
   form: any
-  selectedPermissionIds: number[]
-  setSelectedPermissionIds: (ids: number[] | ((prev: number[]) => number[])) => void
-  groupedPermissions: Record<string, any[]>
+  isCreate: boolean
+  keepAdding: boolean
+  setKeepAdding: (val: boolean) => void
+  permissionTreeData: DataNode[]
+  expandedKeys: string[]
+  setExpandedKeys: (keys: string[]) => void
+  selectedTreeKeys: string[]
+  setSelectedTreeKeys: (keys: string[]) => void
+  checkedKeys: string[]
+  onTreeCheck: (keys: any) => void
+  onTreeSelect: (keys: any) => void
+  onToggleExpandAll: () => void
+  onToggleCheckAll: () => void
   onFinish: (values: any) => void
   onOk: () => void
   onCancel: () => void
 }
 
-const PermissionEditModal = ({ title, open, form, selectedPermissionIds, setSelectedPermissionIds, groupedPermissions, onFinish, onOk, onCancel }: PermissionEditModalProps) => (
-  <Modal title={title}
-    open={open} onOk={onOk} onCancel={onCancel} width={600}>
-    <Form form={form} layout="vertical" onFinish={onFinish}>
-      <Form.Item label="角色名称" name="name" rules={[{ required: true, message: '请输入角色名称' }]}><Input /></Form.Item>
-      <Form.Item label="描述" name="description"><Input.TextArea rows={2} /></Form.Item>
-      <Form.Item label="权限配置">
-        <div style={{ maxHeight: 360, overflow: 'auto', border: '1px solid #d9d9d9', borderRadius: 4, padding: 12 }}>
-          {Object.entries(groupedPermissions).map(([module, perms]) => (
-            <div key={module} style={{ marginBottom: 12 }}>
-              <div style={{ fontWeight: 'bold', marginBottom: 6, color: '#666' }}>{module}</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {(perms as any[]).map((p: any) => (
-                  <Tag key={p.id} color={selectedPermissionIds.includes(p.id) ? 'blue' : 'default'}
-                    style={{ cursor: 'pointer', margin: 0, padding: '2px 8px' }}
-                    onClick={() => {
-                      if (selectedPermissionIds.includes(p.id)) {
-                        setSelectedPermissionIds(selectedPermissionIds.filter((id: number) => id !== p.id))
-                      } else {
-                        setSelectedPermissionIds([...selectedPermissionIds, p.id])
-                      }
-                    }}>
-                    {p.name}
-                  </Tag>
-                ))}
-              </div>
-            </div>
-          ))}
-          {Object.keys(groupedPermissions).length === 0 && <p style={{ color: '#999' }}>暂无权限数据</p>}
+const RoleEditModal = ({
+  title,
+  open,
+  form,
+  isCreate,
+  keepAdding,
+  setKeepAdding,
+  permissionTreeData,
+  expandedKeys,
+  setExpandedKeys,
+  selectedTreeKeys,
+  setSelectedTreeKeys,
+  checkedKeys,
+  onTreeCheck,
+  onTreeSelect,
+  onToggleExpandAll,
+  onToggleCheckAll,
+  onFinish,
+  onOk,
+  onCancel,
+}: RoleEditModalProps) => (
+  <Modal title={title} open={open} onOk={onOk} onCancel={onCancel} width={640} okText={isCreate ? '新增' : '保存'}>
+    <Form form={form} layout="vertical" onFinish={onFinish} initialValues={{ disabled: false, data_scope: 'all' }}>
+      <Form.Item label="角色名称" name="name" rules={[{ required: true, message: '请输入角色名称' }]}>
+        <Input placeholder="请输入角色名称" />
+      </Form.Item>
+
+      <Form.Item label="状态" name="disabled" valuePropName="checked">
+        <Checkbox>禁用</Checkbox>
+      </Form.Item>
+
+      <Form.Item label="菜单权限">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+          <Button size="small" onClick={onToggleExpandAll}>
+            展开/折叠
+          </Button>
+          <Button size="small" onClick={onToggleCheckAll}>
+            全选/全不选
+          </Button>
+        </div>
+        <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 8, maxHeight: 360, overflow: 'auto' }}>
+          <Tree
+            checkable
+            showLine
+            treeData={permissionTreeData}
+            expandedKeys={expandedKeys}
+            onExpand={(keys) => setExpandedKeys(keys as string[])}
+            selectedKeys={selectedTreeKeys}
+            onSelect={(keys) => { setSelectedTreeKeys(keys as string[]); onTreeSelect(keys) }}
+            checkedKeys={checkedKeys}
+            onCheck={(keys) => onTreeCheck(keys as any)}
+          />
         </div>
       </Form.Item>
+
+      <Form.Item label="数据权限" name="data_scope" rules={[{ required: true, message: '请选择数据权限' }]}>
+        <Select
+          options={[
+            { label: '全部数据权限', value: 'all' },
+            { label: '所属项目数据权限', value: 'project' },
+            { label: '仅本人数据权限', value: 'self' },
+          ]}
+        />
+      </Form.Item>
+
+      <Form.Item label="备注" name="description">
+        <Input.TextArea rows={2} placeholder="请输入备注" />
+      </Form.Item>
+
+      {isCreate && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Checkbox checked={keepAdding} onChange={(e) => setKeepAdding(e.target.checked)}>
+            继续新增
+          </Checkbox>
+          <div />
+        </div>
+      )}
     </Form>
   </Modal>
 )

@@ -1,11 +1,14 @@
-import { Card, Table, Button, Input, Modal, Form, message, Tabs } from 'antd'
-import { PlusOutlined, SearchOutlined } from '@ant-design/icons'
+import { Card, Table, Button, Input, Modal, Form, message, Tabs, Space, Select } from 'antd'
+import { PlusOutlined, SearchOutlined, LinkOutlined, DisconnectOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { protocolTestApi } from '../../services/api'
 import { Permission } from '../../hooks'
 
 const Protocol: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isConnectModalOpen, setIsConnectModalOpen] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
+  const [connectForm] = Form.useForm()
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
@@ -137,6 +140,23 @@ const Protocol: React.FC = () => {
     { key: 'canfd', label: 'CAN FD协议' },
   ]
 
+  const handleConnect = async () => {
+    try {
+      await connectForm.validateFields()
+      message.success('设备连接成功')
+      setIsConnected(true)
+      setIsConnectModalOpen(false)
+    } catch (e: any) {
+      if (e?.errorFields) return
+      message.error('连接失败')
+    }
+  }
+
+  const handleDisconnect = () => {
+    message.success('设备已断开连接')
+    setIsConnected(false)
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -144,9 +164,16 @@ const Protocol: React.FC = () => {
           <h1 style={{ fontSize: 16, margin: 0 }}>通信协议验证</h1>
           <p style={{ color: 'rgba(0, 0, 0, 0.5)' }}>测试和验证设备通信协议的正确性</p>
         </div>
-        <Permission code="protocol:add">
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建测试</Button>
-        </Permission>
+        <Space>
+          {isConnected ? (
+            <Button danger icon={<DisconnectOutlined />} onClick={handleDisconnect}>断开连接</Button>
+          ) : (
+            <Button type="default" icon={<LinkOutlined />} onClick={() => setIsConnectModalOpen(true)}>连接设备</Button>
+          )}
+          <Permission code="protocol:add">
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建测试</Button>
+          </Permission>
+        </Space>
       </div>
 
       <Card>
@@ -209,6 +236,47 @@ const Protocol: React.FC = () => {
             <p><strong>结果：</strong>{selectedRecord.result || '-'}</p>
           </div>
         )}
+      </Modal>
+      <Modal title="连接设备" open={isConnectModalOpen} onOk={handleConnect}
+        onCancel={() => { setIsConnectModalOpen(false); connectForm.resetFields() }}>
+        <Form form={connectForm} layout="vertical">
+          <Form.Item label="连接方式" name="method" initialValue="tcp" rules={[{ required: true }]}>
+            <Select>
+              <Select.Option value="tcp">TCP/IP</Select.Option>
+              <Select.Option value="serial">串口 (Serial)</Select.Option>
+            </Select>
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prevValues, currentValues) => prevValues.method !== currentValues.method}
+          >
+            {({ getFieldValue }) => {
+              const method = getFieldValue('method')
+              return method === 'tcp' ? (
+                <>
+                  <Form.Item label="IP地址" name="ip" rules={[{ required: true, message: '请输入IP地址' }]}>
+                    <Input placeholder="例如：192.168.1.100" />
+                  </Form.Item>
+                  <Form.Item label="端口" name="port" rules={[{ required: true, message: '请输入端口号' }]}>
+                    <Input type="number" placeholder="例如：8080" />
+                  </Form.Item>
+                </>
+              ) : (
+                <>
+                  <Form.Item label="COM端口" name="com_port" rules={[{ required: true, message: '请选择或输入COM端口' }]}>
+                    <Input placeholder="例如：COM3" />
+                  </Form.Item>
+                  <Form.Item label="波特率" name="baud_rate" initialValue={115200} rules={[{ required: true }]}>
+                    <Select>
+                      <Select.Option value={9600}>9600</Select.Option>
+                      <Select.Option value={115200}>115200</Select.Option>
+                    </Select>
+                  </Form.Item>
+                </>
+              )
+            }}
+          </Form.Item>
+        </Form>
       </Modal>
     </div>
   )

@@ -8,7 +8,7 @@ from .product import Product
 from .burner import Burner
 from .script import Script
 from .task import BurningTask
-from .log import Record, Injection, ProtocolTest, LoginLog, OperationLog
+from .log import Record, Injection, InjectionRun, ProtocolTest, ProtocolSession, ProtocolLog, LoginLog, OperationLog
 from .permission import Menu, Permission, RolePermission
 from .repository import Repository
 
@@ -23,7 +23,10 @@ __all__ = [
     "BurningTask",
     "Record",
     "Injection",
+    "InjectionRun",
     "ProtocolTest",
+    "ProtocolSession",
+    "ProtocolLog",
     "LoginLog",
     "OperationLog",
     "Menu",

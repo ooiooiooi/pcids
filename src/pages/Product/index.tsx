@@ -1,4 +1,4 @@
-import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select } from 'antd'
+import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Upload, Checkbox, Row, Col } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { productApi } from '../../services/api'
@@ -16,6 +16,12 @@ const Product: React.FC = () => {
   const [detailProduct, setDetailProduct] = useState<any>(null)
   const [createForm] = Form.useForm()
   const [editForm] = Form.useForm()
+  const [searchName, setSearchName] = useState('')
+  const [filterChipType, setFilterChipType] = useState<string | undefined>(undefined)
+  const [keepAdding, setKeepAdding] = useState(false)
+  const [createImageUrl, setCreateImageUrl] = useState<string>('')
+  const [editImageUrl, setEditImageUrl] = useState<string>('')
+  const [uploading, setUploading] = useState(false)
 
   useEffect(() => { fetchProducts() }, [params])
 
@@ -28,12 +34,31 @@ const Product: React.FC = () => {
     finally { setLoading(false) }
   }
 
+  const formatTime = (val?: string) => (val ? String(val).replace('T', ' ').substring(0, 16) : '-')
+
   const handleCreate = async (values: any) => {
     try {
-      await productApi.create(values)
+      const payload: any = {
+        name: String(values.name || '').trim(),
+        chip_type: values.chip_type,
+        serial_number: String(values.serial_number || '').trim(),
+        voltage: values.voltage || undefined,
+        temp_range: values.temp_range || undefined,
+        interface: values.interface || undefined,
+        config_description: values.config_description || undefined,
+        usage_description: values.usage_description || undefined,
+        board_image: values.board_image,
+      }
+      await productApi.create(payload)
       message.success('创建成功')
-      setIsCreateModalOpen(false)
-      createForm.resetFields()
+      if (keepAdding) {
+        createForm.resetFields()
+        setCreateImageUrl('')
+      } else {
+        setIsCreateModalOpen(false)
+        createForm.resetFields()
+        setCreateImageUrl('')
+      }
       fetchProducts()
     } catch (e: any) {
       if (!e?.errorFields) message.error(e?.response?.data?.detail || '创建失败')
@@ -42,7 +67,18 @@ const Product: React.FC = () => {
 
   const handleUpdate = async (values: any) => {
     try {
-      await productApi.update(editingProduct.id, values)
+      const payload: any = {
+        name: String(values.name || '').trim(),
+        chip_type: values.chip_type,
+        serial_number: values.serial_number,
+        voltage: values.voltage || undefined,
+        temp_range: values.temp_range || undefined,
+        interface: values.interface || undefined,
+        config_description: values.config_description || undefined,
+        usage_description: values.usage_description || undefined,
+        board_image: values.board_image || undefined,
+      }
+      await productApi.update(editingProduct.id, payload)
       message.success('更新成功')
       setIsEditModalOpen(false)
       fetchProducts()
@@ -66,16 +102,50 @@ const Product: React.FC = () => {
   }
 
   const columns = [
-    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 160, render: (val: string) => val ? val.replace('T', ' ').substring(0, 16) : '-' },
-    { title: '芯片类型', dataIndex: 'chip_type', key: 'chip_type', width: 100, render: (type: string) => <Tag color={chipColorMap[type] || 'default'}>{type}</Tag> },
-    { title: '板卡序列号', dataIndex: 'serial_number', key: 'serial_number', width: 140 },
-    { title: '修改人', dataIndex: 'modified_by', key: 'modified_by', width: 100 },
-    { title: '操作', key: 'action', width: 180,
+    { title: '板卡序列号', dataIndex: 'serial_number', key: 'serial_number', width: 160 },
+    {
+      title: '板卡名称',
+      dataIndex: 'name',
+      key: 'name',
+      width: 240,
+      ellipsis: true,
+    },
+    { title: '芯片类型', dataIndex: 'chip_type', key: 'chip_type', width: 120, render: (type: string) => <Tag color={chipColorMap[type] || 'default'}>{type}</Tag> },
+    { title: '修改时间', dataIndex: 'updated_at', key: 'updated_at', width: 180, render: (val: string) => formatTime(val) },
+    { title: '修改人', dataIndex: 'modified_by', key: 'modified_by', width: 120, render: (v: string) => v || '-' },
+    {
+      title: '板卡图片',
+      dataIndex: 'board_image',
+      key: 'board_image',
+      width: 120,
+      render: (url: string) => url ? <img src={url} alt="board" style={{ width: 56, height: 36, objectFit: 'cover', borderRadius: 4 }} /> : '-',
+    },
+    { title: '操作', key: 'action', width: 200,
       render: (_: any, record: any) => (
         <Space>
           <Button type="link" onClick={() => { setDetailProduct(record); setIsDetailOpen(true) }}>详情</Button>
           <Permission code="product:edit">
-            <Button type="link" onClick={() => { setEditingProduct(record); editForm.setFieldsValue(record); setIsEditModalOpen(true) }}>编辑</Button>
+            <Button
+              type="link"
+              onClick={() => {
+                setEditingProduct(record)
+                editForm.setFieldsValue({
+                  name: record.name,
+                  chip_type: record.chip_type,
+                  serial_number: record.serial_number,
+                  voltage: record.voltage,
+                  temp_range: record.temp_range,
+                  interface: record.interface,
+                  config_description: record.config_description,
+                  usage_description: record.usage_description,
+                  board_image: record.board_image,
+                })
+                setEditImageUrl(record.board_image || '')
+                setIsEditModalOpen(true)
+              }}
+            >
+              编辑
+            </Button>
           </Permission>
           <Permission code="product:delete">
             <Button type="link" danger onClick={() => handleDelete(record.id)}>删除</Button>
@@ -83,66 +153,184 @@ const Product: React.FC = () => {
         </Space>
       ),
     },
-    { title: '板卡图片', dataIndex: 'board_image', key: 'board_image', width: 80, render: (url: string) => url ? <img src={url} alt="board" style={{width:56,height:36,objectFit:'cover',borderRadius:4}} /> : '-' },
-    { title: '板卡名称', dataIndex: 'name', key: 'name' },
   ]
 
-  const createFormJSX = (
-    <Form form={createForm} layout="vertical" onFinish={handleCreate}>
-      <Form.Item label="板卡名称" name="name" rules={[{ required: true, message: '请输入板卡名称' }]}><Input /></Form.Item>
-      <Form.Item label="芯片类型" name="chip_type" rules={[{ required: true, message: '请选择芯片类型' }]}>
-        <Select placeholder="请选择芯片类型" options={chipTypes.map((t) => ({ value: t, label: t }))} />
-      </Form.Item>
-      <Form.Item label="板卡序列号" name="serial_number"><Input /></Form.Item>
-      <Form.Item label="板卡图片" name="board_image"><Input placeholder="请输入图片URL" /></Form.Item>
-      <Form.Item label="修改人" name="modified_by"><Input /></Form.Item>
-    </Form>
-  )
+  const uploadTo = async (file: File) => {
+    setUploading(true)
+    try {
+      const res: any = await productApi.uploadImage(file)
+      if (res.code !== 0) throw new Error(res.message || '上传失败')
+      return res?.data?.url as string
+    } finally {
+      setUploading(false)
+    }
+  }
 
-  const editFormJSX = (
-    <Form form={editForm} layout="vertical" onFinish={handleUpdate}>
-      <Form.Item label="板卡名称" name="name" rules={[{ required: true, message: '请输入板卡名称' }]}><Input /></Form.Item>
-      <Form.Item label="芯片类型" name="chip_type" rules={[{ required: true, message: '请选择芯片类型' }]}>
-        <Select placeholder="请选择芯片类型" options={chipTypes.map((t) => ({ value: t, label: t }))} />
+  const formBody = (form: any, imageUrl: string, setImageUrl: (v: string) => void, onFinish: (v: any) => void) => (
+    <Form form={form} layout="vertical" onFinish={onFinish}>
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="板卡名称" name="name" rules={[{ required: true, message: '请输入板卡名称' }]}>
+            <Input placeholder="请输入板卡名称" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="芯片类型" name="chip_type" rules={[{ required: true, message: '请选择芯片类型' }]}>
+            <Select placeholder="请选择芯片类型" options={chipTypes.map((t) => ({ value: t, label: t }))} />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="序列号" name="serial_number" rules={[{ required: true, message: '请输入序列号' }]}>
+            <Input placeholder="请输入序列号" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="工作电压" name="voltage">
+            <Input placeholder="请输入工作电压" />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="工作温度范围" name="temp_range">
+            <Input placeholder="请输入工作温度范围" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="通信接口" name="interface">
+            <Input placeholder="请输入通信接口" />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Form.Item label="配置说明" name="config_description">
+        <Input.TextArea placeholder="请输入内容" autoSize={{ minRows: 3, maxRows: 3 }} />
       </Form.Item>
-      <Form.Item label="板卡序列号" name="serial_number"><Input /></Form.Item>
-      <Form.Item label="板卡图片" name="board_image"><Input placeholder="请输入图片URL" /></Form.Item>
-      <Form.Item label="修改人" name="modified_by"><Input /></Form.Item>
+
+      <Form.Item label="使用说明" name="usage_description">
+        <Input.TextArea placeholder="请输入内容" autoSize={{ minRows: 3, maxRows: 3 }} />
+      </Form.Item>
+
+      <Form.Item
+        label="板卡图片"
+        name="board_image"
+        rules={[{ required: true, message: '请上传板卡图片' }]}
+      >
+        <div>
+          <Upload
+            accept=".jpg,.jpeg,.png"
+            showUploadList={false}
+            beforeUpload={(file) => {
+              const ok = file.type === 'image/jpeg' || file.type === 'image/png'
+              if (!ok) message.error('只能上传 jpg/png 文件')
+              return ok || Upload.LIST_IGNORE
+            }}
+            customRequest={async (options: any) => {
+              try {
+                const url = await uploadTo(options.file as File)
+                setImageUrl(url)
+                form.setFieldValue('board_image', url)
+                options.onSuccess?.({ url })
+              } catch (e: any) {
+                options.onError?.(e)
+                message.error(e?.response?.data?.detail || e?.message || '上传失败')
+              }
+            }}
+          >
+            <Button type="link" disabled={uploading}>上传图片</Button>
+            <span style={{ marginLeft: 8, color: 'rgba(0,0,0,0.45)' }}>只能上传 jpg/png 文件</span>
+          </Upload>
+          {imageUrl ? (
+            <div style={{ marginTop: 8 }}>
+              <img src={imageUrl} alt="board" style={{ width: 120, height: 80, objectFit: 'cover', borderRadius: 6 }} />
+            </div>
+          ) : null}
+        </div>
+      </Form.Item>
     </Form>
   )
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-        <div><h1 style={{ fontSize: 16, margin: 0 }}>产品管理</h1><p style={{ color: 'rgba(0, 0, 0, 0.5)' }}>管理芯片型号和产品配置</p></div>
-        <Permission code="product:add">
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsCreateModalOpen(true)}>新增板卡</Button>
-        </Permission>
+      <div style={{ marginBottom: 12 }}>
+        <h1 style={{ fontSize: 16, margin: 0 }}>产品管理</h1>
       </div>
 
       <Card>
-        <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
-          <Input placeholder="请输入板卡名称" style={{ width: 200 }}
-            onPressEnter={(e: any) => setParams({ ...params, page: 1, keyword: e.target.value })} />
-          <Select placeholder="芯片类型" style={{ width: 150 }} allowClear
-            options={[{ value: '', label: '全部' }, ...chipTypes.map((t) => ({ value: t, label: t }))]}
-            onChange={(val) => setParams({ ...params, chip_type: val || undefined })} />
-          <Button type="primary" onClick={() => setParams({ ...params, page: 1 })}>搜索</Button>
+        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+          <Permission code="product:add">
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsCreateModalOpen(true)}>新增板卡</Button>
+          </Permission>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ color: 'rgba(0,0,0,0.65)' }}>芯片类型</span>
+            <Select
+              placeholder="请选择芯片"
+              style={{ width: 180 }}
+              allowClear
+              value={filterChipType}
+              options={chipTypes.map((t) => ({ value: t, label: t }))}
+              onChange={(val) => setFilterChipType(val)}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <Input
+              placeholder="请输入板卡名称"
+              style={{ width: 260 }}
+              allowClear
+              value={searchName}
+              onChange={(e) => setSearchName(e.target.value)}
+              onPressEnter={() => setParams({ ...params, page: 1, keyword: searchName, chip_type: filterChipType })}
+            />
+            <Button type="primary" onClick={() => setParams({ ...params, page: 1, keyword: searchName, chip_type: filterChipType })}>搜索</Button>
+          </div>
         </div>
-        <div style={{ marginBottom: 8, color: 'rgba(51,51,51,1)', fontSize: 13 }}>共 {total} 条</div>
         <Table columns={columns} dataSource={dataSource} rowKey="id" loading={loading}
-          pagination={{ total, pageSize: params.page_size, current: params.page,
-            onChange: (page) => setParams({ ...params, page }) }} />
+          pagination={{
+            total,
+            pageSize: params.page_size,
+            current: params.page,
+            showSizeChanger: false,
+            showQuickJumper: false,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page) => setParams({ ...params, page }),
+          }} />
       </Card>
 
-      <Modal title="新增板卡" open={isCreateModalOpen} onOk={() => createForm.submit()}
-        onCancel={() => { setIsCreateModalOpen(false); createForm.resetFields() }}>
-        {createFormJSX}
+      <Modal
+        title="新增板卡"
+        open={isCreateModalOpen}
+        width={900}
+        onOk={() => createForm.submit()}
+        okText="新增"
+        cancelText="取消"
+        onCancel={() => { setIsCreateModalOpen(false); createForm.resetFields(); setCreateImageUrl(''); setKeepAdding(false) }}
+        footer={(_, { OkBtn, CancelBtn }) => (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Checkbox checked={keepAdding} onChange={(e) => setKeepAdding(e.target.checked)}>继续新增</Checkbox>
+            <div>
+              <CancelBtn />
+              <OkBtn />
+            </div>
+          </div>
+        )}
+      >
+        {formBody(createForm, createImageUrl, setCreateImageUrl, handleCreate)}
       </Modal>
 
-      <Modal title="编辑板卡" open={isEditModalOpen} onOk={() => editForm.submit()}
-        onCancel={() => setIsEditModalOpen(false)}>
-        {editFormJSX}
+      <Modal
+        title="编辑板卡"
+        open={isEditModalOpen}
+        width={900}
+        onOk={() => editForm.submit()}
+        okText="保存"
+        cancelText="取消"
+        onCancel={() => { setIsEditModalOpen(false); setEditImageUrl('') }}
+      >
+        {formBody(editForm, editImageUrl, setEditImageUrl, handleUpdate)}
       </Modal>
 
       <Modal title="板卡详情" open={isDetailOpen} onCancel={() => setIsDetailOpen(false)} footer={null}>
@@ -151,8 +339,14 @@ const Product: React.FC = () => {
             <p><strong>板卡名称：</strong>{detailProduct.name}</p>
             <p><strong>芯片类型：</strong>{detailProduct.chip_type}</p>
             <p><strong>板卡序列号：</strong>{detailProduct.serial_number || '-'}</p>
-            <p><strong>修改时间：</strong>{detailProduct.updated_at?.replace('T', ' ').substring(0, 19) || '-'}</p>
+            <p><strong>工作电压：</strong>{detailProduct.voltage || '-'}</p>
+            <p><strong>工作温度范围：</strong>{detailProduct.temp_range || '-'}</p>
+            <p><strong>通信接口：</strong>{detailProduct.interface || '-'}</p>
+            <p><strong>配置说明：</strong>{detailProduct.config_description || '-'}</p>
+            <p><strong>使用说明：</strong>{detailProduct.usage_description || '-'}</p>
+            <p><strong>修改时间：</strong>{formatTime(detailProduct.updated_at) || '-'}</p>
             <p><strong>修改人：</strong>{detailProduct.modified_by || '-'}</p>
+            <p><strong>板卡图片：</strong>{detailProduct.board_image ? <img src={detailProduct.board_image} alt="board" style={{ width: 160, height: 110, objectFit: 'cover', borderRadius: 6 }} /> : '-'}</p>
           </div>
         )}
       </Modal>

@@ -99,6 +99,16 @@ const Injection: React.FC = () => {
     }
   }
 
+  const handleExecute = async (id: number) => {
+    try {
+      await injectionApi.execute(id)
+      message.success('注入任务已开始执行')
+      fetchData()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '执行失败')
+    }
+  }
+
   const scenarioColumns = [
     {
       title: '异常类型', dataIndex: 'type', key: 'type',
@@ -113,6 +123,9 @@ const Injection: React.FC = () => {
       title: '操作', key: 'action',
       render: (_: any, record: any) => (
         <Space>
+          <Permission code="injection:execute">
+            <Button type="link" onClick={() => handleExecute(record.id)}>执行</Button>
+          </Permission>
           <Button type="link" onClick={() => { setSelectedRecord(record); setIsDetailOpen(true) }}>详情</Button>
           <Permission code="injection:delete">
             <Popconfirm title="确认删除" onConfirm={() => handleDelete(record.id)}>

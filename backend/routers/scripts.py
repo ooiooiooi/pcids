@@ -14,6 +14,43 @@ from backend.utils.permission import require_permission
 
 router = APIRouter()
 
+import asyncio
+import random
+import time
+from fastapi import Depends, HTTPException, Query, BackgroundTasks
+
+@router.post("/{script_id}/execute", response_model=Response)
+async def execute_script(
+    script_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("script:execute"))
+):
+    """
+    模拟执行自动化测试脚本
+    """
+    script = db.query(Script).filter(Script.id == script_id).first()
+    if not script:
+        raise HTTPException(status_code=404, detail="脚本不存在")
+
+    script.status = 1 # 执行中
+    db.commit()
+
+    # 模拟执行耗时
+    await asyncio.sleep(3)
+
+    is_success = random.choice([True, True, False])
+    script.status = 2 if is_success else -1
+    script.result = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 脚本执行{'成功' if is_success else '失败'}。\n\n" \
+                    f"执行日志:\n" \
+                    f"Step 1: 初始化环境 ... OK\n" \
+                    f"Step 2: 连接硬件 ... {'OK' if is_success else 'FAILED'}\n" \
+                    f"{'Step 3: 运行测试用例 ... OK' if is_success else ''}"
+
+    db.commit()
+
+    return {"code": 0, "message": "脚本执行完成", "data": {"status": script.status, "result": script.result}}
+
 
 def script_to_dict(s):
     return {
@@ -25,6 +62,8 @@ def script_to_dict(s):
         "associated_board": s.associated_board,
         "associated_burner": s.associated_burner,
         "modified_by": s.modified_by,
+        "status": getattr(s, "status", 0),
+        "result": getattr(s, "result", None),
         "created_at": s.created_at,
         "updated_at": s.updated_at,
     }

@@ -20,6 +20,57 @@ router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+from datetime import datetime, timedelta
+
+@router.get("/active", response_model=Response)
+async def get_active_users(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("user:view"))
+):
+    """获取当前在线（活跃）用户列表"""
+    five_mins_ago = datetime.utcnow() - timedelta(minutes=5)
+    active_users = db.query(User).filter(User.last_active_at >= five_mins_ago).all()
+    
+    users_data = []
+    for user in active_users:
+        users_data.append({
+            "id": user.id,
+            "username": user.username,
+            "real_name": user.real_name,
+            "role": user.role.name if user.role else None,
+            "last_active_at": user.last_active_at.isoformat() if user.last_active_at else None
+        })
+        
+    return {
+        "code": 0,
+        "message": "获取成功",
+        "data": users_data
+    }
+
+@router.post("/{user_id}/kick", response_model=Response)
+async def kick_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("user:edit"))
+):
+    """踢出用户（清除活跃状态）"""
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="不能踢出自己")
+        
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+        
+    user.last_active_at = None
+    db.commit()
+    
+    return {
+        "code": 0,
+        "message": "已成功将该用户踢出，释放许可"
+    }
+
 @router.get("", response_model=PaginatedResponse)
 async def get_users(
     page: int = Query(1, ge=1),

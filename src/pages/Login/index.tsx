@@ -44,6 +44,7 @@ const Login: React.FC = () => {
       navigate('/')
     } catch (error: any) {
       console.error('Login failed:', error)
+      message.error(error?.response?.data?.detail || error?.message || '登录失败，请检查账号密码或网络连接')
     } finally {
       setLoading(false)
     }

@@ -19,3 +19,5 @@ class Script(Base, TimestampMixin):
     associated_board: Mapped[Optional[str]] = mapped_column(String(200))
     associated_burner: Mapped[Optional[str]] = mapped_column(String(200))
     modified_by: Mapped[Optional[str]] = mapped_column(String(50))
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[Optional[str]] = mapped_column(Text)

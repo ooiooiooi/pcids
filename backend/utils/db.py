@@ -392,6 +392,7 @@ def seed_mock_data():
             ll = LoginLog(
                 user_id=(i % 3) + 1,
                 ip_address=f"192.168.1.{50+i}",
+                log_type="login",
                 login_time=now - timedelta(days=7-i, hours=i*2),
                 result=login_results[i % len(login_results)],
             )
@@ -404,6 +405,7 @@ def seed_mock_data():
         for i in range(15):
             ol = OperationLog(
                 user_id=(i % 3) + 1,
+                ip_address=f"192.168.1.{100+i}",
                 module=modules[i % len(modules)],
                 action=actions[i % len(actions)],
                 operation_time=now - timedelta(days=6-i, hours=i),
@@ -422,10 +424,72 @@ def seed_mock_data():
         db.close()
 
 
+def ensure_schema():
+    if engine.dialect.name != "sqlite":
+        return
+
+    def ensure_column(table: str, column: str, ddl_type: str):
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            existing = {r[1] for r in rows}
+            if column in existing:
+                return
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            conn.commit()
+
+    ensure_column("records", "created_by_user_id", "INTEGER")
+    ensure_column("records", "repository_id", "INTEGER")
+    ensure_column("records", "project_key", "VARCHAR(200)")
+    ensure_column("records", "remark", "VARCHAR(500)")
+    ensure_column("login_logs", "log_type", "VARCHAR(20)")
+    ensure_column("operation_logs", "ip_address", "VARCHAR(50)")
+    ensure_column("tasks", "repository_id", "INTEGER")
+    ensure_column("tasks", "serial_number", "VARCHAR(100)")
+    ensure_column("tasks", "keep_local", "INTEGER")
+    ensure_column("tasks", "integrity", "INTEGER")
+    ensure_column("tasks", "expected_checksum", "VARCHAR(128)")
+    ensure_column("tasks", "current_md5", "VARCHAR(64)")
+    ensure_column("tasks", "current_sha256", "VARCHAR(128)")
+    ensure_column("tasks", "integrity_passed", "INTEGER")
+    ensure_column("tasks", "version_check", "INTEGER")
+    ensure_column("tasks", "history_checksum", "VARCHAR(128)")
+    ensure_column("tasks", "consistency_passed", "INTEGER")
+    ensure_column("tasks", "override_confirmed", "INTEGER")
+    ensure_column("tasks", "created_by_user_id", "INTEGER")
+    ensure_column("tasks", "attempt_count", "INTEGER")
+    ensure_column("tasks", "max_retries", "INTEGER")
+    ensure_column("tasks", "rollback_count", "INTEGER")
+    ensure_column("tasks", "rollback_result", "TEXT")
+    ensure_column("tasks", "last_error", "TEXT")
+    ensure_column("tasks", "agent_url", "VARCHAR(500)")
+    ensure_column("tasks", "script_id", "INTEGER")
+    ensure_column("scripts", "status", "INTEGER")
+    ensure_column("scripts", "result", "TEXT")
+    ensure_column("scripts", "ide_name", "VARCHAR(100)")
+    ensure_column("scripts", "associated_board", "VARCHAR(200)")
+    ensure_column("scripts", "associated_burner", "VARCHAR(200)")
+    ensure_column("products", "usage_description", "TEXT")
+    ensure_column("products", "board_image", "VARCHAR(500)")
+    ensure_column("products", "created_by", "VARCHAR(50)")
+    ensure_column("products", "modified_by", "VARCHAR(50)")
+    ensure_column("repositories", "version", "VARCHAR(100)")
+    ensure_column("repositories", "file_url", "VARCHAR(500)")
+    ensure_column("repositories", "size", "INTEGER")
+    ensure_column("repositories", "md5", "VARCHAR(64)")
+    ensure_column("repositories", "sha256", "VARCHAR(128)")
+    ensure_column("repositories", "download_count", "INTEGER")
+    ensure_column("repositories", "last_download_time", "DATETIME")
+    ensure_column("repositories", "created_by_user_id", "INTEGER")
+    ensure_column("repositories", "project_key", "VARCHAR(200)")
+    ensure_column("repositories", "permission_config_json", "TEXT")
+    ensure_column("users", "codearts_config_json", "TEXT")
+
+
 def init_db():
     """初始化数据库，创建所有表"""
     from backend.models.base import Base
     Base.metadata.create_all(bind=engine)
+    ensure_schema()
 
     db = SessionLocal()
 

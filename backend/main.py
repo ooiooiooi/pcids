@@ -1,25 +1,81 @@
 """
 FastAPI 应用入口
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
+from datetime import datetime
+import os
 import uvicorn
 
-from backend.utils.db import init_db
+from backend.utils.db import init_db, SessionLocal
+from backend.models.log import OperationLog
 from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories
+from backend.routers.auth import SECRET_KEY, ALGORITHM
+from jose import jwt, JWTError
 
+class OperationLogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method not in ["POST", "PUT", "DELETE"]:
+            return await call_next(request)
+            
+        response = await call_next(request)
+            
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return response
+            
+        token = auth_header.split(" ")[1]
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+        except JWTError:
+            username = None
+            
+        if not username:
+            return response
+            
+        path = request.url.path
+        if "/api/" not in path or "/api/auth/login" in path:
+            return response
+            
+        parts = path.split("/")
+        module = parts[2] if len(parts) > 2 else "unknown"
+        action_map = {"POST": "创建", "PUT": "更新", "DELETE": "删除"}
+        action = f"{action_map.get(request.method, request.method)} {path}"
+        ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+        
+        db = SessionLocal()
+        try:
+            from backend.models.user import User
+            user = db.query(User).filter(User.username == username).first()
+            if user:
+                log = OperationLog(
+                    user_id=user.id,
+                    ip_address=ip,
+                    module=module,
+                    action=action,
+                    operation_time=datetime.utcnow(),
+                    result="成功" if response.status_code < 400 else "失败"
+                )
+                db.add(log)
+                db.commit()
+        except Exception as e:
+            print("Log error:", e)
+        finally:
+            db.close()
+            
+        return response
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 启动时初始化数据库
     init_db()
     print("数据库初始化完成")
     yield
-    # 关闭时清理资源
     print("应用关闭")
-
 
 app = FastAPI(
     title="程控安装部署系统 API",
@@ -27,6 +83,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+app.add_middleware(OperationLogMiddleware)
 
 # 配置 CORS（允许 Electron 访问）
 app.add_middleware(
@@ -51,6 +109,9 @@ app.include_router(records.router, prefix="/api/records", tags=["履历记录"])
 app.include_router(injections.router, prefix="/api/injections", tags=["异常注入"])
 app.include_router(protocol_tests.router, prefix="/api/protocol-tests", tags=["通信协议测试"])
 app.include_router(repositories.router, prefix="/api/repositories", tags=["制品仓库"])
+
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 @app.get("/health")

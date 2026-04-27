@@ -19,3 +19,7 @@ class Product(Base, TimestampMixin):
     temp_range: Mapped[Optional[str]] = mapped_column(String(50))
     interface: Mapped[Optional[str]] = mapped_column(String(100))
     config_description: Mapped[Optional[str]] = mapped_column(Text)
+    usage_description: Mapped[Optional[str]] = mapped_column(Text)
+    board_image: Mapped[Optional[str]] = mapped_column(String(500))
+    created_by: Mapped[Optional[str]] = mapped_column(String(50))
+    modified_by: Mapped[Optional[str]] = mapped_column(String(50))

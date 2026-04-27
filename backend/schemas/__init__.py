@@ -66,15 +66,21 @@ class RoleBase(BaseModel):
     permission_ids: Optional[List[int]] = []
 
 
-class RoleCreate(RoleBase):
+class RoleCreate(BaseModel):
     """创建角色请求"""
-    pass
+    name: str
+    description: Optional[str] = None
+    status: Optional[int] = 1
+    data_scope: Optional[str] = "all"
+    permission_ids: Optional[List[int]] = None
 
 
 class RoleUpdate(BaseModel):
     """更新角色请求"""
     name: Optional[str] = None
     description: Optional[str] = None
+    status: Optional[int] = None
+    data_scope: Optional[str] = None
     permission_ids: Optional[List[int]] = None
 
 
@@ -102,11 +108,23 @@ class ProductBase(BaseModel):
     temp_range: Optional[str] = None
     interface: Optional[str] = None
     config_description: Optional[str] = None
+    usage_description: Optional[str] = None
+    board_image: Optional[str] = None
+    created_by: Optional[str] = None
+    modified_by: Optional[str] = None
 
 
-class ProductCreate(ProductBase):
+class ProductCreate(BaseModel):
     """创建产品请求"""
-    pass
+    name: str = Field(..., min_length=1, max_length=100)
+    chip_type: str
+    serial_number: str = Field(..., min_length=1, max_length=100)
+    voltage: Optional[str] = None
+    temp_range: Optional[str] = None
+    interface: Optional[str] = None
+    config_description: Optional[str] = None
+    usage_description: Optional[str] = None
+    board_image: str
 
 
 class ProductUpdate(BaseModel):
@@ -118,6 +136,8 @@ class ProductUpdate(BaseModel):
     temp_range: Optional[str] = None
     interface: Optional[str] = None
     config_description: Optional[str] = None
+    usage_description: Optional[str] = None
+    board_image: Optional[str] = None
 
 
 class ProductResponse(ProductBase):
@@ -211,7 +231,9 @@ class ScriptResponse(ScriptBase):
 class TaskBase(BaseModel):
     """任务基础模式"""
     software_name: str = Field(..., min_length=1, max_length=200)
+    repository_id: Optional[int] = None
     executable: Optional[str] = None
+    serial_number: Optional[str] = None
     board_name: Optional[str] = None
     target_ip: Optional[str] = None
     target_port: Optional[int] = None
@@ -220,6 +242,16 @@ class TaskBase(BaseModel):
     result: Optional[str] = None
     product_id: Optional[int] = None
     burner_id: Optional[int] = None
+    keep_local: Optional[int] = None
+    integrity: Optional[int] = None
+    expected_checksum: Optional[str] = None
+    current_md5: Optional[str] = None
+    current_sha256: Optional[str] = None
+    integrity_passed: Optional[int] = None
+    version_check: Optional[int] = None
+    history_checksum: Optional[str] = None
+    consistency_passed: Optional[int] = None
+    override_confirmed: Optional[int] = None
 
 
 class TaskCreate(TaskBase):
@@ -233,6 +265,12 @@ class TaskUpdate(BaseModel):
     result: Optional[str] = None
     product_id: Optional[int] = None
     burner_id: Optional[int] = None
+    keep_local: Optional[int] = None
+    integrity: Optional[int] = None
+    expected_checksum: Optional[str] = None
+    version_check: Optional[int] = None
+    history_checksum: Optional[str] = None
+    override_confirmed: Optional[int] = None
 
 
 class TaskResponse(TaskBase):
@@ -255,6 +293,7 @@ class RecordBase(BaseModel):
     ip_address: Optional[str] = None
     operation_time: datetime
     result: Optional[str] = None
+    remark: Optional[str] = None
     log_data: Optional[str] = None
 
 
@@ -276,9 +315,17 @@ class RecordResponse(RecordBase):
 class RepositoryBase(BaseModel):
     """仓库基础模式"""
     name: str = Field(..., min_length=1, max_length=200)
+    project_key: Optional[str] = None
     repo_id: Optional[str] = None
     tenant: Optional[str] = None
     description: Optional[str] = None
+    version: Optional[str] = None
+    file_url: Optional[str] = None
+    size: Optional[int] = None
+    md5: Optional[str] = None
+    sha256: Optional[str] = None
+    download_count: Optional[int] = None
+    last_download_time: Optional[datetime] = None
 
 
 class RepositoryCreate(RepositoryBase):
@@ -292,6 +339,11 @@ class RepositoryUpdate(BaseModel):
     repo_id: Optional[str] = None
     tenant: Optional[str] = None
     description: Optional[str] = None
+    version: Optional[str] = None
+    file_url: Optional[str] = None
+    size: Optional[int] = None
+    md5: Optional[str] = None
+    sha256: Optional[str] = None
 
 
 class RepositoryResponse(RepositoryBase):
