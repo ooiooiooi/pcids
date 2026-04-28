@@ -198,6 +198,8 @@ export const logApi = {
     request.get('/logs/login', { params }),
   getOperationLogs: (params?: { page?: number; page_size?: number; module?: string; start_date?: string; end_date?: string }) =>
     request.get('/logs/operation', { params }),
+  clearLoginLogs: () => request.delete('/logs/login/clear'),
+  clearOperationLogs: () => request.delete('/logs/operation/clear'),
 }
 
 // 制品仓库服务

@@ -93,6 +93,18 @@ async def get_login_logs(
     }
 
 
+@router.delete("/login/clear", response_model=Response)
+async def clear_login_logs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("log:execute"))
+):
+    """清空登录日志"""
+    db.query(LoginLog).delete()
+    db.commit()
+    return {"code": 0, "message": "登录日志清空成功"}
+
+
 @router.get("/operation", response_model=PaginatedResponse)
 async def get_operation_logs(
     page: int = Query(1, ge=1),
@@ -141,3 +153,15 @@ async def get_operation_logs(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.delete("/operation/clear", response_model=Response)
+async def clear_operation_logs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("log:execute"))
+):
+    """清空操作日志"""
+    db.query(OperationLog).delete()
+    db.commit()
+    return {"code": 0, "message": "操作日志清空成功"}

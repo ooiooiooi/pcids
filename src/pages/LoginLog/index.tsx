@@ -1,5 +1,5 @@
-import { Table, Input, Select, DatePicker, Button, Tag } from 'antd'
-import { SearchOutlined } from '@ant-design/icons'
+import { Table, Input, Select, DatePicker, Button, Tag, message, Popconfirm } from 'antd'
+import { SearchOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { logApi } from '../../services/api'
 import dayjs from 'dayjs'
@@ -43,11 +43,20 @@ const LoginLog: React.FC = () => {
 
   const handleSearch = () => {
     setParams({ ...params, page: 1 })
-    fetchLogs()
   }
 
   const handleReset = () => {
     setParams({ page: 1, page_size: 10, keyword: '', type: '', start_date: '', end_date: '' })
+  }
+
+  const handleClear = async () => {
+    try {
+      await logApi.clearLoginLogs()
+      message.success('登录日志清空成功')
+      setParams({ ...params, page: 1 })
+    } catch {
+      // ignore
+    }
   }
 
   const columns = [
@@ -96,40 +105,47 @@ const LoginLog: React.FC = () => {
         <p style={{ color: 'rgba(0, 0, 0, 0.5)' }}>查看用户登录历史记录</p>
       </div>
 
-      <div style={{ marginBottom: 16, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-        <Input
-          placeholder="请输入IP地址/用户"
-          style={{ width: 200 }}
-          prefix={<SearchOutlined />}
-          value={params.keyword}
-          onChange={(e) => setParams({ ...params, keyword: e.target.value })}
-          onPressEnter={handleSearch}
-        />
-        <Select
-          placeholder="全部类型"
-          style={{ width: 122 }}
-          allowClear
-          value={params.type || undefined}
-          onChange={(val) => setParams({ ...params, type: val || '' })}
-          options={[
-            { value: 'login', label: '登录' },
-            { value: 'logout', label: '登出' },
-          ]}
-        />
-        <RangePicker
-          showTime
-          placeholder={['开始时间', '结束时间']}
-          style={{ width: 380 }}
-          onChange={(dates) => {
-            setParams({
-              ...params,
-              start_date: dates?.[0] ? dates[0].format('YYYY-MM-DD HH:mm:ss') : '',
-              end_date: dates?.[1] ? dates[1].format('YYYY-MM-DD HH:mm:ss') : '',
-            })
-          }}
-        />
-        <Button type="primary" onClick={handleSearch}>搜索</Button>
-        <Button onClick={handleReset} type="link" style={{ fontSize: 12, color: '#1890ff' }}>清空</Button>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <Input
+            placeholder="请输入IP地址/用户"
+            style={{ width: 200 }}
+            prefix={<SearchOutlined />}
+            value={params.keyword}
+            onChange={(e) => setParams({ ...params, keyword: e.target.value })}
+            onPressEnter={handleSearch}
+          />
+          <Select
+            placeholder="全部类型"
+            style={{ width: 122 }}
+            allowClear
+            value={params.type || undefined}
+            onChange={(val) => setParams({ ...params, type: val || '' })}
+            options={[
+              { value: 'login', label: '登录' },
+              { value: 'logout', label: '登出' },
+            ]}
+          />
+          <RangePicker
+            showTime
+            placeholder={['开始时间', '结束时间']}
+            style={{ width: 380 }}
+            onChange={(dates) => {
+              setParams({
+                ...params,
+                start_date: dates?.[0] ? dates[0].format('YYYY-MM-DD HH:mm:ss') : '',
+                end_date: dates?.[1] ? dates[1].format('YYYY-MM-DD HH:mm:ss') : '',
+              })
+            }}
+          />
+          <Button type="primary" onClick={handleSearch}>搜索</Button>
+          <Button onClick={handleReset} type="link" style={{ fontSize: 12, color: '#1890ff' }}>重置</Button>
+        </div>
+        <div>
+          <Popconfirm title="确定要清空所有登录日志吗？" onConfirm={handleClear} okText="确定" cancelText="取消">
+            <Button danger icon={<DeleteOutlined />}>清空全部日志</Button>
+          </Popconfirm>
+        </div>
       </div>
 
       <div style={{ marginBottom: 8, color: 'rgba(51,51,51,1)', fontSize: 13 }}>
