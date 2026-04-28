@@ -2,16 +2,23 @@
   "name": "pcids",
   "version": "1.0.0",
   "description": "程控安装部署系统 - Programmatic Control Installation & Deployment System",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
+    "build": "tsc && vite build && npm run build:electron",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "preview": "vite preview",
+    "package": "electron-builder",
+    "package:mac": "electron-builder --mac",
+    "package:win": "electron-builder --win",
+    "package:linux": "electron-builder --linux"
   },
   "keywords": [
     "python",
     "fastapi",
     "sqlite",
-    "deployment"
+    "deployment",
+    "electron"
   ],
   "author": "Herman_",
   "license": "MIT",
@@ -21,6 +28,8 @@
     "@types/react-dom": "^19.0.2",
     "@ant-design/charts": "^2.2.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.7.2",
     "vite": "^6.0.6"
   },
@@ -33,5 +42,37 @@
     "react-router-dom": "^7.1.1",
     "recharts": "^2.15.0",
     "zustand": "^5.0.3"
+  },
+  "build": {
+    "appId": "com.pcids.app",
+    "productName": "程控安装部署系统",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": ["dmg", "zip"],
+      "icon": "build/icon.icns"
+    },
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "build/icon.png"
+    }
   }
 }
