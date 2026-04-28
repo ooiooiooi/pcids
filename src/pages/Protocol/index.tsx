@@ -13,6 +13,8 @@ const Protocol: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
   const [total, setTotal] = useState(0)
+  const [txCount, setTxCount] = useState(13)
+  const [rxCount, setRxCount] = useState(11)
   const [page, setPage] = useState(1)
   const [keyword, setKeyword] = useState('')
   const [activeTab, setActiveTab] = useState('test')
@@ -174,7 +176,13 @@ const Protocol: React.FC = () => {
     try {
       const values = await protocolForm.validateFields()
       console.log('Sending data:', values)
+      setTxCount(c => c + 1)
       message.success('数据发送成功')
+      
+      // Simulate receiving an ACK after sending
+      setTimeout(() => {
+        setRxCount(c => c + 1)
+      }, 500)
     } catch (e) {
       console.error(e)
     }
@@ -477,8 +485,8 @@ const Protocol: React.FC = () => {
                     <SwapOutlined /> 通信日志
                   </div>
                   <Space>
-                    <Button type="text" icon={<DeleteOutlined />} size="small" style={{ color: '#86909c' }}>清空</Button>
-                    <Badge color="green" text="统计 Tx 13 / Rx 11" style={{ background: '#f6ffed', padding: '2px 8px', borderRadius: 4, border: '1px solid #b7eb8f' }} />
+                    <Button type="text" icon={<DeleteOutlined />} size="small" style={{ color: '#86909c' }} onClick={() => { setTxCount(0); setRxCount(0); setDataSource([]) }}>清空</Button>
+                    <Badge color="green" text={`统计 Tx ${txCount} / Rx ${rxCount}`} style={{ background: '#f6ffed', padding: '2px 8px', borderRadius: 4, border: '1px solid #b7eb8f' }} />
                   </Space>
                 </div>
                 <div style={{ flex: 1, border: '1px solid #f0f0f0', borderRadius: 8, overflow: 'hidden' }}>
