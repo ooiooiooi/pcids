@@ -4,7 +4,158 @@
 import asyncio
 import json
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, Response as FastAPIResponse
+
+def _build_protocol_report_html(session: ProtocolSession, logs: list, print_mode: bool) -> str:
+    target = session.target or "未知设备"
+    protocol = session.protocol or "未知协议"
+    status_text = "已连接" if session.status == 1 else "已断开"
+    
+    script = ""
+    if print_mode:
+        script = """
+<script>
+  window.onload = () => {
+    window.print();
+    setTimeout(() => window.close(), 500);
+  }
+</script>
+"""
+
+    log_rows = ""
+    for log in logs:
+        dir_color = "#16a34a" if log.direction == "Rx" else ("#2563eb" if log.direction == "Tx" else "#64748b")
+        log_rows += f"""
+        <tr>
+            <td>{log.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}</td>
+            <td style="color: {dir_color}; font-weight: bold;">{log.direction}</td>
+            <td>{log.frame_id or '-'}</td>
+            <td>{log.dlc if log.dlc is not None else '-'}</td>
+            <td>{log.data or '-'}</td>
+        </tr>
+        """
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>通信协议验证报告_{session.id}</title>
+  <style>
+    body {{ font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding: 24px; color: #0f172a; max-width: 1000px; margin: 0 auto; }}
+    h1 {{ text-align: center; margin: 0 0 6px; }}
+    .sub {{ text-align: center; color: #64748b; margin: 0 0 24px; font-size: 14px; }}
+    .info-card {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 8px; margin-bottom: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    .info-item {{ display: flex; flex-direction: column; gap: 4px; }}
+    .info-label {{ color: #64748b; font-size: 13px; text-transform: uppercase; }}
+    .info-value {{ font-weight: 500; color: #0f172a; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }}
+    th, td {{ border: 1px solid #e2e8f0; padding: 10px 12px; text-align: left; }}
+    th {{ background: #f1f5f9; color: #475569; font-weight: 600; }}
+    tr:nth-child(even) {{ background: #f8fafc; }}
+    .footer {{ margin-top: 32px; text-align: right; color: #94a3b8; font-size: 12px; border-top: 1px solid #e2e8f0; padding-top: 16px; }}
+    @media print {{
+      @page {{ margin: 1cm; }}
+      body {{ -webkit-print-color-adjust: exact; padding: 0; max-width: 100%; }}
+      .info-card {{ background: #f8fafc !important; }}
+      th {{ background: #f1f5f9 !important; }}
+    }}
+  </style>
+</head>
+<body>
+  <h1>通信协议验证测试报告</h1>
+  <p class="sub">报告编号：PR-{session.id}-{datetime.now().strftime('%Y%m%d')} | 测试人员：{session.executor or '-'}</p>
+  
+  <div class="info-card">
+    <div class="info-item">
+      <span class="info-label">测试对象 (Target)</span>
+      <span class="info-value">{target}</span>
+    </div>
+    <div class="info-item">
+      <span class="info-label">验证协议 (Protocol)</span>
+      <span class="info-value" style="text-transform: uppercase;">{protocol}</span>
+    </div>
+    <div class="info-item">
+      <span class="info-label">会话状态 (Status)</span>
+      <span class="info-value">{status_text}</span>
+    </div>
+    <div class="info-item">
+      <span class="info-label">统计数据 (Statistics)</span>
+      <span class="info-value">发送 (Tx): {session.tx_count} | 接收 (Rx): {session.rx_count}</span>
+    </div>
+  </div>
+
+  <h3 style="margin-bottom: 12px; color: #334155; border-left: 4px solid #3b82f6; padding-left: 8px;">通信日志记录</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 180px;">时间戳 (Timestamp)</th>
+        <th style="width: 80px;">方向 (Dir)</th>
+        <th style="width: 120px;">标识/引脚 (ID/Pin)</th>
+        <th style="width: 80px;">DLC/端口</th>
+        <th>数据/状态 (Data/Status)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {log_rows}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    报告生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 程控安装部署系统
+  </div>
+  {script}
+</body>
+</html>"""
+
+
+@router.get("/{session_id}/report/html")
+async def download_protocol_report_html(
+    session_id: int,
+    print: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("protocol:view")),
+):
+    session = db.query(ProtocolSession).filter(ProtocolSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="测试记录不存在")
+        
+    logs = db.query(ProtocolLog).filter(ProtocolLog.session_id == session_id).order_by(ProtocolLog.timestamp.asc()).all()
+    html = _build_protocol_report_html(session, logs, bool(print))
+    headers = {"Content-Disposition": f'attachment; filename="protocol_report_{session.id}.html"'}
+    return HTMLResponse(content=html, headers=headers)
+
+@router.get("/{session_id}/report/csv")
+async def download_protocol_report_csv(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("protocol:view")),
+):
+    import csv
+    import io
+    session = db.query(ProtocolSession).filter(ProtocolSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="测试记录不存在")
+        
+    logs = db.query(ProtocolLog).filter(ProtocolLog.session_id == session_id).order_by(ProtocolLog.timestamp.asc()).all()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["时间戳", "方向", "标识/引脚", "DLC/端口", "数据/状态"])
+    
+    for log in logs:
+        writer.writerow([
+            log.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+            log.direction,
+            log.frame_id or '',
+            log.dlc if log.dlc is not None else '',
+            log.data or ''
+        ])
+        
+    headers = {"Content-Disposition": f'attachment; filename="protocol_report_{session.id}.csv"'}
+    return FastAPIResponse(content=output.getvalue(), media_type="text/csv; charset=utf-8", headers=headers)
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
