@@ -1,8 +1,7 @@
 import { Card, Table, Button, Input, Modal, Form, message, Tabs, Space, Select, Row, Col, Switch, Menu, Badge } from 'antd'
-import { PlusOutlined, SearchOutlined, LinkOutlined, DisconnectOutlined, SwapOutlined, DeleteOutlined, SendOutlined } from '@ant-design/icons'
+import { SearchOutlined, LinkOutlined, DisconnectOutlined, SwapOutlined, DeleteOutlined, SendOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { protocolTestApi } from '../../services/api'
-import { Permission } from '../../hooks'
 
 const Protocol: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -357,11 +356,10 @@ const Protocol: React.FC = () => {
       return (
         <div style={{ 
           background: '#fafafa', 
-          border: '1px solid #f0f0f0', 
-          borderRadius: 4, 
+          border: 'none', 
           padding: 16, 
           fontFamily: 'monospace', 
-          height: 'calc(100vh - 350px)',
+          height: '100%',
           overflowY: 'auto'
         }}>
           {ethLogData.map((log, index) => (
@@ -405,38 +403,31 @@ const Protocol: React.FC = () => {
     })
 
     return (
-      <Table
-        columns={columns}
-        dataSource={dataSource}
-        rowKey="id"
-        loading={loading}
-        pagination={false}
-        scroll={{ y: 'calc(100vh - 350px)' }}
-        size="small"
-      />
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Table
+          columns={columns}
+          dataSource={dataSource}
+          rowKey="id"
+          loading={loading}
+          pagination={false}
+          scroll={{ y: 'calc(100vh - 400px)' }}
+          size="middle"
+          style={{ flex: 1 }}
+        />
+      </div>
     )
   }
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <h1 style={{ fontSize: 16, margin: 0 }}>通信协议验证</h1>
           <p style={{ color: 'rgba(0, 0, 0, 0.5)' }}>测试和验证设备通信协议的正确性</p>
         </div>
-        <Space>
-          {isConnected ? (
-            <Button danger icon={<DisconnectOutlined />} onClick={handleDisconnect}>断开连接</Button>
-          ) : (
-            <Button type="default" icon={<LinkOutlined />} onClick={() => setIsConnectModalOpen(true)}>连接设备</Button>
-          )}
-          <Permission code="protocol:add">
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建测试</Button>
-          </Permission>
-        </Space>
       </div>
 
-      <Card>
+      <Card style={{ flex: 1, display: 'flex', flexDirection: 'column' }} bodyStyle={{ padding: '0 24px 24px', flex: 1, display: 'flex', flexDirection: 'column' }}>
         <Tabs
           activeKey={activeTab}
           onChange={(key) => { setActiveTab(key); setPage(1) }}
@@ -447,39 +438,52 @@ const Protocol: React.FC = () => {
         />
 
         {activeTab === 'test' && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
-              <Select defaultValue="stm32f407" style={{ width: 200 }}>
+          <div style={{ marginTop: 16, flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', gap: 16, marginBottom: 24, alignItems: 'center' }}>
+              <Select defaultValue="stm32f407" style={{ width: 240 }}>
                 <Select.Option value="stm32f407">STM32F407开发板</Select.Option>
                 <Select.Option value="ti">TI开发板</Select.Option>
               </Select>
-              <Button type="link" icon={<LinkOutlined />} onClick={() => setIsConnectModalOpen(true)}>连接设备</Button>
+              {isConnected ? (
+                <Button type="link" danger icon={<DisconnectOutlined />} onClick={handleDisconnect}>断开连接</Button>
+              ) : (
+                <Button type="link" icon={<LinkOutlined />} onClick={() => setIsConnectModalOpen(true)}>连接设备</Button>
+              )}
             </div>
             
-            <Row gutter={24}>
+            <Row gutter={40} style={{ flex: 1 }}>
               <Col span={4}>
                 <Menu
                   mode="inline"
                   selectedKeys={[protocolSubTab]}
                   items={protocolSubTabs}
                   onClick={({ key }) => { setProtocolSubTab(key); setPage(1) }}
-                  style={{ borderRight: 0, background: 'transparent' }}
+                  style={{ 
+                    borderRight: 'none', 
+                    background: 'transparent',
+                    fontSize: 14,
+                    color: '#4e5969'
+                  }}
                 />
               </Col>
               <Col span={8}>
-                {renderProtocolForm()}
+                <div style={{ background: '#fafafa', padding: 24, borderRadius: 8, height: '100%', border: '1px solid #f0f0f0' }}>
+                  {renderProtocolForm()}
+                </div>
               </Col>
-              <Col span={12} style={{ borderLeft: '1px solid #f0f0f0', paddingLeft: 24 }}>
+              <Col span={12} style={{ display: 'flex', flexDirection: 'column' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                   <div style={{ fontSize: 16, fontWeight: 'bold', color: '#1890ff', display: 'flex', alignItems: 'center', gap: 8 }}>
                     <SwapOutlined /> 通信日志
                   </div>
                   <Space>
-                    <Button type="text" icon={<DeleteOutlined />} size="small">清空</Button>
+                    <Button type="text" icon={<DeleteOutlined />} size="small" style={{ color: '#86909c' }}>清空</Button>
                     <Badge color="green" text="统计 Tx 13 / Rx 11" style={{ background: '#f6ffed', padding: '2px 8px', borderRadius: 4, border: '1px solid #b7eb8f' }} />
                   </Space>
                 </div>
-                {renderLogTable()}
+                <div style={{ flex: 1, border: '1px solid #f0f0f0', borderRadius: 8, overflow: 'hidden' }}>
+                  {renderLogTable()}
+                </div>
               </Col>
             </Row>
           </div>
