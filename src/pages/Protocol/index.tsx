@@ -1,4 +1,4 @@
-import { Card, Table, Button, Input, Modal, Form, message, Tabs, Space, Select, Row, Col, Switch, Menu, Badge } from 'antd'
+import { Card, Table, Button, Input, Modal, Form, message, Tabs, Space, Select, Row, Col, Switch, Menu, Badge, Empty } from 'antd'
 import { SearchOutlined, LinkOutlined, DisconnectOutlined, SwapOutlined, DeleteOutlined, SendOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { protocolTestApi } from '../../services/api'
@@ -421,6 +421,20 @@ const Protocol: React.FC = () => {
           scroll={{ y: 'calc(100vh - 400px)' }}
           size="middle"
           style={{ flex: 1 }}
+          locale={{
+            emptyText: (
+              <div style={{ padding: '40px 0' }}>
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={
+                    <span style={{ color: '#86909c' }}>
+                      暂无数据
+                    </span>
+                  }
+                />
+              </div>
+            )
+          }}
         />
       </div>
     )
