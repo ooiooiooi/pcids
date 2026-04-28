@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Form, Input, Button, Checkbox, Card, message } from 'antd'
+import { Form, Input, Button, Checkbox, Card, App as AntdApp } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { authApi } from '../../services/api'
 import { permissionApi } from '../../services/permission'
@@ -13,6 +13,7 @@ interface LoginForm {
 
 const Login: React.FC = () => {
   const navigate = useNavigate()
+  const { message } = AntdApp.useApp()
   const [loading, setLoading] = useState(false)
   const [remember, setRemember] = useState(false)
   const { setPermissions, setMenus } = usePermission()
