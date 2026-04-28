@@ -59,7 +59,10 @@ request.interceptors.response.use(
       } else if (status === 404) {
         message.error('资源不存在')
       } else {
-        message.error(data?.detail || '请求失败')
+        // 对于其他错误，如果也是登录接口，也交由页面处理
+        if (!error.config.url?.includes('/auth/login')) {
+          message.error(data?.detail || '请求失败')
+        }
       }
     } else {
       message.error('网络错误，请检查后端服务是否启动')
