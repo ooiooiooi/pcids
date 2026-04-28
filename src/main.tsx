@@ -52,7 +52,7 @@ const theme = {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ConfigProvider locale={zhCN} theme={theme}>
-      <AntdApp>
+      <AntdApp style={{ height: '100%' }}>
         <HashRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
