@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.utils.db import get_db
 from backend.models.user import User
 from backend.models.task import BurningTask
+from backend.models.burner import Burner
 from backend.models.repository import Repository
 from backend.models.script import Script
 from backend.models.log import Record
@@ -44,6 +45,14 @@ async def execute_task(
     
     if task.status == 1:
         raise HTTPException(status_code=400, detail="任务正在执行中")
+
+    repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
+    if not repo or not repo.file_url:
+        raise HTTPException(status_code=400, detail="任务未绑定有效制品文件")
+
+    is_burning_task = bool(task.product_id or task.board_name)
+    if is_burning_task and not getattr(task, "script_id", None):
+        raise HTTPException(status_code=400, detail="烧录任务未绑定执行脚本")
 
     # 更新状态为执行中
     task.status = 1
@@ -178,10 +187,12 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
                 except Exception:
                     pass
 
-            await asyncio.sleep(2)
-            ok = random.choice([True, True, False])
-            task.last_error = None if ok else "脚本执行失败"
-            task.result = "烧录环境脚本执行成功" if ok else "烧录环境脚本执行失败"
+            await asyncio.sleep(1)
+            # Local mode has no separate environment bootstrap script.
+            # Treat this stage as a readiness check once the bound script exists.
+            ok = True
+            task.last_error = None
+            task.result = "烧录环境检查通过"
             db.commit()
             return ok
 
@@ -270,7 +281,7 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
                         elif script.type == "python":
                             script_ext = ".py"
                             
-                        with tempfile.NamedNamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
+                        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
                             temp_script.write(script.content)
                             temp_script_path = temp_script.name
                             
@@ -432,12 +443,27 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
         db.close()
 
 
-def task_to_dict(t):
+def task_to_dict(db: Session, t):
+    repo = db.query(Repository).filter(Repository.id == t.repository_id).first() if getattr(t, "repository_id", None) else None
+    creator = db.query(User).filter(User.id == t.created_by_user_id).first() if getattr(t, "created_by_user_id", None) else None
+    burner = db.query(Burner).filter(Burner.id == t.burner_id).first() if getattr(t, "burner_id", None) else None
+    script = db.query(Script).filter(Script.id == t.script_id).first() if getattr(t, "script_id", None) else None
+    executor_name = None
+    if creator:
+        executor_name = getattr(creator, "display_name", None) or getattr(creator, "username", None)
     return {
         "id": t.id,
         "created_by_user_id": getattr(t, "created_by_user_id", None),
+        "executor": executor_name,
         "repository_id": t.repository_id,
+        "repository_name": getattr(repo, "name", None) if repo else None,
+        "project_key": getattr(repo, "project_key", None) if repo else None,
+        "tenant": getattr(repo, "tenant", None) if repo else None,
+        "file_url": getattr(repo, "file_url", None) if repo else None,
+        "burner_name": getattr(burner, "name", None) if burner else None,
+        "script_name": getattr(script, "name", None) if script else None,
         "software_name": t.software_name,
+        "software_version": getattr(repo, "version", None) if repo else None,
         "executable": t.executable,
         "serial_number": getattr(t, "serial_number", None),
         "board_name": t.board_name,
@@ -478,7 +504,14 @@ def _consistency_conclusion(t: BurningTask) -> str:
     return "未比对"
 
 
-def _build_consistency_report_html(t: BurningTask, repo: Optional[Repository], print_mode: bool) -> str:
+def _build_consistency_report_html(
+    t: BurningTask,
+    repo: Optional[Repository],
+    burner: Optional[Burner],
+    script_obj: Optional[Script],
+    executor_name: Optional[str],
+    print_mode: bool,
+) -> str:
     target = t.serial_number or t.board_name or t.target_ip or "未知"
     artifact = None
     if repo:
@@ -527,10 +560,16 @@ def _build_consistency_report_html(t: BurningTask, repo: Optional[Repository], p
   <p class="sub">目标：{target}</p>
   <div class="card">
     <div class="row"><div class="k">任务ID</div><div class="v">{t.id}</div></div>
+    <div class="row"><div class="k">执行人</div><div class="v">{executor_name or '-'}</div></div>
     <div class="row"><div class="k">制品</div><div class="v">{artifact or '-'}</div></div>
+    <div class="row"><div class="k">烧录器</div><div class="v">{getattr(burner, "name", None) or '-'}</div></div>
+    <div class="row"><div class="k">执行脚本</div><div class="v">{getattr(script_obj, "name", None) or '-'}</div></div>
     <div class="row"><div class="k">历史标准版本校验码</div><div class="v">{t.history_checksum or '-'}</div></div>
     <div class="row"><div class="k">当前可执行文件校验码</div><div class="v">{t.current_sha256 or t.current_md5 or '-'}</div></div>
     <div class="row"><div class="k">版本一致性结论</div><div class="v"><span class="tag">{conclusion}</span></div></div>
+    <div class="row"><div class="k">执行次数</div><div class="v">{getattr(t, "attempt_count", None) or 0} / {getattr(t, "max_retries", None) or 0}</div></div>
+    <div class="row"><div class="k">回滚次数</div><div class="v">{getattr(t, "rollback_count", None) or 0}</div></div>
+    <div class="row"><div class="k">回滚结果</div><div class="v">{getattr(t, "rollback_result", None) or '-'}</div></div>
   </div>
   <div class="footer">导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
   {script}
@@ -538,7 +577,13 @@ def _build_consistency_report_html(t: BurningTask, repo: Optional[Repository], p
 </html>"""
 
 
-def _build_consistency_report_csv(t: BurningTask, repo: Optional[Repository]) -> str:
+def _build_consistency_report_csv(
+    t: BurningTask,
+    repo: Optional[Repository],
+    burner: Optional[Burner],
+    script_obj: Optional[Script],
+    executor_name: Optional[str],
+) -> str:
     import csv
     import io
 
@@ -552,14 +597,20 @@ def _build_consistency_report_csv(t: BurningTask, repo: Optional[Repository]) ->
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["任务ID", "目标", "制品", "历史标准版本校验码", "当前校验码", "一致性结论"])
+    writer.writerow(["任务ID", "目标", "执行人", "制品", "烧录器", "执行脚本", "历史标准版本校验码", "当前校验码", "一致性结论", "执行次数", "回滚次数", "回滚结果"])
     writer.writerow([
         t.id,
         target,
+        executor_name or "",
         artifact or "",
+        getattr(burner, "name", None) or "",
+        getattr(script_obj, "name", None) or "",
         t.history_checksum or "",
         t.current_sha256 or t.current_md5 or "",
         _consistency_conclusion(t),
+        f"{getattr(t, 'attempt_count', None) or 0} / {getattr(t, 'max_retries', None) or 0}",
+        getattr(t, "rollback_count", None) or 0,
+        getattr(t, "rollback_result", None) or "",
     ])
     return output.getvalue()
 
@@ -586,6 +637,8 @@ async def get_tasks(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     status: Optional[int] = None,
+    board_name: Optional[str] = None,
+    keyword: Optional[str] = None,
     sort_field: Optional[str] = None,
     sort_order: Optional[str] = "desc",
     db: Session = Depends(get_db),
@@ -598,6 +651,10 @@ async def get_tasks(
 
     if status is not None:
         query = query.filter(BurningTask.status == status)
+    if board_name:
+        query = query.filter(BurningTask.board_name == board_name)
+    if keyword:
+        query = query.filter(BurningTask.software_name.ilike(f"%{keyword.strip()}%"))
 
     # 排序处理
     if sort_field and hasattr(BurningTask, sort_field):
@@ -613,7 +670,7 @@ async def get_tasks(
     return {
         "code": 0,
         "message": "success",
-        "data": [task_to_dict(t) for t in tasks],
+        "data": [task_to_dict(db, t) for t in tasks],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -625,14 +682,18 @@ async def download_consistency_report_html(
     task_id: int,
     print: int = 0,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:report")),
 ):
     task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
-    html = _build_consistency_report_html(task, repo, bool(print))
+    burner = db.query(Burner).filter(Burner.id == task.burner_id).first() if task.burner_id else None
+    script_obj = db.query(Script).filter(Script.id == task.script_id).first() if task.script_id else None
+    creator = db.query(User).filter(User.id == task.created_by_user_id).first() if task.created_by_user_id else None
+    executor_name = (getattr(creator, "display_name", None) or getattr(creator, "username", None)) if creator else None
+    html = _build_consistency_report_html(task, repo, burner, script_obj, executor_name, bool(print))
     headers = {"Content-Disposition": f'attachment; filename="consistency_report_task_{task.id}.html"'}
     return HTMLResponse(content=html, headers=headers)
 
@@ -641,14 +702,18 @@ async def download_consistency_report_html(
 async def download_consistency_report_csv(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:report")),
 ):
     task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
-    csv_text = _build_consistency_report_csv(task, repo)
+    burner = db.query(Burner).filter(Burner.id == task.burner_id).first() if task.burner_id else None
+    script_obj = db.query(Script).filter(Script.id == task.script_id).first() if task.script_id else None
+    creator = db.query(User).filter(User.id == task.created_by_user_id).first() if task.created_by_user_id else None
+    executor_name = (getattr(creator, "display_name", None) or getattr(creator, "username", None)) if creator else None
+    csv_text = _build_consistency_report_csv(task, repo, burner, script_obj, executor_name)
     headers = {"Content-Disposition": f'attachment; filename="consistency_report_task_{task.id}.csv"'}
     return FastAPIResponse(content=csv_text, media_type="text/csv; charset=utf-8", headers=headers)
 
@@ -678,7 +743,7 @@ async def create_task(
 async def override_task(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:add")),
 ):
     task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
@@ -693,7 +758,7 @@ async def override_task(
 async def get_task(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    _current_user: User = Depends(get_current_user)
 ):
     """获取任务详情"""
     task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
@@ -703,7 +768,7 @@ async def get_task(
     return {
         "code": 0,
         "message": "success",
-        "data": task_to_dict(task)
+        "data": task_to_dict(db, task)
     }
 
 
@@ -712,7 +777,7 @@ async def update_task(
     task_id: int,
     task_data: TaskUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:add")),
 ):
     """更新任务"""
@@ -736,7 +801,7 @@ async def update_task(
 async def delete_task(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:delete")),
 ):
     """删除任务"""

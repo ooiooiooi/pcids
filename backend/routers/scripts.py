@@ -47,7 +47,7 @@ async def execute_script(
         elif script.type == "python":
             script_ext = ".py"
 
-        with tempfile.NamedNamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
+        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
             temp_script.write(script.content or "")
             temp_script_path = temp_script.name
 

@@ -174,14 +174,20 @@ export const scriptApi = {
 
 // 烧录任务服务
 export const taskApi = {
-  getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string }) =>
+  getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string; board_name?: string; keyword?: string }) =>
     request.get('/tasks', { params }),
-  create: (data: { software_name: string; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number }) =>
+  create: (data: { software_name: string; repository_id?: number; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string }) =>
     request.post('/tasks', data),
   update: (id: number, data: Record<string, any>) =>
     request.put(`/tasks/${id}`, data),
   delete: (id: number) => request.delete(`/tasks/${id}`),
   getById: (id: number) => request.get(`/tasks/${id}`),
+  execute: (id: number) => request.post(`/tasks/${id}/execute`),
+  override: (id: number) => request.post(`/tasks/${id}/override`),
+  getConsistencyReportHtml: (id: number, print = false) =>
+    request.get(`/tasks/${id}/consistency/report/html`, { params: { print: print ? 1 : 0 }, responseType: 'blob' as any }),
+  getConsistencyReportCsv: (id: number) =>
+    request.get(`/tasks/${id}/consistency/report/csv`, { responseType: 'blob' as any }),
 }
 
 // 履历记录服务
@@ -206,12 +212,19 @@ export const logApi = {
 export const repositoryApi = {
   getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
     request.get('/repositories', { params }),
-  create: (data: { name: string; repo_id?: string; tenant?: string; description?: string }) =>
+  create: (data: { name: string; repo_id?: string; tenant?: string; description?: string; version?: string; file_url?: string; size?: number; md5?: string; sha256?: string; project_key?: string }) =>
     request.post('/repositories', data),
   update: (id: number, data: Record<string, any>) =>
     request.put(`/repositories/${id}`, data),
   delete: (id: number) => request.delete(`/repositories/${id}`),
   getById: (id: number) => request.get(`/repositories/${id}`),
+  uploadFile: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request.post('/repositories/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
   getTree: (params?: { mode?: 'online' | 'offline' }) => request.get('/repositories/tree', { params }),
   getCodeartsConfig: () => request.get('/repositories/codearts/config'),
   setCodeartsConfig: (data: Record<string, any>) => request.post('/repositories/codearts/config', data),

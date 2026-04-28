@@ -16,6 +16,7 @@ import {
   Tabs,
   Tag,
   Tree,
+  Upload,
 } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import {
@@ -95,10 +96,14 @@ const Repository: React.FC = () => {
 
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
   const [isSyncConfigOpen, setIsSyncConfigOpen] = useState(false)
+  const [isUploadOpen, setIsUploadOpen] = useState(false)
   const [rightTabKey, setRightTabKey] = useState<'detail' | 'members' | 'permissions'>('detail')
 
   const [createProjectForm] = Form.useForm()
   const [syncConfigForm] = Form.useForm()
+  const [uploadForm] = Form.useForm()
+  const [uploadSubmitting, setUploadSubmitting] = useState(false)
+  const [uploadedFileMeta, setUploadedFileMeta] = useState<any>(null)
 
   const [membersLoading, setMembersLoading] = useState(false)
   const [members, setMembers] = useState<any[]>([])
@@ -360,6 +365,7 @@ const Repository: React.FC = () => {
   const moreMenuItems = [
     { key: 'create-project', label: '新增项目' },
     { key: 'sync-config', label: '当前同步配置' },
+    { key: 'upload-artifact', label: '上传本地制品' },
     { key: 'member-permission', label: '项目成员及权限' },
     { key: 'delete-project', label: '删除当前项目', danger: true },
   ]
@@ -367,6 +373,11 @@ const Repository: React.FC = () => {
   const handleMoreMenuClick = async ({ key }: { key: string }) => {
     if (key === 'create-project') setIsCreateProjectOpen(true)
     if (key === 'sync-config') setIsSyncConfigOpen(true)
+    if (key === 'upload-artifact') {
+      setUploadedFileMeta(null)
+      uploadForm.resetFields()
+      setIsUploadOpen(true)
+    }
     if (key === 'member-permission') {
       const projectKey = ensureProjectKey()
       if (!projectKey) return
@@ -935,6 +946,106 @@ const Repository: React.FC = () => {
         onCancel={() => { setIsSyncConfigOpen(false); syncConfigForm.resetFields() }}
       >
         {createOrSyncProjectFormJSX}
+      </Modal>
+
+      <Modal
+        title="上传本地制品"
+        open={isUploadOpen}
+        width={640}
+        okText="确 定"
+        cancelText="取 消"
+        confirmLoading={uploadSubmitting}
+        onOk={() => uploadForm.submit()}
+        onCancel={() => {
+          if (uploadSubmitting) return
+          setIsUploadOpen(false)
+          setUploadedFileMeta(null)
+          uploadForm.resetFields()
+        }}
+      >
+        <Form
+          layout="vertical"
+          form={uploadForm}
+          onFinish={async (values) => {
+            if (!uploadedFileMeta?.file_url) {
+              message.error('请先上传制品文件')
+              return
+            }
+            setUploadSubmitting(true)
+            try {
+              const payload = {
+                name: String(values.name || '').trim(),
+                version: String(values.version || '').trim() || undefined,
+                description: String(values.description || '').trim() || undefined,
+                project_key: String(values.project_key || '').trim() || undefined,
+                file_url: uploadedFileMeta.file_url,
+                size: uploadedFileMeta.size,
+                md5: uploadedFileMeta.md5,
+                sha256: uploadedFileMeta.sha256,
+              }
+              const res: any = await repositoryApi.create(payload)
+              if (res?.code === 0) {
+                message.success('上传成功')
+                setIsUploadOpen(false)
+                setUploadedFileMeta(null)
+                uploadForm.resetFields()
+                refreshTree()
+              }
+            } catch {
+              /* ignore */
+            } finally {
+              setUploadSubmitting(false)
+            }
+          }}
+        >
+          <Form.Item label="制品名称" name="name" rules={[{ required: true, message: '请输入制品名称' }]}>
+            <Input placeholder="请输入制品名称" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="版本" name="version">
+                <Input placeholder="如 v1.0.0" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="项目标识" name="project_key">
+                <Input placeholder="可选，如 proj_local_demo" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="描述" name="description">
+            <Input.TextArea rows={3} placeholder="请输入描述" />
+          </Form.Item>
+          <Form.Item label="制品文件" required>
+            <Upload
+              maxCount={1}
+              showUploadList
+              fileList={uploadedFileMeta ? [{ uid: '-1', name: uploadedFileMeta.filename || '已上传文件', status: 'done' as const }] : []}
+              customRequest={async (options: any) => {
+                try {
+                  const res: any = await repositoryApi.uploadFile(options.file as File)
+                  if (res?.code === 0) {
+                    setUploadedFileMeta(res.data)
+                    if (!uploadForm.getFieldValue('name')) {
+                      uploadForm.setFieldValue('name', res.data?.filename?.replace(/\.[^.]+$/, '') || '')
+                    }
+                    options.onSuccess?.(res.data)
+                    message.success('文件上传成功')
+                  }
+                } catch (error) {
+                  options.onError?.(error)
+                }
+              }}
+            >
+              <Button type="dashed" icon={<PlusOutlined />}>选择并上传文件</Button>
+            </Upload>
+            {uploadedFileMeta?.file_url ? (
+              <div style={{ marginTop: 12, color: 'rgba(0,0,0,0.65)' }}>
+                已上传：{uploadedFileMeta.filename}，大小：{formatBytes(uploadedFileMeta.size)}
+              </div>
+            ) : null}
+          </Form.Item>
+        </Form>
       </Modal>
 
       <Modal

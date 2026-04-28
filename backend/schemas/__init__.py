@@ -258,6 +258,8 @@ class TaskBase(BaseModel):
     result: Optional[str] = None
     product_id: Optional[int] = None
     burner_id: Optional[int] = None
+    script_id: Optional[int] = None
+    agent_url: Optional[str] = None
     keep_local: Optional[int] = None
     integrity: Optional[int] = None
     expected_checksum: Optional[str] = None
@@ -277,10 +279,16 @@ class TaskCreate(TaskBase):
 
 class TaskUpdate(BaseModel):
     """更新任务请求"""
+    board_name: Optional[str] = None
+    target_ip: Optional[str] = None
+    target_port: Optional[int] = None
+    config_json: Optional[str] = None
     status: Optional[int] = None
     result: Optional[str] = None
     product_id: Optional[int] = None
     burner_id: Optional[int] = None
+    script_id: Optional[int] = None
+    agent_url: Optional[str] = None
     keep_local: Optional[int] = None
     integrity: Optional[int] = None
     expected_checksum: Optional[str] = None
