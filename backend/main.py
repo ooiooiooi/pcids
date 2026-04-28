@@ -42,9 +42,59 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
             return response
             
         parts = path.split("/")
-        module = parts[2] if len(parts) > 2 else "unknown"
-        action_map = {"POST": "创建", "PUT": "更新", "DELETE": "删除"}
-        action = f"{action_map.get(request.method, request.method)} {path}"
+        module = parts[3] if len(parts) > 3 else "unknown"
+        
+        # 模块名称映射
+        module_name_map = {
+            "users": "用户管理",
+            "roles": "角色管理",
+            "products": "产品管理",
+            "burners": "烧录器管理",
+            "scripts": "脚本管理",
+            "tasks": "烧录任务",
+            "logs": "日志管理",
+            "records": "履历记录",
+            "injections": "异常注入",
+            "protocol-tests": "通信协议测试",
+            "repositories": "制品仓库",
+            "auth": "认证",
+            "permissions": "权限管理",
+            "messages": "消息中心"
+        }
+        module_zh = module_name_map.get(module, module)
+        
+        # 操作内容映射与提取
+        action = f"{request.method} {path}"
+        content = ""
+        
+        if request.method == "POST":
+            action_verb = "新建"
+            if module == "tasks" and path.endswith("/execute"):
+                action_verb = "执行"
+                action = f"{action_verb}{module_zh} (ID: {parts[-2]})"
+            elif module == "protocol-tests" and path.endswith("/connect"):
+                action = f"连接通信设备"
+            elif module == "protocol-tests" and path.endswith("/send"):
+                action = f"发送通信协议数据"
+            elif module == "auth" and path.endswith("/logout"):
+                action = "登出系统"
+            else:
+                action = f"{action_verb}{module_zh}"
+        elif request.method == "PUT":
+            action_verb = "更新"
+            if module == "users" and path.endswith("/reset-password"):
+                action = f"重置用户密码 (ID: {parts[-2]})"
+            else:
+                action = f"{action_verb}{module_zh} (ID: {parts[-1]})"
+        elif request.method == "DELETE":
+            action_verb = "删除"
+            if path.endswith("/clear"):
+                action = f"清空{module_zh}"
+            else:
+                action = f"{action_verb}{module_zh} (ID: {parts[-1]})"
+        else:
+            action = f"{request.method} {module_zh}"
+            
         ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
         
         db = SessionLocal()
@@ -55,8 +105,9 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
                 log = OperationLog(
                     user_id=user.id,
                     ip_address=ip,
-                    module=module,
+                    module=module_zh,
                     action=action,
+                    content=content,
                     operation_time=datetime.utcnow(),
                     result="成功" if response.status_code < 400 else "失败"
                 )
