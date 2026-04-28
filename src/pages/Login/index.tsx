@@ -44,7 +44,11 @@ const Login: React.FC = () => {
       navigate('/')
     } catch (error: any) {
       console.error('Login failed:', error)
-      message.error(error?.response?.data?.detail || error?.message || '登录失败，请检查账号密码或网络连接')
+      // 如果后端返回了具体的错误信息 (比如 403 被禁用)，不需要在这里重复 message.error，因为 axios 拦截器已经处理过了
+      // 但为了保险，如果没有通过拦截器展示，这里 fallback 一下
+      if (!error?.response?.data?.detail) {
+        message.error('登录失败，请检查账号密码或网络连接')
+      }
     } finally {
       setLoading(false)
     }

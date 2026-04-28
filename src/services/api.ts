@@ -48,7 +48,11 @@ request.interceptors.response.use(
           window.location.href = '#/login'
         }
       } else if (status === 403) {
-        message.error('无权限访问')
+        if (data?.detail) {
+          message.error(data.detail)
+        } else {
+          message.error('无权限访问')
+        }
       } else if (status === 404) {
         message.error('资源不存在')
       } else {
