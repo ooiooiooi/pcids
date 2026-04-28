@@ -1,6 +1,6 @@
 import { Outlet, useNavigate } from 'react-router-dom'
 import { useState, useEffect, useMemo } from 'react'
-import { Layout, Menu, Badge, Drawer, Modal, Tabs, Form, Input, Button, Upload, message, List } from 'antd'
+import { Layout, Menu, Badge, Drawer, Modal, Tabs, Form, Input, Button, Upload, message, List, Spin } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   DesktopOutlined,
@@ -79,6 +79,7 @@ const App: React.FC = () => {
   const [selectedKey, setSelectedKey] = useState('/workbench')
   const { menus, hasPermission, setPermissions, setMenus } = usePermission()
   const [userInfo, setUserInfo] = useState<any>({})
+  const [isInitializing, setIsInitializing] = useState(true)
   
   // Profile Modal State
   const [isProfileOpen, setIsProfileOpen] = useState(false)
@@ -125,54 +126,58 @@ const App: React.FC = () => {
 
   // Build menu items from stored menu data + permission filtering
   const menuItems: MenuItem[] = useMemo(() => {
+    if (isInitializing) return []
+
+    const buildMenuItems = (menuList: any[]): MenuItem[] => {
+      return menuList
+        .filter((menu) => {
+          // Parent folders with empty path are always included
+          if (!menu.path) return true
+          const pathKey = menu.path.replace(/^\//, '')
+          const permCode = `${pathKey}:view`
+          return hasPermission(permCode)
+        })
+        .map((menu) => {
+          const children = menu.children ? buildMenuItems(menu.children) : []
+          // Only return null if the menu HAD children but ALL were filtered out
+          if (menu.children && menu.children.length > 0 && children.length === 0) return null
+          return getItem(
+            menu.name,
+            menu.path || menu.name, // fallback key for parent folder
+            getIcon(menu.icon) || pathIconMap[menu.path],
+            children.length > 0 ? children : undefined,
+          )
+        })
+        .filter(Boolean) as MenuItem[]
+    }
+
     // If we have backend menu data, use it
     if (menus && menus.length > 0) {
-      const buildMenuItems = (menuList: any[]): MenuItem[] => {
-        return menuList
-          .filter((menu) => {
-            // Parent folders with empty path are always included
-            if (!menu.path) return true
-            const pathKey = menu.path.replace(/^\//, '')
-            const permCode = `${pathKey}:view`
-            return hasPermission(permCode)
-          })
-          .map((menu) => {
-            const children = menu.children ? buildMenuItems(menu.children) : []
-            // Only return null if the menu HAD children but ALL were filtered out
-            if (menu.children.length > 0 && children.length === 0) return null
-            return getItem(
-              menu.name,
-              menu.path,
-              getIcon(menu.icon) || pathIconMap[menu.path],
-              children.length > 0 ? children : undefined,
-            )
-          })
-          .filter(Boolean)
-      }
       return buildMenuItems(menus)
     }
 
     // Fallback to hardcoded menu matching prototype
-    return [
-      getItem('工作台', '/workbench', <DesktopOutlined />),
-      getItem('制品仓库', '/repository', <DatabaseOutlined />),
-      getItem('资产管理', 'asset', <InboxOutlined />, [
-        getItem('产品管理', '/product', <CodeOutlined />),
-        getItem('烧录器管理', '/burner', <FireOutlined />),
-        getItem('脚本管理', '/script', <FileProtectOutlined />),
-      ]),
-      getItem('烧录安装管理', '/burning', <FireOutlined />),
-      getItem('履历记录', '/record', <FileTextOutlined />),
-      getItem('异常注入', '/injection', <BugOutlined />),
-      getItem('通信协议验证', '/protocol', <WifiOutlined />),
-      getItem('系统管理', 'system', <SettingOutlined />, [
-        getItem('用户管理', '/user', <TeamOutlined />),
-        getItem('角色管理', '/role', <TeamOutlined />),
-        getItem('登录日志', '/log/login', <BarChartOutlined />),
-        getItem('操作日志', '/log/operation', <FileTextOutlined />),
-      ]),
+    const baseMenus = [
+      { name: '工作台', path: '/workbench', icon: 'DesktopOutlined', children: [] },
+      { name: '制品仓库', path: '/repository', icon: 'DatabaseOutlined', children: [] },
+      { name: '资产管理', path: '', icon: 'InboxOutlined', children: [
+        { name: '产品管理', path: '/product', icon: 'CodeOutlined', children: [] },
+        { name: '烧录器管理', path: '/burner', icon: 'FireOutlined', children: [] },
+        { name: '脚本管理', path: '/script', icon: 'FileProtectOutlined', children: [] },
+      ]},
+      { name: '烧录安装管理', path: '/burning', icon: 'FireOutlined', children: [] },
+      { name: '履历记录', path: '/record', icon: 'FileTextOutlined', children: [] },
+      { name: '异常注入', path: '/injection', icon: 'BugOutlined', children: [] },
+      { name: '通信协议验证', path: '/protocol', icon: 'WifiOutlined', children: [] },
+      { name: '系统管理', path: '', icon: 'SettingOutlined', children: [
+        { name: '用户管理', path: '/user', icon: 'TeamOutlined', children: [] },
+        { name: '角色管理', path: '/role', icon: 'TeamOutlined', children: [] },
+        { name: '登录日志', path: '/log/login', icon: 'BarChartOutlined', children: [] },
+        { name: '操作日志', path: '/log/operation', icon: 'FileTextOutlined', children: [] },
+      ]},
     ]
-  }, [menus, hasPermission])
+    return buildMenuItems(baseMenus)
+  }, [menus, hasPermission, isInitializing])
 
   useEffect(() => {
     const token = localStorage.getItem('token')
@@ -191,10 +196,39 @@ const App: React.FC = () => {
       if ((menusRes as any).code === 0 && (menusRes as any).data?.length > 0) {
         setMenus((menusRes as any).data)
       }
+      setIsInitializing(false)
     })
-    const path = window.location.hash.replace('#', '') || '/workbench'
-    setSelectedKey(path)
   }, [navigate, setPermissions, setMenus])
+
+  // Handle default route and access control based on menuItems
+  useEffect(() => {
+    if (isInitializing || menuItems.length === 0) return
+
+    const getAccessiblePaths = (items: any[]): string[] => {
+      let paths: string[] = []
+      for (const item of items) {
+        if (!item) continue
+        if (item.key && !item.children) {
+          paths.push(item.key as string)
+        }
+        if (item.children) {
+          paths = [...paths, ...getAccessiblePaths(item.children)]
+        }
+      }
+      return paths
+    }
+
+    const validPaths = getAccessiblePaths(menuItems)
+    const currentPath = window.location.hash.replace('#', '') || '/'
+    let targetPath = currentPath === '/' ? '/workbench' : currentPath
+
+    if (validPaths.length > 0 && !validPaths.includes(targetPath)) {
+      targetPath = validPaths[0]
+      navigate(targetPath, { replace: true })
+    }
+
+    setSelectedKey(targetPath)
+  }, [isInitializing, menuItems, navigate])
 
   const handleMenuClick: MenuProps['onClick'] = (e) => {
     setSelectedKey(e.key)
@@ -320,6 +354,14 @@ const App: React.FC = () => {
     } else {
       pwdForm.validateFields().then(handleUpdatePassword)
     }
+  }
+
+  if (isInitializing) {
+    return (
+      <div style={{ display: 'flex', height: '100vh', justifyContent: 'center', alignItems: 'center' }}>
+        <Spin size="large" />
+      </div>
+    )
   }
 
   return (
