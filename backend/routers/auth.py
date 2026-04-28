@@ -67,7 +67,7 @@ async def get_current_user(
     if user.status != 1:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="账户已被禁用"
+            detail="该账号已被禁用，请联系管理员"
         )
 
     # License 浮动并发验证
@@ -126,12 +126,12 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             ip_address=ip,
             log_type="login",
             login_time=datetime.utcnow(),
-            result="账户已被禁用"
+            result="账号已被禁用"
         ))
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="账户已被禁用"
+            detail="该账号已被禁用，请联系管理员"
         )
 
     # License 浮动并发验证
