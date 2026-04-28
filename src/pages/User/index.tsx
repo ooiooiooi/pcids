@@ -59,7 +59,11 @@ const User: React.FC = () => {
 
   const handleUpdate = async (values: any) => {
     try {
-      await userApi.update(editingUser.id, values)
+      const payload = {
+        ...values,
+        status: values.status ? 1 : 0
+      }
+      await userApi.update(editingUser.id, payload)
       message.success('更新成功')
       setIsEditModalOpen(false)
       fetchUsers()
@@ -125,11 +129,18 @@ const User: React.FC = () => {
       render: (_: any, record: any) => (
         <Space>
           <Permission code="user:edit">
-            <a onClick={() => { setEditingUser(record); editForm.setFieldsValue(record); setIsEditModalOpen(true) }}>编辑</a>
+            <a onClick={() => { 
+              setEditingUser(record); 
+              editForm.setFieldsValue({
+                ...record,
+                status: record.status === 1
+              }); 
+              setIsEditModalOpen(true) 
+            }}>编辑</a>
           </Permission>
           <Permission code="user:reset_pwd">
             <Popconfirm title="确认重置该用户密码？" onConfirm={async () => {
-              try { await userApi.resetPassword(record.id); message.success('密码已重置为默认密码') }
+              try { await userApi.resetPassword(record.id); message.success('密码已重置为默认密码: 123456') }
               catch { /* interceptor handles it */ }
             }}>
               <a>重置密码</a>
@@ -226,15 +237,25 @@ const User: React.FC = () => {
       </Modal>
 
       {/* Edit Modal */}
-      <Modal title="编辑用户" open={isEditModalOpen}
+      <Modal title="用户编辑" open={isEditModalOpen}
         maskClosable={false}
+        width={500}
         onOk={() => editForm.submit()}
         onCancel={() => setIsEditModalOpen(false)}>
         <Form form={editForm} layout="vertical" onFinish={handleUpdate}>
-          <Form.Item label="用户名" name="display_name"><Input /></Form.Item>
-          <Form.Item label="邮箱" name="email"><Input /></Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="用户名" name="display_name" rules={[{ required: true, message: '请输入用户名' }]}><Input placeholder="请输入用户名" /></Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="用户账号" name="username" rules={[{ required: true, message: '请输入用户账号' }]}><Input placeholder="请输入用户账号" disabled /></Form.Item>
+            </Col>
+          </Row>
           <Form.Item label="角色" name="role_id"><Select placeholder="请选择角色" options={roles.map((r) => ({ value: r.id, label: r.name }))} /></Form.Item>
-          <Form.Item label="状态" name="status"><Select options={[{ value: 1, label: '启用' }, { value: 0, label: '禁用' }]} /></Form.Item>
+          <Form.Item label="状态" name="status" valuePropName="checked">
+            <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+          </Form.Item>
+          <Form.Item label="备注" name="remark"><Input.TextArea rows={3} placeholder="请输入备注信息" /></Form.Item>
         </Form>
       </Modal>
     </div>

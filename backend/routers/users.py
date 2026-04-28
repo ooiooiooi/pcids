@@ -263,11 +263,11 @@ async def reset_password(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="不能重置自己的密码")
 
-    user.password_hash = pwd_context.hash("admin123")
+    user.password_hash = pwd_context.hash("123456")
     db.commit()
     db.refresh(user)
 
     return {
         "code": 0,
-        "message": "密码已重置为默认密码",
+        "message": "密码已重置为默认密码 123456",
     }
