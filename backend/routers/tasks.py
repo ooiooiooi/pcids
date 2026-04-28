@@ -238,18 +238,100 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
             db.commit()
 
             await asyncio.sleep(5)
+            # The following lines are replaced by the real execution logic.
+            # We preserve compute_and_check which verifies file integrity/checksums.
             await compute_and_check()
 
-            is_success = random.choice([True, True, True, False])
+            # Base success on consistency and integrity logic first
+            is_success = True
             if task.consistency_passed == 0 and not task.override_confirmed:
                 is_success = False
             if task.integrity_passed == 0:
                 is_success = False
 
+            # Real Script Execution Implementation
+            script_execution_success = False
+            script_execution_log = ""
+            
+            if getattr(task, "script_id", None):
+                script = db.query(Script).filter(Script.id == task.script_id).first()
+                if script and script.content:
+                    task.result = f"开始执行物理烧录脚本：{script.name}..."
+                    db.commit()
+                    
+                    try:
+                        # Create a temporary script file
+                        import tempfile
+                        import stat
+                        
+                        script_ext = ".sh"
+                        if os.name == 'nt':
+                            script_ext = ".bat" if script.type == "shell" else ".py"
+                        elif script.type == "python":
+                            script_ext = ".py"
+                            
+                        with tempfile.NamedNamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
+                            temp_script.write(script.content)
+                            temp_script_path = temp_script.name
+                            
+                        # Make it executable
+                        st = os.stat(temp_script_path)
+                        os.chmod(temp_script_path, st.st_mode | stat.S_IEXEC)
+                        
+                        # Prepare environment variables
+                        env = os.environ.copy()
+                        env["FIRMWARE_PATH"] = used_file_path or ""
+                        env["TARGET_IP"] = task.target_ip or ""
+                        env["TARGET_PORT"] = str(task.target_port) if task.target_port else ""
+                        
+                        # Execute the script
+                        cmd = [temp_script_path]
+                        if script_ext == ".py":
+                            import sys
+                            cmd = [sys.executable, temp_script_path]
+                            
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            env=env,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        stdout_b, stderr_b = await proc.communicate()
+                        
+                        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+                        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+                        
+                        script_execution_success = (proc.returncode == 0)
+                        script_execution_log = f"=== 脚本输出 ===\n{stdout}\n"
+                        if stderr:
+                            script_execution_log += f"=== 错误输出 ===\n{stderr}\n"
+                            
+                    except Exception as e:
+                        script_execution_success = False
+                        script_execution_log = f"脚本执行异常: {str(e)}"
+                    finally:
+                        try:
+                            if 'temp_script_path' in locals() and os.path.exists(temp_script_path):
+                                os.remove(temp_script_path)
+                        except:
+                            pass
+                else:
+                    script_execution_success = True
+                    script_execution_log = "无需物理脚本，跳过执行。"
+            else:
+                # 如果没有绑定脚本，默认当作模拟成功（兼容旧逻辑）
+                script_execution_success = True
+                script_execution_log = "未配置烧录脚本，仅进行流程流转。"
+
+            if not script_execution_success:
+                is_success = False
+                task.last_error = "烧录脚本执行失败"
+                task.result = script_execution_log
+
             if is_success:
                 task.status = 2
                 task.last_error = None
-                task.result = f"数据写入完成，校验通过。总耗时 {random.randint(10, 15)} 秒。"
+                task.result = f"数据写入完成，校验通过。总耗时 {random.randint(10, 15)} 秒。\n{script_execution_log}"
                 db.commit()
                 finalized = True
                 return

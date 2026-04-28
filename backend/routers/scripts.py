@@ -36,16 +36,57 @@ async def execute_script(
     script.status = 1 # 执行中
     db.commit()
 
-    # 模拟执行耗时
-    await asyncio.sleep(3)
+    try:
+        import tempfile
+        import stat
+        import os
 
-    is_success = random.choice([True, True, False])
-    script.status = 2 if is_success else -1
-    script.result = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 脚本执行{'成功' if is_success else '失败'}。\n\n" \
-                    f"执行日志:\n" \
-                    f"Step 1: 初始化环境 ... OK\n" \
-                    f"Step 2: 连接硬件 ... {'OK' if is_success else 'FAILED'}\n" \
-                    f"{'Step 3: 运行测试用例 ... OK' if is_success else ''}"
+        script_ext = ".sh"
+        if os.name == 'nt':
+            script_ext = ".bat" if script.type == "shell" else ".py"
+        elif script.type == "python":
+            script_ext = ".py"
+
+        with tempfile.NamedNamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
+            temp_script.write(script.content or "")
+            temp_script_path = temp_script.name
+
+        st = os.stat(temp_script_path)
+        os.chmod(temp_script_path, st.st_mode | stat.S_IEXEC)
+
+        cmd = [temp_script_path]
+        if script_ext == ".py":
+            import sys
+            cmd = [sys.executable, temp_script_path]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await proc.communicate()
+
+        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+
+        is_success = (proc.returncode == 0)
+        
+        log = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 脚本执行{'成功' if is_success else '失败'}。\n\n=== 执行输出 ===\n{stdout}\n"
+        if stderr:
+            log += f"=== 错误输出 ===\n{stderr}\n"
+
+        script.status = 2 if is_success else -1
+        script.result = log
+
+    except Exception as e:
+        script.status = -1
+        script.result = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 脚本执行失败：\n{str(e)}"
+    finally:
+        try:
+            if 'temp_script_path' in locals() and os.path.exists(temp_script_path):
+                os.remove(temp_script_path)
+        except:
+            pass
 
     db.commit()
 
