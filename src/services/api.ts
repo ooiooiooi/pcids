@@ -252,3 +252,8 @@ export const protocolTestApi = {
   delete: (id: number) => request.delete(`/protocol-tests/${id}`),
   getById: (id: number) => request.get(`/protocol-tests/${id}`),
 }
+
+// 工作台服务
+export const dashboardApi = {
+  getStats: () => request.get('/dashboard/stats'),
+}

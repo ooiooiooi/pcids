@@ -1,10 +1,20 @@
-"""
-通信协议测试路由
-"""
 import asyncio
 import json
 from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response as FastAPIResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+from typing import Optional
+
+from backend.utils.db import get_db
+from backend.models.user import User
+from backend.models import ProtocolSession, ProtocolLog
+from backend.schemas import Response
+from backend.routers.auth import get_current_user
+from backend.utils.permission import require_permission
+
+router = APIRouter()
 
 def _build_protocol_report_html(session: ProtocolSession, logs: list, print_mode: bool) -> str:
     target = session.target or "未知设备"
@@ -156,18 +166,6 @@ async def download_protocol_report_csv(
         
     headers = {"Content-Disposition": f'attachment; filename="protocol_report_{session.id}.csv"'}
     return FastAPIResponse(content=output.getvalue(), media_type="text/csv; charset=utf-8", headers=headers)
-from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
-from typing import Optional
-from backend.utils.db import get_db
-from backend.models.user import User
-from backend.models import ProtocolSession, ProtocolLog
-from backend.schemas import Response
-from backend.routers.auth import get_current_user
-from backend.utils.permission import require_permission
-
-router = APIRouter()
-
 class ConnectRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=200)
     protocol: str = Field(..., min_length=1, max_length=50)

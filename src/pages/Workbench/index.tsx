@@ -10,7 +10,7 @@ import {
   ArrowDownOutlined,
 } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
-import { taskApi, burnerApi } from '../../services/api'
+import { dashboardApi } from '../../services/api'
 import {
   LineChart,
   Line,
@@ -51,66 +51,32 @@ const Workbench: React.FC = () => {
 
   const fetchData = async () => {
     try {
-      const [tasksRes, burnersRes]: any[] = await Promise.all([
-        taskApi.getList({ page: 1, page_size: 100 }),
-        burnerApi.getList({ page: 1, page_size: 100 }),
-      ])
-
-      const allTasks = tasksRes?.data || []
-      const allBurners = burnersRes?.data || []
-
-      // Stats calculations
-      const today = dayjs().format('YYYY-MM-DD')
-      const todayTasks = allTasks.filter((t: any) => t.created_at?.startsWith(today))
-      const completedToday = todayTasks.filter((t: any) => t.status === 2)
-      
-      const successCountToday = completedToday.filter((t: any) => t.result?.includes('成功') || t.result?.includes('Success')).length
-      const successRate = completedToday.length > 0 ? Number(((successCountToday / completedToday.length) * 100).toFixed(1)) : 0
-
-      // Dummy growth values for demonstration
-      const taskGrowth = 12.5
-      const rateGrowth = -2.5
-
-      const idle = allBurners.filter((b: any) => b.status === 1).length // 1: 空闲
-      const inUse = allBurners.filter((b: any) => b.status === 2).length // 2: 占用
-      const offline = allBurners.filter((b: any) => b.status === 0 || b.status === 3).length // 0/3: 离线
-
-      setStats({
-        todayTasks: todayTasks.length || 58, // Fallback to prototype number if 0
-        taskGrowth,
-        successRate: successRate || 95.7,
-        rateGrowth,
-        burnerIdle: idle || 12,
-        burnerInUse: inUse || 2,
-        burnerOffline: offline || 5,
-      })
-
-      // Dynamic notifications dummy data mimicking the prototype
-      setNotifications([
-        { id: 1, text: 'STM32开发板烧录软件simple.img v1.0.1成功', status: 'success' },
-        { id: 2, text: 'STM32开发板烧录软件simple.img v1.0.1失败', status: 'error' },
-        { id: 3, text: '系统已升级至v2.1.0', status: 'info' },
-      ])
-
-      // Trend data mimicking the prototype line chart
-      setTrendData([
-        { month: '一月', rate: 20 },
-        { month: '二月', rate: 25 },
-        { month: '三月', rate: 50 },
-        { month: '四月', rate: 45 },
-        { month: '五月', rate: 30 },
-        { month: '六月', rate: 70 },
-      ])
-
-      // Target install quantity stats mimicking prototype horizontal bar chart
-      setTargetData([
-        { name: 'ARM', value: 40 },
-        { name: 'DSP', value: 50 },
-        { name: 'FPGA', value: 50 },
-        { name: 'PIC', value: 45 },
-        { name: 'Altera-CPLD', value: 75 },
-      ])
-
+      const res: any = await dashboardApi.getStats()
+      if (res?.code === 0 && res.data) {
+        const { stats: newStats, trendData: newTrendData, targetData: newTargetData, notifications: newNotifications } = res.data
+        
+        setStats({
+          todayTasks: newStats.todayTasks || 0,
+          taskGrowth: newStats.taskGrowth || 0,
+          successRate: newStats.successRate || 0,
+          rateGrowth: newStats.rateGrowth || 0,
+          burnerIdle: newStats.burnerIdle || 0,
+          burnerInUse: newStats.burnerInUse || 0,
+          burnerOffline: newStats.burnerOffline || 0,
+        })
+        
+        if (newTrendData && newTrendData.length > 0) {
+          setTrendData(newTrendData)
+        }
+        
+        if (newTargetData && newTargetData.length > 0) {
+          setTargetData(newTargetData)
+        }
+        
+        if (newNotifications && newNotifications.length > 0) {
+          setNotifications(newNotifications)
+        }
+      }
     } catch {
       // ignore
     }

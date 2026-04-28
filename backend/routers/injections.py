@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 import asyncio
-import random
+import sys
+from pathlib import Path
 from datetime import datetime
-from backend.utils.db import get_db
+from backend.utils.db import get_db, SessionLocal
 from backend.models.user import User
 from backend.models import Injection, InjectionRun
 from backend.schemas import InjectionCreate, InjectionUpdate, Response
@@ -15,6 +16,111 @@ from backend.routers.auth import get_current_user
 from backend.utils.permission import require_permission
 
 router = APIRouter()
+
+
+def _truncate_text(s: str, limit: int = 8000) -> str:
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "\n...(内容已截断)"
+
+
+def _get_script_path(injection_type: str) -> Path:
+    mapping = {
+        "power_off": "power_off.py",
+        "storage_full": "storage_full.py",
+        "network_error": "network_error.py",
+        "permission_error": "permission_error.py",
+        "断电模拟": "power_off.py",
+        "存储不足": "storage_full.py",
+        "网络中断": "network_error.py",
+        "权限缺失": "permission_error.py",
+    }
+    name = mapping.get(injection_type)
+    if not name:
+        raise ValueError("不支持的异常类型")
+    return Path(__file__).resolve().parent.parent / "scripts" / "injections" / name
+
+
+_running_tasks = set()
+
+
+async def _execute_script_and_record(run_id: int, injection_id: int) -> None:
+    db = SessionLocal()
+    try:
+        injection = db.query(Injection).filter(Injection.id == injection_id).first()
+        run = db.query(InjectionRun).filter(InjectionRun.id == run_id).first()
+        if not injection or not run:
+            return
+
+        try:
+            script_path = _get_script_path(injection.type)
+        except Exception:
+            injection.status = 3
+            injection.result = "执行失败：不支持的异常类型"
+            run.exec_status = 3
+            run.result = injection.result
+            run.exec_time = datetime.now()
+            db.commit()
+            return
+
+        if not script_path.exists():
+            injection.status = 3
+            injection.result = "执行失败：脚本文件不存在"
+            run.exec_status = 3
+            run.result = injection.result
+            run.exec_time = datetime.now()
+            db.commit()
+            return
+
+        config_json = injection.config or "{}"
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script_path),
+            str(injection.target),
+            config_json,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await proc.communicate()
+        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+
+        output = stdout
+        if stderr.strip():
+            output = (stdout.rstrip() + "\n" + stderr).strip()
+
+        output = _truncate_text(output.strip())
+
+        if proc.returncode == 0:
+            injection.status = 2
+            injection.result = "执行成功"
+            run.exec_status = 2
+            run.result = output or "执行成功"
+        else:
+            injection.status = 3
+            injection.result = "执行失败"
+            run.exec_status = 3
+            run.result = output or "执行失败"
+
+        run.exec_time = datetime.now()
+        db.commit()
+    except Exception as e:
+        try:
+            injection = db.query(Injection).filter(Injection.id == injection_id).first()
+            run = db.query(InjectionRun).filter(InjectionRun.id == run_id).first()
+            if injection:
+                injection.status = 3
+                injection.result = "执行失败"
+            if run:
+                run.exec_status = 3
+                run.exec_time = datetime.now()
+                run.result = _truncate_text(str(e))
+            db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
 
 @router.post("/{injection_id}/execute", response_model=Response)
 async def execute_injection(
@@ -25,14 +131,17 @@ async def execute_injection(
     _: None = Depends(require_permission("injection:execute"))
 ):
     """
-    模拟执行异常注入
+    执行异常注入脚本并生成执行记录
     """
     injection = db.query(Injection).filter(Injection.id == injection_id).first()
     if not injection:
         raise HTTPException(status_code=404, detail="注入配置不存在")
 
-    # 模拟注入
+    if injection.status == 1:
+        raise HTTPException(status_code=409, detail="当前注入任务正在执行中")
+
     injection.status = 1
+    injection.result = "执行中"
     db.commit()
 
     operator_ip = request.client.host if request.client else None
@@ -43,7 +152,7 @@ async def execute_injection(
         target=injection.target,
         config=injection.config,
         exec_status=1,
-        result=None,
+        result="执行中",
         executor=current_user.username,
         ip_address=operator_ip,
         exec_time=datetime.now(),
@@ -52,18 +161,11 @@ async def execute_injection(
     db.commit()
     db.refresh(run)
 
-    # 同步等待一点时间模拟硬件反馈
-    await asyncio.sleep(2)
+    task = asyncio.create_task(_execute_script_and_record(run.id, injection.id))
+    _running_tasks.add(task)
+    task.add_done_callback(lambda t: _running_tasks.discard(t))
 
-    is_success = random.choice([True, False])
-    injection.status = 2 if is_success else 3
-    injection.result = "注入成功，目标发生预期故障" if is_success else "注入失败，目标未响应"
-    run.exec_status = injection.status
-    run.result = injection.result
-    run.exec_time = datetime.now()
-    db.commit()
-
-    return {"code": 0, "message": "异常注入执行完成", "data": {"status": injection.status, "result": injection.result}}
+    return {"code": 0, "message": "异常注入已开始执行", "data": {"run_id": run.id}}
 
 
 def injection_to_dict(i):

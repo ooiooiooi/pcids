@@ -268,12 +268,158 @@ def seed_mock_data():
 
         # Scripts (脚本)
         scripts = [
-            Script(name="bench_test_v3.py", type="python", content="import time\ndef main():\n    print('Bench test started')\n    time.sleep(5)\n    print('Test complete')", ide_name="Keil", associated_board="STM32F407VGT6开发板", associated_burner="J-LINK V11"),
-            Script(name="Code_Composer_Build.sh", type="shell", content="#!/bin/bash\nmake clean\nmake all", ide_name="Code Composer Studio", associated_board="TI系列板卡", associated_burner="TI XDS510 Plus"),
-            Script(name="XDS51_Flash.ps1", type="Power Shell", content="$port = \"COM3\"\nWrite-Host \"Flashing...\"", ide_name="Code Composer Studio", associated_board="TI系列板卡", associated_burner="TI XDS510 Plus"),
-            Script(name="stm32_verify.py", type="python", content="import serial\ndef verify():\n    ser = serial.Serial('/dev/ttyUSB0', 115200)\n    print('Verification done')", ide_name="STM32CubeIDE", associated_board="STM32F407VGT6开发板", associated_burner="ST-LINK V2"),
-            Script(name="fpga_flash.tcl", type="TCL", content="open_device -id 1\nprogram_device -p 1", ide_name="Vivado", associated_board="CycloneV FPGA板", associated_burner="Altera Blaster II"),
-            Script(name="esp32_burn.py", type="python", content="import esptool\nesptool.flash.read(0x1000, 0x10000)", ide_name="Keil", associated_board="ESP32开发板", associated_burner="J-LINK V11"),
+            Script(
+                name="STLINK_Keil_STM32板卡脚本", 
+                type="shell", 
+                content='''#!/bin/bash
+# ST-LINK CLI 自动化烧录脚本 (STM32)
+echo "[INFO] 开始执行 STM32 烧录流程..."
+echo "[INFO] 目标固件: ${FIRMWARE_PATH}"
+echo "[INFO] 烧录地址: 0x08000000"
+
+# 检查固件是否存在
+if [ ! -f "${FIRMWARE_PATH}" ]; then
+    echo "[ERROR] 固件文件不存在: ${FIRMWARE_PATH}"
+    exit 1
+fi
+
+echo "[EXEC] 连接 ST-LINK..."
+# 模拟执行: ST-LINK_CLI.exe -c SWD -ME
+sleep 1
+echo "连接成功。正在擦除全片..."
+
+# 模拟执行: ST-LINK_CLI.exe -c SWD -P "${FIRMWARE_PATH}" 0x08000000 -V
+sleep 2
+echo "[EXEC] 正在烧录固件到 0x08000000..."
+sleep 3
+echo "烧录进度: 100%"
+
+echo "[EXEC] 正在校验固件..."
+sleep 1
+echo "校验通过。"
+
+# 模拟执行: ST-LINK_CLI.exe -c SWD -Rst
+echo "[EXEC] 正在复位目标板卡..."
+sleep 1
+echo "[INFO] 烧录成功完成！"
+exit 0''', 
+                ide_name="Keil", 
+                associated_board="STM32F407VGT6开发板", 
+                associated_burner="ST-LINK V2"
+            ),
+            Script(
+                name="JLINK_ARM_Flash", 
+                type="shell", 
+                content='''#!/bin/bash
+# J-Link Commander 自动化烧录脚本
+echo "[INFO] 开始 J-Link 烧录流程"
+echo "[INFO] 目标固件: ${FIRMWARE_PATH}"
+
+# 生成 J-Link 命令行指令文件
+COMMAND_FILE="jlink_cmds.jlink"
+cat << EOF > ${COMMAND_FILE}
+device Cortex-M4
+si 1
+speed 4000
+connect
+erase
+loadfile ${FIRMWARE_PATH}
+r
+g
+q
+EOF
+
+echo "[EXEC] 启动 JLinkExe..."
+# 模拟执行: JLinkExe -CommanderScript ${COMMAND_FILE}
+sleep 1
+echo "Connecting to J-Link via USB... O.K."
+echo "Firmware: J-Link V11 compiled..."
+sleep 1
+echo "Erasing device... O.K."
+sleep 2
+echo "Downloading file [${FIRMWARE_PATH}]... O.K."
+echo "Resetting target... O.K."
+sleep 1
+
+rm -f ${COMMAND_FILE}
+echo "[INFO] J-Link 烧录完成！"
+exit 0''', 
+                ide_name="Keil", 
+                associated_board="通用ARM Cortex-M系列", 
+                associated_burner="J-LINK V11"
+            ),
+            Script(
+                name="CCS_DSP_DSLite", 
+                type="python", 
+                content='''import sys
+import time
+import os
+
+# Code Composer Studio DSLite 自动化烧录脚本 (DSP/TI板卡)
+def main():
+    firmware_path = os.environ.get("FIRMWARE_PATH", "unknown.out")
+    print("[INFO] 开始执行 TI DSP 烧录流程 (DSLite)")
+    print(f"[INFO] 目标固件: {firmware_path}")
+    
+    if firmware_path == "unknown.out":
+        print("[ERROR] 未提供 FIRMWARE_PATH 环境变量")
+        sys.exit(1)
+
+    print("[EXEC] 初始化 Debug Server...")
+    time.sleep(1.5)
+    print("Loading target configuration: target.ccxml")
+    
+    print("[EXEC] 连接目标板卡 (TI XDS510 Plus)...")
+    time.sleep(1)
+    print("Connect successful.")
+    
+    print(f"[EXEC] 加载程序: {firmware_path} ...")
+    time.sleep(3)
+    print("Program load complete.")
+    
+    print("[EXEC] 运行程序...")
+    time.sleep(1)
+    print("Target running.")
+    print("[INFO] DSP 烧录成功完成！")
+
+if __name__ == "__main__":
+    main()''', 
+                ide_name="Code Composer Studio", 
+                associated_board="TI系列板卡", 
+                associated_burner="TI XDS510 Plus"
+            ),
+            Script(
+                name="GDLINK_Keil脚本", 
+                type="shell", 
+                content='''#!/bin/bash
+# 占位脚本：GDLINK
+echo "[INFO] 开始 GD-Link 烧录流程..."
+echo "[EXEC] 连接设备..."
+sleep 1
+echo "[EXEC] 正在烧录..."
+sleep 2
+echo "[INFO] 烧录成功！"
+exit 0''', 
+                ide_name="Keil", 
+                associated_board="GD32系列", 
+                associated_burner="GDLINK"
+            ),
+            Script(
+                name="PWLINK_Keil脚本", 
+                type="shell", 
+                content='''#!/bin/bash
+# 占位脚本：PWLINK
+echo "[INFO] 开始 PWLINK 烧录流程..."
+echo "[EXEC] 连接设备..."
+sleep 1
+echo "[EXEC] 正在烧录..."
+sleep 2
+echo "[INFO] 烧录成功！"
+exit 0''', 
+                ide_name="Keil", 
+                associated_board="通用板卡", 
+                associated_burner="PWLINK V2"
+            ),
         ]
         for s in scripts:
             s.created_at = now - timedelta(days=20)
