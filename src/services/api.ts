@@ -48,10 +48,13 @@ request.interceptors.response.use(
           window.location.href = '#/login'
         }
       } else if (status === 403) {
-        if (data?.detail) {
-          message.error(data.detail)
-        } else {
-          message.error('无权限访问')
+        // 如果是登录接口，不需要在这里弹出错误，交由页面处理
+        if (!error.config.url?.includes('/auth/login')) {
+          if (data?.detail) {
+            message.error(data.detail)
+          } else {
+            message.error('无权限访问')
+          }
         }
       } else if (status === 404) {
         message.error('资源不存在')
