@@ -216,13 +216,17 @@ const Repository: React.FC = () => {
     const repoIdsExtra =
       Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 1 ? codeartsCfg.repo_ids.slice(1).map((x: any) => String(x)) : []
     const values: any = {
+      domain_name: codeartsCfg?.domain_name || '',
       username: codeartsCfg?.username || '',
       password: '',
+      region: codeartsCfg?.region || 'cn-north-4',
       tenant_name: codeartsCfg?.tenant_name || '',
       tenant_id: codeartsCfg?.tenant_id || '',
       project_id: codeartsCfg?.project_id || '',
       repo_id_0: repoId0,
       repo_ids_extra: repoIdsExtra,
+      download_username: codeartsCfg?.download_username || '',
+      download_password: '',
     }
     if (isCreateProjectOpen) createProjectForm.setFieldsValue(values)
     if (isSyncConfigOpen) syncConfigForm.setFieldsValue(values)
@@ -425,12 +429,16 @@ const Repository: React.FC = () => {
           ].filter(Boolean)
           const payload: any = {
             enabled: true,
+            domain_name: String(values.domain_name || '').trim(),
             username: String(values.username || '').trim(),
             password: String(values.password || '').trim(),
+            region: String(values.region || 'cn-north-4').trim(),
             tenant_name: String(values.tenant_name || '').trim(),
             tenant_id: String(values.tenant_id || '').trim(),
             project_id: String(values.project_id || '').trim(),
             repo_ids: repoIds,
+            download_username: String(values.download_username || '').trim(),
+            download_password: String(values.download_password || '').trim(),
           }
           const res: any = await repositoryApi.setCodeartsConfig(payload)
           if (res?.code === 0) {
@@ -448,41 +456,60 @@ const Repository: React.FC = () => {
       }}
     >
       <div style={{ background: 'rgba(0,0,0,0.03)', padding: '12px 16px', borderRadius: 6, marginBottom: 16, color: 'rgba(0,0,0,0.65)' }}>
-        配置CodeArts用户、项目ID及仓库ID等信息，用于获取当前用户项目下指定制品仓库信息
+        配置华为云 IAM 认证及目标仓库信息，用于获取并下载对应制品仓库的内容。
       </div>
       <Row gutter={16}>
         <Col span={12}>
-          <Form.Item label="用户名" name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-            <Input placeholder="请输入账号" />
+          <Form.Item label="账号名(Domain Name)" name="domain_name" rules={[{ required: true, message: '请输入账号名' }]}>
+            <Input placeholder="华为云主账号名称" />
           </Form.Item>
         </Col>
         <Col span={12}>
-          <Form.Item label="密码" name="password" rules={[{ required: true, message: '请输入密码' }]}>
-            <Input.Password placeholder="请输入密码" />
+          <Form.Item label="IAM用户名(Username)" name="username" rules={[{ required: true, message: '请输入IAM用户名' }]}>
+            <Input placeholder="IAM用户名" />
           </Form.Item>
         </Col>
       </Row>
       <Row gutter={16}>
         <Col span={12}>
-          <Form.Item label="租户名" name="tenant_name" rules={[{ required: true, message: '请输入租户名' }]}>
-            <Input placeholder="请输入租户名" />
+          <Form.Item label="IAM密码(Password)" name="password">
+            <Input.Password placeholder="未修改可留空" />
           </Form.Item>
         </Col>
         <Col span={12}>
-          <Form.Item label="租户ID" name="tenant_id" rules={[{ required: true, message: '请输入租户ID' }]}>
+          <Form.Item label="区域(Region)" name="region" rules={[{ required: true, message: '请输入区域(如 cn-north-4)' }]}>
+            <Input placeholder="例如: cn-north-4" />
+          </Form.Item>
+        </Col>
+      </Row>
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="租户ID(Tenant ID)" name="tenant_id" rules={[{ required: true, message: '请输入租户ID' }]}>
             <Input placeholder="请输入租户ID" />
           </Form.Item>
         </Col>
-      </Row>
-      <Row gutter={16}>
         <Col span={12}>
-          <Form.Item label="项目ID" name="project_id" rules={[{ required: true, message: '请输入项目ID' }]}>
+          <Form.Item label="项目ID(Project ID)" name="project_id" rules={[{ required: true, message: '请输入项目ID' }]}>
             <Input placeholder="请输入项目ID" />
           </Form.Item>
         </Col>
+      </Row>
+      <Row gutter={16}>
         <Col span={12}>
-          <Form.Item label="仓库ID" name="repo_id_0" rules={[{ required: true, message: '请输入仓库ID' }]}>
-            <Input placeholder="请输入仓库ID" />
+          <Form.Item label="免密下载用户名(可选)" name="download_username">
+            <Input placeholder="免认证下载用户名" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="免密下载密码(可选)" name="download_password">
+            <Input.Password placeholder="免认证下载密码" />
+          </Form.Item>
+        </Col>
+      </Row>
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="目标仓库ID" name="repo_id_0" rules={[{ required: true, message: '请输入仓库ID' }]}>
+            <Input placeholder="请输入要拉取的制品仓库ID" />
           </Form.Item>
         </Col>
       </Row>

@@ -95,17 +95,22 @@ def _http_get_json(url: str, token: Optional[str] = None, timeout_seconds: int =
     import urllib.request
     headers = {"Accept": "application/json"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Auth-Token"] = token
     req = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         body = resp.read().decode("utf-8", errors="ignore")
     return json.loads(body) if body else {}
 
-def _http_download_file(url: str, dst_path: str, token: Optional[str] = None, timeout_seconds: int = 30) -> int:
+def _http_download_file(url: str, dst_path: str, token: Optional[str] = None, username: Optional[str] = None, password: Optional[str] = None, timeout_seconds: int = 30) -> int:
     import urllib.request
+    import base64
     headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if username and password:
+        auth_str = f"{username}:{password}"
+        b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+        headers["Authorization"] = f"Basic {b64_auth}"
+    elif token:
+        headers["X-Auth-Token"] = token
     req = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         total = 0
@@ -117,6 +122,29 @@ def _http_download_file(url: str, dst_path: str, token: Optional[str] = None, ti
                 f.write(chunk)
                 total += len(chunk)
     return total
+
+def _get_iam_token(domain_name: str, username: str, password: str, region: str) -> str:
+    import urllib.request
+    url = f"https://iam.{region}.myhuaweicloud.com/v3/auth/tokens"
+    payload = {
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {
+                    "user": {
+                        "domain": {"name": domain_name},
+                        "name": username,
+                        "password": password
+                    }
+                }
+            },
+            "scope": {"project": {"name": region}}
+        }
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.headers.get("X-Subject-Token")
 
 def _safe_format_path(template: str, **kwargs) -> str:
     out = str(template)
@@ -262,10 +290,14 @@ async def set_codearts_config(
         "packages_path",
         "versions_path",
         "download_path",
+        "domain_name",
         "username",
-        "tenant_name",
+        "password",
+        "region",
         "tenant_id",
         "project_id",
+        "download_username",
+        "download_password"
     ]:
         if k in payload:
             merged[k] = payload.get(k)
@@ -273,10 +305,6 @@ async def set_codearts_config(
         token = str(payload.get("token") or "").strip()
         if token:
             merged["token"] = token
-    if "password" in payload:
-        password = str(payload.get("password") or "").strip()
-        if password:
-            merged["password"] = password
     if "repo_ids" in payload:
         repo_ids = payload.get("repo_ids")
         if isinstance(repo_ids, list):
@@ -296,35 +324,45 @@ async def import_codearts_artifact(
 ):
     cfg = _safe_json_loads(getattr(current_user, "codearts_config_json", None))
     enabled = bool(cfg.get("enabled"))
-    base_url = str(cfg.get("base_url") or "").rstrip("/")
-    token = str(cfg.get("token") or "").strip()
-    download_path = str(cfg.get("download_path") or "/packages/{package_id}/versions/{version_id}/download")
+    base_url = str(cfg.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
+    domain_name = str(cfg.get("domain_name") or "").strip()
+    username = str(cfg.get("username") or "").strip()
+    password = str(cfg.get("password") or "").strip()
+    region = str(cfg.get("region") or "cn-north-4").strip()
+    download_username = str(cfg.get("download_username") or "").strip()
+    download_password = str(cfg.get("download_password") or "").strip()
+    tenant_id = str(cfg.get("tenant_id") or "").strip()
+    project_id_cfg = str(cfg.get("project_id") or "").strip()
 
-    if not enabled or not base_url:
-        raise HTTPException(status_code=400, detail="CodeArts 未启用或 Base URL 未配置")
-    if not token:
-        raise HTTPException(status_code=400, detail="CodeArts Token 未配置")
+    if not enabled:
+        raise HTTPException(status_code=400, detail="CodeArts 未启用")
+    if not domain_name or not username or not password:
+        raise HTTPException(status_code=400, detail="IAM认证信息(账号名/用户名/密码)未配置完整")
 
-    project_id = str(payload.get("project_id") or "").strip()
+    try:
+        token = _get_iam_token(domain_name, username, password, region)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"获取IAM Token失败: {str(e)}")
+
+    base_url = base_url.replace("{region}", region)
+
+    project_id = str(payload.get("project_id") or project_id_cfg).strip()
     package_id = str(payload.get("package_id") or "").strip()
     version_id = str(payload.get("version_id") or "").strip()
+    repo_id = str(payload.get("repo_id") or "").strip()
     name = str(payload.get("name") or "CodeArts制品").strip() or "CodeArts制品"
     version = str(payload.get("version") or "").strip() or None
     description = str(payload.get("description") or "").strip() or None
+    download_uri = str(payload.get("download_uri") or "").strip()
 
-    if not project_id or not package_id or not version_id:
-        raise HTTPException(status_code=400, detail="缺少 project_id/package_id/version_id")
+    if not project_id or not package_id or not version_id or not repo_id:
+        raise HTTPException(status_code=400, detail="缺少 project_id/package_id/version_id/repo_id")
+    if not download_uri:
+        raise HTTPException(status_code=400, detail="缺少文件的下载链接(download_uri)")
 
     project_key = f"proj_{project_id}"
     _ensure_project_member_seed(db, project_key, current_user)
     _require_project_permission(db, project_key, current_user, "download_file")
-
-    remote_url = base_url + _safe_format_path(
-        download_path,
-        project_id=project_id,
-        package_id=package_id,
-        version_id=version_id,
-    )
 
     upload_dir = "uploads/repositories"
     os.makedirs(upload_dir, exist_ok=True)
@@ -332,7 +370,10 @@ async def import_codearts_artifact(
     file_path = os.path.join(upload_dir, safe_filename)
 
     try:
-        _http_download_file(remote_url, file_path, token=token)
+        if download_username and download_password:
+            _http_download_file(download_uri, file_path, username=download_username, password=download_password)
+        else:
+            _http_download_file(download_uri, file_path, token=token)
     except Exception as e:
         if os.path.exists(file_path):
             try:
@@ -434,63 +475,73 @@ async def get_repository_tree(
         packages_path = str(cfg.get("packages_path") or "/projects/{project_id}/packages")
         versions_path = str(cfg.get("versions_path") or "/packages/{package_id}/versions")
 
-        if enabled and not base_url:
-            enabled = False
+        if enabled:
+            domain_name = str(cfg.get("domain_name") or "").strip()
+            username = str(cfg.get("username") or "").strip()
+            password = str(cfg.get("password") or "").strip()
+            region = str(cfg.get("region") or "cn-north-4").strip()
+            tenant_id = str(cfg.get("tenant_id") or "").strip()
+            project_id = str(cfg.get("project_id") or "").strip()
+            base_url = str(cfg.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
+            
+            if not domain_name or not username or not password:
+                enabled = False
+            else:
+                try:
+                    token = _get_iam_token(domain_name, username, password, region)
+                    base_url = base_url.replace("{region}", region)
+                except Exception:
+                    enabled = False
 
         if enabled and base_url:
             try:
-                projects_payload = _http_get_json(base_url + projects_path, token=token or None)
-                projects = _apply_codearts_scope(_extract_list(projects_payload), current_user)
-                project_nodes = []
-                for proj in projects:
-                    proj_id = _guess_id(proj)
-                    if not proj_id:
-                        continue
-                    proj_name = _guess_name(proj)
-                    pkg_payload = _http_get_json(base_url + packages_path.format(project_id=proj_id), token=token or None)
-                    pkgs = _extract_list(pkg_payload)
-                    pkg_nodes = []
-                    for pkg in pkgs:
-                        pkg_id = _guess_id(pkg)
-                        if not pkg_id:
-                            continue
-                        pkg_name = _guess_name(pkg)
-                        ver_payload = _http_get_json(base_url + versions_path.format(package_id=pkg_id), token=token or None)
-                        vers = _extract_list(ver_payload)
-                        ver_nodes = []
-                        for ver in vers:
-                            ver_id = _guess_id(ver) or str(uuid.uuid4().hex)
-                            ver_name = _guess_name(ver)
-                            ver_nodes.append({
-                                "title": ver_name,
-                                "key": f"ver_{proj_id}_{pkg_id}_{ver_id}",
-                                "isLeaf": True,
-                                "repo_id": None,
-                                "file_url": None,
-                                "size": None,
-                                "version": ver_name,
-                                "project_id": proj_id,
-                                "package_id": pkg_id,
-                                "version_id": ver_id,
-                            })
-                        pkg_nodes.append({
-                            "title": pkg_name,
-                            "key": f"pkg_{proj_id}_{pkg_id}",
-                            "children": ver_nodes,
-                        })
-                    project_nodes.append({
-                        "title": proj_name,
-                        "key": f"proj_{proj_id}",
-                        "children": pkg_nodes,
-                    })
+                def traverse_codearts(current_repo_id, current_relative_path):
+                    # Call ShowFileTree API
+                    url = f"{base_url}/cloudartifact/v5/{tenant_id}/{project_id}/{current_repo_id}/file-tree"
+                    params = f"?path={current_relative_path}"
+                    resp = _http_get_json(url + params, token=token)
+                    nodes = _extract_list(resp)
+                    results = []
+                    for n in nodes:
+                        node_name = n.get("name")
+                        is_folder = n.get("folder", False)
+                        if current_relative_path == "/":
+                            full_relative_path = f"/{node_name}"
+                        else:
+                            full_relative_path = f"{current_relative_path}/{node_name}"
+                        full_relative_path = re.sub(r'^/+', '/', full_relative_path.strip())
+
+                        node_data = {
+                            "title": node_name,
+                            "key": f"ca_{current_repo_id}_{full_relative_path}",
+                            "isLeaf": not is_folder,
+                            "repo_id": current_repo_id,
+                            "file_url": None,
+                            "size": None,
+                            "version": node_name,
+                            "project_id": project_id,
+                            "package_id": "pkg_default",
+                            "version_id": "ver_default",
+                            "download_uri": n.get("download_uri"),
+                        }
+
+                        if is_folder:
+                            node_data["children"] = traverse_codearts(current_repo_id, full_relative_path)
+                        else:
+                            # Optional: fetch detail for exact size/checksums here if needed, 
+                            # but skipping to keep tree loading fast. We can rely on display_size.
+                            pass
+                        results.append(node_data)
+                    return results
+
                 warehouses = []
                 for idx, rid in enumerate(repo_ids):
                     warehouses.append(
                         {
-                            "title": f"制品仓库{idx + 1}",
+                            "title": f"华为云制品仓库 {rid}",
                             "key": f"repo_{idx}_{rid}",
                             "repo_id": rid,
-                            "children": [{"title": "项目", "key": f"repo_{idx}_{rid}_projects", "children": project_nodes}],
+                            "children": traverse_codearts(rid, "/"),
                         }
                     )
                 tree_data = warehouses
