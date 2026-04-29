@@ -440,14 +440,14 @@ const Repository: React.FC = () => {
             enabled: true,
             domain_name: String(values.domain_name || '').trim(),
             username: String(values.username || '').trim(),
-            password: String(values.password || '').trim(),
+            password: String(values.password || '').trim() || undefined, // undefined if empty to avoid overriding with empty string
             region: String(values.region || 'cn-north-4').trim(),
             tenant_name: String(values.tenant_name || '').trim(),
             tenant_id: String(values.tenant_id || '').trim(),
             project_id: String(values.project_id || '').trim(),
             repo_ids: repoIds,
             download_username: String(values.download_username || '').trim(),
-            download_password: String(values.download_password || '').trim(),
+            download_password: String(values.download_password || '').trim() || undefined,
           }
           const res: any = await repositoryApi.setCodeartsConfig(payload)
           if (res?.code === 0) {
