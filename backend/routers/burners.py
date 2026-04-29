@@ -65,6 +65,12 @@ def _match_usb_device(device_type: Optional[str], location: Optional[str]) -> Op
         "gdlink": ["gdlink", "gd-link"],
         "pwlinkv2": ["pwlink", "p-wlink"],
         "al321": ["al321"],
+        "swd下载器": ["swd"],
+        "hdscccid": ["hdsc", "ccid"],
+        "xds510plus": ["xds510", "xds510plus"],
+        "mplabicd3dv164035": ["mplab", "icd 3", "dv164035"],
+        "alterablasterⅱ": ["altera", "blaster"],
+        "gowinusbcable": ["gowin", "gowin usb"],
     }
     candidates = aliases.get(type_hint, [type_hint] if type_hint else [])
 

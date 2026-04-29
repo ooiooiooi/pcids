@@ -636,7 +636,19 @@ const Burning: React.FC = () => {
               <Col span={14}>
                 <div style={{ marginBottom: 24 }}>
                   <div style={{ marginBottom: 8, fontWeight: 'bold' }}>选择IDE</div>
-                  <Select style={{ width: '100%' }} value={wizardData.ide || 'Code Composer Studio'} onChange={v => setWizardData({ ...wizardData, ide: v })} options={[{ label: 'Code Composer Studio', value: 'Code Composer Studio' }]} />
+                  <Select style={{ width: '100%' }} value={wizardData.ide || 'Code Composer Studio'} onChange={v => setWizardData({ ...wizardData, ide: v })} options={[
+                    { label: 'Code Composer Studio', value: 'Code Composer Studio' },
+                    { label: 'IAR Embedded Workbench For Arm', value: 'IAR Embedded Workbench For Arm' },
+                    { label: 'Keil uVision', value: 'Keil uVision' },
+                    { label: 'MPLAB', value: 'MPLAB' },
+                    { label: 'STM32CubeIDE', value: 'STM32CubeIDE' },
+                    { label: 'Vitis', value: 'Vitis' },
+                    { label: 'Vivado', value: 'Vivado' },
+                    { label: 'WindRiver Workbench', value: 'WindRiver Workbench' },
+                    { label: 'FTP', value: 'FTP' },
+                    { label: 'TFTP', value: 'TFTP' },
+                    { label: 'J_LINK', value: 'J_LINK' },
+                  ]} />
                 </div>
                 <div style={{ marginBottom: 24 }}>
                   <div style={{ marginBottom: 8, fontWeight: 'bold' }}>选择烧录器</div>

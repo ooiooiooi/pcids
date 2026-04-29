@@ -168,7 +168,12 @@ const Burner: React.FC = () => {
       <Form.Item label="烧录器" name="type" rules={[{ required: true, message: '请选择烧录器' }]} required>
         <Select placeholder="请选择类型" options={[
           { value: 'J_LINK V11', label: 'J_LINK V11' }, { value: 'PWLINK V2', label: 'PWLINK V2' },
-          { value: 'GDLINK', label: 'GDLINK' }, { value: 'ST_LINK', label: 'ST_LINK' }, { value: 'AL321', label: 'AL321' }
+          { value: 'GDLINK', label: 'GDLINK' }, { value: 'SWD下载器', label: 'SWD下载器' },
+          { value: 'AL321', label: 'AL321' }, { value: 'ST_LINK', label: 'ST_LINK' },
+          { value: 'HDSC CCID', label: 'HDSC CCID' }, { value: 'XDS510plus', label: 'XDS510plus' },
+          { value: 'MPLAB ICD 3 DV164035', label: 'MPLAB ICD 3 DV164035' },
+          { value: 'Altera Blaster Ⅱ', label: 'Altera Blaster Ⅱ' },
+          { value: 'Gowin USB Cable', label: 'Gowin USB Cable' }
         ]} />
       </Form.Item>
       
