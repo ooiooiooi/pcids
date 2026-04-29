@@ -241,7 +241,9 @@ const Repository: React.FC = () => {
     const projects: Array<{ label: string; value: string }> = []
     const walk = (items: AnyNode[]) => {
       for (const n of items) {
-        if (String(n.key).startsWith('proj_')) projects.push({ label: String(n.title), value: String(n.key) })
+        if (String(n.key).startsWith('proj_')) {
+          projects.push({ label: String(n.title), value: String(n.key) })
+        }
         if (Array.isArray(n.children) && n.children.length > 0) walk(n.children as AnyNode[])
       }
     }
@@ -374,15 +376,13 @@ const Repository: React.FC = () => {
   }
 
   const moreMenuItems = [
-    { key: 'create-project', label: '新增项目' },
-    { key: 'sync-config', label: '当前同步配置' },
+    { key: 'sync-config', label: '配置 CodeArts 同步参数' },
     { key: 'upload-artifact', label: '上传本地制品' },
     { key: 'member-permission', label: '项目成员及权限' },
     { key: 'delete-project', label: '删除当前项目', danger: true },
   ]
 
   const handleMoreMenuClick = async ({ key }: { key: string }) => {
-    if (key === 'create-project') setIsCreateProjectOpen(true)
     if (key === 'sync-config') setIsSyncConfigOpen(true)
     if (key === 'upload-artifact') {
       setUploadedFileMeta(null)
