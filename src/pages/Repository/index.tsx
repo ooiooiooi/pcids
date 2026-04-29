@@ -250,7 +250,8 @@ const Repository: React.FC = () => {
     walk(treeData)
     setProjectOptions(projects)
     if (!currentProjectKey && projects.length > 0) setCurrentProjectKey(projects[0].value)
-  }, [treeData, currentProjectKey])
+    if (projects.length === 0) setCurrentProjectKey('')
+  }, [treeData])
 
   const renderTreeTitle = (node: AnyNode) => {
     const icon = node.isLeaf ? <FileOutlined /> : <FolderOutlined />

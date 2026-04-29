@@ -493,6 +493,10 @@ async def get_repository_tree(
                     token = _get_iam_token(domain_name, username, password, region)
                     base_url = base_url.replace("{region}", region)
                 except Exception as e:
+                    # Ignore the error when token cannot be fetched, so the tree_data stays empty
+                    # but doesn't crash the whole UI or page initialization.
+                    # Or we can raise it, but for a better user experience on load, we just disable it.
+                    enabled = False
                     raise HTTPException(status_code=401, detail=f"获取IAM Token失败: {str(e)}")
 
         if enabled and base_url:
