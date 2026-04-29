@@ -15,6 +15,7 @@ class BurningTask(Base, TimestampMixin):
     created_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
     repository_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("repositories.id"))
     software_name: Mapped[str] = mapped_column(String(200))
+    task_type: Mapped[Optional[str]] = mapped_column(String(20), default="board")
     executable: Mapped[Optional[str]] = mapped_column(String(500))
     serial_number: Mapped[Optional[str]] = mapped_column(String(100))
     board_name: Mapped[Optional[str]] = mapped_column(String(100))

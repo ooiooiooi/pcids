@@ -68,7 +68,7 @@ const Login: React.FC = () => {
           boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
           position: 'relative'
         }}
-        bodyStyle={{ padding: '32px 40px' }}
+        styles={{ body: { padding: '32px 40px' } }}
       >
         <CloseOutlined style={{ position: 'absolute', top: 16, right: 16, fontSize: 16, color: '#86909c', cursor: 'pointer' }} />
         

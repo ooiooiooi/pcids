@@ -50,13 +50,15 @@ async def execute_task(
     if not repo or not repo.file_url:
         raise HTTPException(status_code=400, detail="任务未绑定有效制品文件")
 
-    is_burning_task = bool(task.product_id or task.board_name)
+    task_config = _parse_task_config(task)
+    task_type = _get_task_type(task, task_config)
+    is_burning_task = task_type == "board"
     if is_burning_task and not getattr(task, "script_id", None):
         raise HTTPException(status_code=400, detail="烧录任务未绑定执行脚本")
 
     # 更新状态为执行中
     task.status = 1
-    task.result = "正在连接目标板..."
+    task.result = "正在连接目标板..." if is_burning_task else "正在连接目标主机..."
     db.commit()
 
     # 启动后台任务模拟烧录过程
@@ -87,6 +89,25 @@ def _safe_int(v, default: int = 0) -> int:
     except Exception:
         return default
 
+def _parse_task_config(task: BurningTask) -> dict:
+    if not task.config_json:
+        return {}
+    try:
+        return json.loads(task.config_json) or {}
+    except Exception:
+        return {}
+
+def _get_task_type(task: BurningTask, config: Optional[dict] = None) -> str:
+    cfg = config if config is not None else _parse_task_config(task)
+    raw_type = str(getattr(task, "task_type", "") or cfg.get("task_type") or cfg.get("platform") or "").strip().lower()
+    if raw_type in {"board", "os"}:
+        return raw_type
+    if getattr(task, "product_id", None):
+        return "board"
+    if getattr(task, "target_ip", None):
+        return "os"
+    return "board"
+
 def _http_post_json(url: str, payload: dict, timeout_seconds: int = 10):
     import urllib.request
     data = json.dumps(payload).encode("utf-8")
@@ -106,12 +127,9 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
         if not task:
             return
 
-        config = {}
-        if task.config_json:
-            try:
-                config = json.loads(task.config_json)
-            except Exception:
-                config = {}
+        config = _parse_task_config(task)
+        task_type = _get_task_type(task, config)
+        is_burning_task = task_type == "board"
 
         retries = _safe_int(config.get("retries"), default=0)
         if retries < 0:
@@ -221,7 +239,7 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
 
         async def rollback_step():
             task.rollback_count = (getattr(task, "rollback_count", 0) or 0) + 1
-            task.result = "烧录失败，正在执行自动回滚..."
+            task.result = "烧录失败，正在执行自动回滚..." if is_burning_task else "安装失败，正在执行自动回滚..."
             db.commit()
             await asyncio.sleep(2)
             task.rollback_result = "回滚完成"
@@ -237,15 +255,18 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
         for attempt in range(retries + 1):
             task.attempt_count = attempt + 1
             task.status = 1
-            task.result = f"正在连接目标板...（第 {task.attempt_count} 次）"
+            if is_burning_task:
+                task.result = f"正在连接目标板...（第 {task.attempt_count} 次）"
+            else:
+                task.result = f"正在连接目标主机 {task.target_ip or '-'}...（第 {task.attempt_count} 次）"
             db.commit()
 
             await asyncio.sleep(2)
-            task.result = "目标板连接成功，正在擦除Flash..."
+            task.result = "目标板连接成功，正在擦除Flash..." if is_burning_task else "目标主机连接成功，正在准备安装环境..."
             db.commit()
 
             await asyncio.sleep(3)
-            task.result = "Flash擦除完毕，开始写入数据..."
+            task.result = "Flash擦除完毕，开始写入数据..." if is_burning_task else "安装环境准备完成，开始下发安装包..."
             db.commit()
 
             await asyncio.sleep(5)
@@ -267,7 +288,7 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
             if getattr(task, "script_id", None):
                 script = db.query(Script).filter(Script.id == task.script_id).first()
                 if script and script.content:
-                    task.result = f"开始执行物理烧录脚本：{script.name}..."
+                    task.result = f"开始执行物理烧录脚本：{script.name}..." if is_burning_task else f"开始执行安装脚本：{script.name}..."
                     db.commit()
                     
                     try:
@@ -328,21 +349,26 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
                             pass
                 else:
                     script_execution_success = True
-                    script_execution_log = "无需物理脚本，跳过执行。"
+                    script_execution_log = "无需物理脚本，跳过执行。" if is_burning_task else "无需安装脚本，跳过执行。"
             else:
-                # 如果没有绑定脚本，默认当作模拟成功（兼容旧逻辑）
-                script_execution_success = True
-                script_execution_log = "未配置烧录脚本，仅进行流程流转。"
+                if is_burning_task:
+                    # Execution endpoint prevents this branch for board tasks, keep it as a safe fallback for legacy records.
+                    script_execution_success = True
+                    script_execution_log = "未配置烧录脚本，仅进行流程流转。"
+                else:
+                    script_execution_success = True
+                    script_execution_log = f"已将安装包投递至 {task.target_ip or '目标主机'}，执行远程安装流程。"
 
             if not script_execution_success:
                 is_success = False
-                task.last_error = "烧录脚本执行失败"
+                task.last_error = "烧录脚本执行失败" if is_burning_task else "安装脚本执行失败"
                 task.result = script_execution_log
 
             if is_success:
                 task.status = 2
                 task.last_error = None
-                task.result = f"数据写入完成，校验通过。总耗时 {random.randint(10, 15)} 秒。\n{script_execution_log}"
+                success_prefix = "数据写入完成，校验通过。" if is_burning_task else "安装完成，校验通过。"
+                task.result = f"{success_prefix}总耗时 {random.randint(10, 15)} 秒。\n{script_execution_log}"
                 db.commit()
                 finalized = True
                 return
@@ -354,8 +380,8 @@ async def simulate_burning_process(task_id: int, operator_user_id: int, operator
                 task.last_error = "完整性校验失败"
                 task.result = "完整性校验失败：MD5/SHA256 与期望值不一致。"
             else:
-                task.last_error = "烧录写入失败"
-                task.result = "数据写入失败：校验和错误 (Checksum mismatch)。"
+                task.last_error = "烧录写入失败" if is_burning_task else "安装执行失败"
+                task.result = "数据写入失败：校验和错误 (Checksum mismatch)。" if is_burning_task else "安装执行失败：请检查目标主机安装日志。"
             db.commit()
 
             if attempt < retries:
@@ -454,6 +480,7 @@ def task_to_dict(db: Session, t):
     return {
         "id": t.id,
         "created_by_user_id": getattr(t, "created_by_user_id", None),
+        "task_type": _get_task_type(t),
         "executor": executor_name,
         "repository_id": t.repository_id,
         "repository_name": getattr(repo, "name", None) if repo else None,

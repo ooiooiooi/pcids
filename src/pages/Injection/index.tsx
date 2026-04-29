@@ -1,11 +1,10 @@
-import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Popconfirm, Tabs, Row, Col, Checkbox, InputNumber, Radio } from 'antd'
+import { Card, Table, Button, Space, Input, Modal, Form, message, Tag, Select, Tabs, Row, Col, Checkbox, InputNumber, Radio } from 'antd'
 import { SearchOutlined, EditOutlined, CaretRightOutlined, PlusOutlined, ApiOutlined, DatabaseOutlined, DisconnectOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { injectionApi, productApi } from '../../services/api'
 import { Permission } from '../../hooks'
 
 const Injection: React.FC = () => {
-  // @ts-expect-error unused
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const [isConfigOpen, setIsConfigOpen] = useState(false)
@@ -20,16 +19,18 @@ const Injection: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined)
   const [activeTab, setActiveTab] = useState('scenario')
   const [selectedRecord, setSelectedRecord] = useState<any>(null)
+  const [selectedTemplate, setSelectedTemplate] = useState<any>(null)
   const [form] = Form.useForm()
   const [execForm] = Form.useForm()
 
-  // @ts-expect-error unused
-  const injectionTypes = [
-    { value: 'power_off', label: '断电模拟' },
-    { value: 'storage_full', label: '存储不足' },
-    { value: 'network_error', label: '网络中断' },
-    { value: 'permission_error', label: '权限缺失' },
-  ]
+  const injectionTypeAliases: Record<string, string> = {
+    断电模拟: 'power_off',
+    存储不足: 'storage_full',
+    网络中断: 'network_error',
+    权限缺失: 'permission_error',
+  }
+
+  const normalizeInjectionType = (type?: string) => injectionTypeAliases[type || ''] || type || ''
 
   const typeMap: Record<string, { color: string; text: string }> = {
     power_off: { color: 'red', text: '断电模拟' },
@@ -71,6 +72,16 @@ const Injection: React.FC = () => {
     fetchData()
   }, [page, statusFilter, activeTab])
 
+  const openCreateFromTemplate = (template: any) => {
+    setSelectedTemplate(template)
+    setSelectedRecord(null)
+    setInjectionType(normalizeInjectionType(template.type))
+    form.resetFields()
+    form.setFieldsValue({ default_target: undefined })
+    setIsModalOpen(false)
+    setIsConfigOpen(true)
+  }
+
   const handleSearch = () => {
     setPage(1)
     fetchData()
@@ -79,25 +90,26 @@ const Injection: React.FC = () => {
   const handleCreate = async () => {
     try {
       const values = await form.validateFields()
+      const normalizedType = normalizeInjectionType(injectionType)
       const config: any = {}
       
       // Map form values to config based on injection type
-      if (injectionType === 'power_off') {
+      if (normalizedType === 'power_off') {
         config.duration = values.power_duration
         config.strategy = values.power_strategy
-      } else if (injectionType === 'storage_full') {
+      } else if (normalizedType === 'storage_full') {
         config.method = values.storage_method
         config.location = values.storage_location
         if (values.storage_location === 'custom') config.custom_location = values.storage_custom_location
         config.size = values.storage_size
         if (values.storage_size === 'custom') config.custom_size = values.storage_custom_size
         config.strategy = values.storage_strategy
-      } else if (injectionType === 'network_error') {
+      } else if (normalizedType === 'network_error') {
         config.type = values.network_type
         config.duration = values.network_duration
         if (values.network_duration === 'custom') config.custom_duration = values.network_custom_duration
         config.strategy = values.network_strategy
-      } else if (injectionType === 'permission_error') {
+      } else if (normalizedType === 'permission_error') {
         config.target = values.permission_target
         config.type = values.permission_type
         config.scope = values.permission_scope
@@ -106,14 +118,17 @@ const Injection: React.FC = () => {
         config.backup = values.permission_backup
       }
 
+      const targetValue = values.default_target || selectedRecord?.target || '未配置目标'
+      config.default_target = targetValue
+
       const payload = {
-        type: injectionType,
-        target: 'placeholder', // we edit this later or handle differently
+        type: normalizedType,
+        target: targetValue,
         config: JSON.stringify(config),
         status: 0
       }
 
-      if (selectedRecord) {
+      if (selectedRecord?.persisted) {
         await injectionApi.update(selectedRecord.id, payload)
         message.success('配置保存成功')
       } else {
@@ -125,20 +140,11 @@ const Injection: React.FC = () => {
       form.resetFields()
       setInjectionType('')
       setSelectedRecord(null)
+      setSelectedTemplate(null)
       fetchData()
     } catch (e: any) {
       if (e?.errorFields) return
       message.error(e?.response?.data?.detail || '保存失败')
-    }
-  }
-
-  const handleDelete = async (id: number) => {
-    try {
-      await injectionApi.delete(id)
-      message.success('删除成功')
-      fetchData()
-    } catch {
-      message.error('删除失败')
     }
   }
 
@@ -148,7 +154,15 @@ const Injection: React.FC = () => {
       if (!selectedRecord) return
       
       // Update target and execute
-      await injectionApi.update(selectedRecord.id, { target: values.target })
+      const nextConfig = (() => {
+        try {
+          return JSON.parse(selectedRecord.config || '{}')
+        } catch {
+          return {}
+        }
+      })()
+      nextConfig.default_target = values.target
+      await injectionApi.update(selectedRecord.id, { target: values.target, config: JSON.stringify(nextConfig) })
       await injectionApi.execute(selectedRecord.id)
       
       message.success('注入任务已开始执行')
@@ -162,70 +176,52 @@ const Injection: React.FC = () => {
     }
   }
 
-  // @ts-expect-error unused
-  const scenarioColumns = [
-    {
-      title: '异常类型', dataIndex: 'type', key: 'type',
-      render: (type: string) => <Tag color={typeMap[type]?.color}>{typeMap[type]?.text || type}</Tag>,
-    },
-    { title: '目标', dataIndex: 'target', key: 'target' },
-    { title: '状态', dataIndex: 'status', key: 'status',
-      render: (status: number) => <Tag color={statusMap[status]?.color}>{statusMap[status]?.text}</Tag>,
-    },
-    { title: '结果', dataIndex: 'result', key: 'result', ellipsis: true },
-    {
-      title: '操作', key: 'action',
-      render: (_: any, record: any) => (
-        <Space>
-          <Permission code="injection:execute">
-            <Button type="link" onClick={() => { setSelectedRecord(record); setIsExecOpen(true) }}>执行</Button>
-          </Permission>
-          <Button type="link" onClick={() => { setSelectedRecord(record); setIsDetailOpen(true) }}>详情</Button>
-          <Permission code="injection:delete">
-            <Popconfirm title="确认删除" onConfirm={() => handleDelete(record.id)}>
-              <Button type="link" danger>删除</Button>
-            </Popconfirm>
-          </Permission>
-        </Space>
-      ),
-    },
-  ]
-
   const getScenarioConfig = (type: string, configJson: string) => {
     try {
       const c = JSON.parse(configJson)
-      if (type === 'power_off') {
+      const normalizedType = normalizeInjectionType(type)
+      if (normalizedType === 'power_off') {
+        const recovery = c.strategy || c.recovery || 'auto'
         return (
           <>
             <div style={{ color: '#666', fontSize: 12 }}>持续时长&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.duration === 'custom' ? c.custom_duration : c.duration} 秒</span></div>
-            <div style={{ color: '#666', fontSize: 12 }}>恢复策略&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.strategy === 'auto' ? '自动恢复' : '手动恢复'}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>恢复策略&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{recovery === 'auto' ? '自动恢复' : '手动恢复'}</span></div>
           </>
         )
       }
-      if (type === 'storage_full') {
+      if (normalizedType === 'storage_full') {
+        const method = c.method || (c.fill === 'large_file' ? 'single' : 'multi')
+        const location = c.location === 'custom' ? c.custom_location : (c.location || c.custom_location || '/tmp')
+        const size = c.size === 'custom' ? `${c.custom_size}%` : (typeof c.size === 'number' ? `${c.size}%` : c.size)
+        const recovery = c.strategy || c.recovery || 'auto'
         return (
           <>
-            <div style={{ color: '#666', fontSize: 12 }}>填充方式&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.method === 'single' ? '创建单个大文件' : '创建多个小文件'}</span></div>
-            <div style={{ color: '#666', fontSize: 12 }}>填充位置及大小&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.location === 'custom' ? c.custom_location : c.location}, {c.size === 'custom' ? c.custom_size + '%' : c.size}</span></div>
-            <div style={{ color: '#666', fontSize: 12 }}>恢复策略&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.strategy === 'auto' ? '测试完成后自动...' : '手动清理'}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>填充方式&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{method === 'single' ? '创建单个大文件' : '创建多个小文件'}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>填充位置及大小&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{location}, {size}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>恢复策略&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{recovery === 'auto' ? '测试完成后自动清理' : '手动清理'}</span></div>
           </>
         )
       }
-      if (type === 'network_error') {
+      if (normalizedType === 'network_error') {
+        const networkType = c.type === 'full' ? 'disconnect' : c.type
+        const recovery = c.strategy || c.recovery || 'auto'
         return (
           <>
-            <div style={{ color: '#666', fontSize: 12 }}>中断类型&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.type === 'disconnect' ? '完全中断' : c.type === 'packet_loss' ? '高丢包率' : '高延迟'}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>中断类型&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{networkType === 'disconnect' ? '完全中断' : networkType === 'packet_loss' ? '高丢包率' : '高延迟'}</span></div>
             <div style={{ color: '#666', fontSize: 12 }}>持续时长&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.duration === 'custom' ? c.custom_duration : c.duration} 秒</span></div>
-            <div style={{ color: '#666', fontSize: 12 }}>恢复策略&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{c.strategy === 'auto' ? '超时后自动恢复...' : '手动恢复'}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>恢复策略&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{recovery === 'auto' ? '超时后自动恢复' : '手动恢复'}</span></div>
           </>
         )
       }
-      if (type === 'permission_error') {
+      if (normalizedType === 'permission_error') {
+        const permissionTarget = c.target?.burn_dir || c.target === 'burn_dir' ? '烧录目录' : c.target?.config_file ? '配置文件' : c.target?.log_dir ? '日志目录' : '自定义目标'
+        const permissionType = c.type?.remove_write || c.perm === 'write' ? '移除写权限' : c.type?.remove_read ? '移除读权限' : c.type?.remove_exec ? '移除执行权限' : '权限变更'
+        const permissionScope = c.scope?.current_user || c.scope === 'current_user' ? '当前用户' : c.scope?.all_users ? '所有用户' : c.scope?.specific_group ? '特定组' : '当前用户'
         return (
           <>
-            <div style={{ color: '#666', fontSize: 12 }}>权限变更对象&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>烧录目录</span></div>
-            <div style={{ color: '#666', fontSize: 12 }}>变更类型&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>移除写权限</span></div>
-            <div style={{ color: '#666', fontSize: 12 }}>影响范围&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>当前用户...</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>权限变更对象&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{permissionTarget}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>变更类型&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{permissionType}</span></div>
+            <div style={{ color: '#666', fontSize: 12 }}>影响范围&nbsp;&nbsp;&nbsp;&nbsp;<span style={{ color: '#333' }}>{permissionScope}</span></div>
           </>
         )
       }
@@ -234,7 +230,7 @@ const Injection: React.FC = () => {
     }
   }
 
-  const scenarioCards = [
+  const scenarioTemplates = [
     {
       id: 1,
       type: 'power_off',
@@ -261,6 +257,30 @@ const Injection: React.FC = () => {
     }
   ]
 
+  const scenarioCardMap = new Map<string, any>()
+  dataSource.forEach((item: any) => {
+    const normalizedType = normalizeInjectionType(item.type)
+    if (normalizedType && !scenarioCardMap.has(normalizedType)) {
+      scenarioCardMap.set(normalizedType, item)
+    }
+  })
+
+  const scenarioCards = scenarioTemplates.map((template) => {
+    const persistedItem = scenarioCardMap.get(template.type)
+    if (!persistedItem) {
+      return { ...template, persisted: false }
+    }
+    return {
+      ...persistedItem,
+      raw_type: persistedItem.type,
+      id: persistedItem.id,
+      type: template.type,
+      title: typeMap[template.type]?.text || template.title,
+      config_json: persistedItem.config || template.config_json,
+      persisted: true,
+    }
+  })
+
   const recordColumns = [
     { title: '执行状态', dataIndex: 'exec_status', key: 'exec_status', width: 100,
       render: (status: number) => <Tag color={statusMap[status]?.color}>{statusMap[status]?.text}</Tag>,
@@ -273,7 +293,10 @@ const Injection: React.FC = () => {
       ),
     },
     { title: '异常类型', dataIndex: 'type', key: 'type', width: 120,
-      render: (type: string) => <Tag color={typeMap[type]?.color}>{typeMap[type]?.text || type}</Tag>,
+      render: (type: string) => {
+        const normalizedType = normalizeInjectionType(type)
+        return <Tag color={typeMap[normalizedType]?.color}>{typeMap[normalizedType]?.text || type}</Tag>
+      },
     },
     { title: '结果', dataIndex: 'result', key: 'result', width: 120 },
     { title: '测试对象', dataIndex: 'target', key: 'target', width: 150 },
@@ -309,7 +332,7 @@ const Injection: React.FC = () => {
               <Col xs={24} sm={12} md={8} lg={6} key={item.id} style={{ display: 'flex' }}>
                 <Card 
                   hoverable 
-                  bodyStyle={{ padding: 20, display: 'flex', flexDirection: 'column', height: '100%' }} 
+                  styles={{ body: { padding: 20, display: 'flex', flexDirection: 'column', height: '100%' } }}
                   style={{ borderRadius: 8, flex: 1, display: 'flex', flexDirection: 'column' }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
@@ -336,46 +359,59 @@ const Injection: React.FC = () => {
                       type="primary" 
                       icon={<CaretRightOutlined />} 
                       onClick={() => {
+                        if (!item.persisted) {
+                          openCreateFromTemplate(item)
+                          return
+                        }
                         setSelectedRecord(item)
+                        execForm.setFieldsValue({ target: item.target && item.target !== '未配置目标' ? item.target : undefined })
                         setIsExecOpen(true)
                       }}
                       style={{ flex: 1 }}
                     >
-                      执行
+                      {item.persisted ? '执行' : '配置'}
                     </Button>
                     <Button 
                       icon={<EditOutlined />} 
                       onClick={() => {
                         setSelectedRecord(item)
-                        setInjectionType(item.type)
+                        setSelectedTemplate(item.persisted ? null : item)
+                        setInjectionType(normalizeInjectionType(item.type))
                         try {
                           const c = JSON.parse(item.config_json)
                           if (item.type === 'power_off') {
                             form.setFieldsValue({
+                              default_target: item.target && item.target !== '未配置目标' ? item.target : c.default_target,
                               power_duration: c.duration,
-                              power_strategy: c.strategy,
+                              power_strategy: c.strategy || c.recovery || 'auto',
                             })
                           } else if (item.type === 'storage_full') {
+                            const rawLocation = c.location || c.custom_location || '/tmp'
+                            const rawSize = typeof c.size === 'string' && c.size.endsWith('%') ? Number(c.size.replace('%', '')) : c.size
                             form.setFieldsValue({
-                              storage_method: c.method,
-                              storage_location: ['/tmp', '/var/tmp'].includes(c.location) ? c.location : 'custom',
-                              storage_custom_location: ['/tmp', '/var/tmp'].includes(c.location) ? undefined : c.location,
-                              storage_size: [50, 80].includes(c.size) ? c.size : 'custom',
-                              storage_custom_size: [50, 80].includes(c.size) ? undefined : c.size,
-                              storage_strategy: c.strategy,
+                              default_target: item.target && item.target !== '未配置目标' ? item.target : c.default_target,
+                              storage_method: c.method || (c.fill === 'large_file' ? 'single' : 'multi'),
+                              storage_location: ['/tmp', '/var/tmp'].includes(rawLocation) ? rawLocation : 'custom',
+                              storage_custom_location: ['/tmp', '/var/tmp'].includes(rawLocation) ? undefined : rawLocation,
+                              storage_size: [50, 80].includes(rawSize) ? rawSize : 'custom',
+                              storage_custom_size: [50, 80].includes(rawSize) ? undefined : rawSize,
+                              storage_strategy: c.strategy || c.recovery || 'auto',
                             })
                           } else if (item.type === 'network_error') {
+                            const rawDuration = c.duration === 'custom' ? c.custom_duration : c.duration
                             form.setFieldsValue({
-                              network_type: c.type,
-                              network_duration: [10, 30].includes(c.duration) ? c.duration : 'custom',
-                              network_custom_duration: [10, 30].includes(c.duration) ? undefined : c.duration,
-                              network_strategy: c.strategy,
+                              default_target: item.target && item.target !== '未配置目标' ? item.target : c.default_target,
+                              network_type: c.type === 'full' ? 'disconnect' : c.type,
+                              network_duration: [10, 30].includes(rawDuration) ? rawDuration : 'custom',
+                              network_custom_duration: [10, 30].includes(rawDuration) ? undefined : rawDuration,
+                              network_strategy: c.strategy || c.recovery || 'auto',
                             })
                           } else if (item.type === 'permission_error') {
                             form.setFieldsValue({
-                              permission_target: c.target || { burn_dir: true },
-                              permission_type: c.type || { remove_write: true },
-                              permission_scope: c.scope || { current_user: true },
+                              default_target: item.target && item.target !== '未配置目标' ? item.target : c.default_target,
+                              permission_target: typeof c.target === 'string' ? { burn_dir: c.target === 'burn_dir', config_file: c.target === 'config_file', log_dir: c.target === 'log_dir' } : (c.target || { burn_dir: true }),
+                              permission_type: typeof c.perm === 'string' ? { remove_write: c.perm === 'write', remove_read: c.perm === 'read', remove_exec: c.perm === 'exec' } : (c.type || { remove_write: true }),
+                              permission_scope: typeof c.scope === 'string' ? { current_user: c.scope === 'current_user', all_users: c.scope === 'all_users', specific_group: c.scope === 'specific_group' } : (c.scope || { current_user: true }),
                               permission_duration: c.duration || { '5min': true },
                               permission_recovery: c.recovery || { auto: true },
                               permission_backup: c.backup || { auto: true }
@@ -423,10 +459,43 @@ const Injection: React.FC = () => {
       </Card>
 
       <Modal
-        title={selectedRecord?.title?.replace('模拟', '') + "编辑"}
+        title="选择异常类型"
+        open={isModalOpen}
+        onCancel={() => setIsModalOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <Row gutter={[16, 16]}>
+          {scenarioTemplates.map((item) => (
+            <Col xs={24} sm={12} key={item.id}>
+              <Card hoverable onClick={() => openCreateFromTemplate(item)}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div style={{
+                    width: 32, height: 32, borderRadius: 8,
+                    background: '#F0F5FF', color: '#4045D6',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    {item.type === 'power_off' && <ApiOutlined style={{ fontSize: 16 }} />}
+                    {item.type === 'storage_full' && <DatabaseOutlined style={{ fontSize: 16 }} />}
+                    {item.type === 'network_error' && <DisconnectOutlined style={{ fontSize: 16 }} />}
+                    {item.type === 'permission_error' && <SafetyCertificateOutlined style={{ fontSize: 16 }} />}
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 'bold' }}>{item.title}</div>
+                    <div style={{ color: '#666', fontSize: 12 }}>选择模板后进入参数配置</div>
+                  </div>
+                </div>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      </Modal>
+
+      <Modal
+        title={`${(selectedRecord?.title || selectedTemplate?.title || '').replace('模拟', '')}编辑`}
         open={isConfigOpen}
         onOk={() => form.submit()}
-        onCancel={() => { setIsConfigOpen(false); form.resetFields(); setInjectionType('') }}
+        onCancel={() => { setIsConfigOpen(false); form.resetFields(); setInjectionType(''); setSelectedTemplate(null); setSelectedRecord(null) }}
         width={650}
       >
         <Form form={form} layout="vertical" onFinish={handleCreate} initialValues={{ 
@@ -434,6 +503,9 @@ const Injection: React.FC = () => {
           storage_method: 'single', storage_location: '/tmp', storage_size: 50, storage_strategy: 'auto',
           network_type: 'disconnect', network_duration: 10, network_strategy: 'auto',
         }}>
+          <Form.Item label="默认执行目标" name="default_target">
+            <Select allowClear placeholder="可选，保存为场景默认目标" options={boards.map(b => ({ label: b.name, value: b.name }))} />
+          </Form.Item>
           {injectionType === 'power_off' && (
             <>
               <div style={{ fontWeight: 'bold', marginBottom: 16 }}>参数配置</div>
@@ -597,11 +669,11 @@ const Injection: React.FC = () => {
         title="选择执行目标"
         open={isExecOpen}
         onOk={() => execForm.submit()}
-        onCancel={() => { setIsExecOpen(false); execForm.resetFields() }}
+        onCancel={() => { setIsExecOpen(false); execForm.resetFields(); setSelectedRecord(null) }}
       >
         <Form form={execForm} layout="horizontal" onFinish={handleExecute}>
           <Form.Item label="选择执行目标" name="target" rules={[{ required: true, message: '请选择执行目标' }]}>
-            <Select placeholder="请选择板卡" options={boards.map(b => ({ label: b.name, value: b.id }))} />
+            <Select placeholder="请选择板卡" options={boards.map(b => ({ label: b.name, value: b.name }))} />
           </Form.Item>
         </Form>
       </Modal>
@@ -609,9 +681,9 @@ const Injection: React.FC = () => {
       <Modal title="注入详情" open={isDetailOpen} onCancel={() => setIsDetailOpen(false)} footer={null}>
         {selectedRecord && (
           <div>
-            <p><strong>类型：</strong>{typeMap[selectedRecord.type]?.text || selectedRecord.type}</p>
+            <p><strong>类型：</strong>{typeMap[normalizeInjectionType(selectedRecord.type)]?.text || selectedRecord.type}</p>
             <p><strong>目标：</strong>{selectedRecord.target}</p>
-            <p><strong>状态：</strong>{statusMap[selectedRecord.status]?.text}</p>
+            <p><strong>状态：</strong>{statusMap[selectedRecord.exec_status ?? selectedRecord.status]?.text}</p>
             <p><strong>结果：</strong>{selectedRecord.result || '-'}</p>
             {selectedRecord.config && (
               <p><strong>配置：</strong><pre>{selectedRecord.config}</pre></p>

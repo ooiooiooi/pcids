@@ -248,6 +248,7 @@ class TaskBase(BaseModel):
     """任务基础模式"""
     software_name: str = Field(..., min_length=1, max_length=200)
     repository_id: Optional[int] = None
+    task_type: Optional[str] = None
     executable: Optional[str] = None
     serial_number: Optional[str] = None
     board_name: Optional[str] = None
@@ -279,6 +280,7 @@ class TaskCreate(TaskBase):
 
 class TaskUpdate(BaseModel):
     """更新任务请求"""
+    task_type: Optional[str] = None
     board_name: Optional[str] = None
     target_ip: Optional[str] = None
     target_port: Optional[int] = None

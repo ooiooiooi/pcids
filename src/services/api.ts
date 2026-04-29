@@ -157,7 +157,7 @@ export const burnerApi = {
   update: (id: number, data: Record<string, any>) =>
     request.put(`/burners/${id}`, data),
   delete: (id: number) => request.delete(`/burners/${id}`),
-  scan: () => request.post('/burners/scan'),
+  scan: (data?: { burner_id?: number; type?: string; location?: string; strategy?: number }) => request.post('/burners/scan', data),
 }
 
 // 脚本服务
@@ -176,7 +176,7 @@ export const scriptApi = {
 export const taskApi = {
   getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string; board_name?: string; keyword?: string }) =>
     request.get('/tasks', { params }),
-  create: (data: { software_name: string; repository_id?: number; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string }) =>
+  create: (data: { software_name: string; repository_id?: number; task_type?: 'board' | 'os'; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string }) =>
     request.post('/tasks', data),
   update: (id: number, data: Record<string, any>) =>
     request.put(`/tasks/${id}`, data),
@@ -264,6 +264,26 @@ export const protocolTestApi = {
     request.put(`/protocol-tests/${id}`, data),
   delete: (id: number) => request.delete(`/protocol-tests/${id}`),
   getById: (id: number) => request.get(`/protocol-tests/${id}`),
+  connect: (data: { target: string; protocol: string; config?: Record<string, any> }) =>
+    request.post('/protocol-tests/connect', data),
+  disconnect: (sessionId: number) =>
+    request.post(`/protocol-tests/${sessionId}/disconnect`),
+  send: (sessionId: number, data: { frame_id?: string; dlc?: number; data?: string }) =>
+    request.post(`/protocol-tests/${sessionId}/send`, data),
+  getLogs: (sessionId: number, params?: { page?: number; page_size?: number }) =>
+    request.get(`/protocol-tests/${sessionId}/logs`, { params }),
+  clearLogs: (sessionId: number) =>
+    request.post(`/protocol-tests/${sessionId}/logs/clear`),
+  getRecords: (params?: { page?: number; page_size?: number; keyword?: string; protocol?: string; executor?: string }) =>
+    request.get('/protocol-tests/records', { params }),
+  getRecordDetail: (recordId: number) =>
+    request.get(`/protocol-tests/records/${recordId}`),
+  deleteRecord: (recordId: number) =>
+    request.delete(`/protocol-tests/records/${recordId}`),
+  getReportHtml: (recordId: number, print = false) =>
+    request.get(`/protocol-tests/${recordId}/report/html`, { params: { print: print ? 1 : 0 }, responseType: 'blob' as any }),
+  getReportCsv: (recordId: number) =>
+    request.get(`/protocol-tests/${recordId}/report/csv`, { responseType: 'blob' as any }),
 }
 
 // 工作台服务

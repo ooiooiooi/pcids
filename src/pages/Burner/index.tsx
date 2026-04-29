@@ -17,6 +17,7 @@ const Burner: React.FC = () => {
   const [keepAdding, setKeepAdding] = useState(false)
   const [createStrategy, setCreateStrategy] = useState(1)
   const [editStrategy, setEditStrategy] = useState(1)
+  const [scanLoading, setScanLoading] = useState<'create-sn' | 'create-port' | 'edit-sn' | 'edit-port' | null>(null)
 
   useEffect(() => { fetchBurners() }, [params])
 
@@ -70,6 +71,35 @@ const Burner: React.FC = () => {
       message.success('删除成功')
       fetchBurners()
     } catch { /* ignore */ }
+  }
+
+  const handleScan = async (mode: 'create' | 'edit', strategy: number) => {
+    const form = mode === 'create' ? createForm : editForm
+    const type = form.getFieldValue('type')
+    const location = form.getFieldValue('location')
+    if (!type) {
+      message.warning('请先选择烧录器类型')
+      return
+    }
+    const loadingKey = `${mode}-${strategy === 1 ? 'sn' : 'port'}` as typeof scanLoading
+    setScanLoading(loadingKey)
+    try {
+      const res: any = await burnerApi.scan({
+        burner_id: mode === 'edit' ? editingBurner?.id : undefined,
+        type,
+        location,
+        strategy,
+      })
+      const values: any = {}
+      if (strategy === 1) values.sn = res?.data?.sn
+      else values.port = res?.data?.port
+      form.setFieldsValue(values)
+      message.success(res?.data?.source === 'usb_probe' ? '已读取本机USB设备信息' : '已生成稳定识别信息')
+    } catch {
+      message.error('扫描失败')
+    } finally {
+      setScanLoading(null)
+    }
   }
 
   const statusFilterOptions = [
@@ -163,7 +193,7 @@ const Burner: React.FC = () => {
         >
           <Input 
             placeholder="例如：37FF71064E573436F2FC1443" 
-            suffix={<a style={{ display: 'flex', alignItems: 'center', gap: 4 }}><SyncOutlined /> 获取标识码</a>}
+            suffix={<Button type="link" size="small" loading={scanLoading === 'create-sn' || scanLoading === 'edit-sn'} onClick={() => handleScan(form === createForm ? 'create' : 'edit', 1)} icon={<SyncOutlined />}>获取标识码</Button>}
           />
         </Form.Item>
       )}
@@ -178,7 +208,7 @@ const Burner: React.FC = () => {
         >
           <Input 
             placeholder="例如：Pot#0003.Hub#0001" 
-            suffix={<a style={{ display: 'flex', alignItems: 'center', gap: 4 }}><SyncOutlined /> 获取当前位置</a>}
+            suffix={<Button type="link" size="small" loading={scanLoading === 'create-port' || scanLoading === 'edit-port'} onClick={() => handleScan(form === createForm ? 'create' : 'edit', 2)} icon={<SyncOutlined />}>获取当前位置</Button>}
           />
         </Form.Item>
       )}

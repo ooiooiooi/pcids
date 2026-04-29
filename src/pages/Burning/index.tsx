@@ -170,6 +170,8 @@ const Burning: React.FC = () => {
         return
       }
       const configPayload = {
+        task_type: platform,
+        platform,
         retries: Number(wizardData.retryCount || 0),
         keep_local: wizardData.options?.includes('local'),
         integrity: wizardData.options?.includes('integrity'),
@@ -183,6 +185,7 @@ const Burning: React.FC = () => {
       await taskApi.create({
         software_name: selectedRepository.name,
         repository_id: selectedRepository.id,
+        task_type: platform || undefined,
         board_name: platform === 'board' ? boards.find(b => b.id === wizardData.boardId)?.name : osList.find(o => o.id === wizardData.osId)?.name,
         config_json: JSON.stringify(configPayload),
         target_ip: wizardData.targetIp,
@@ -441,7 +444,7 @@ const Burning: React.FC = () => {
     { title: '板卡图片', dataIndex: 'board_image', render: (img: string) => (
       <Space>
         <img src={img} alt="board" style={{ width: 40, height: 30, objectFit: 'cover', borderRadius: 2 }} />
-        <a href="#">详情</a>
+        <span style={{ color: '#666' }}>板卡详情</span>
       </Space>
     ) },
   ]

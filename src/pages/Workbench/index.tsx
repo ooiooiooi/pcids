@@ -94,7 +94,7 @@ const Workbench: React.FC = () => {
       <Row gutter={[16, 16]}>
         {/* Greeting Card */}
         <Col xs={24} sm={12} lg={6}>
-          <Card bodyStyle={{ padding: 20, height: 120, display: 'flex', flexDirection: 'column', justifyContent: 'center', background: '#F8F9FE' }} bordered={false}>
+          <Card styles={{ body: { padding: 20, height: 120, display: 'flex', flexDirection: 'column', justifyContent: 'center', background: '#F8F9FE' } }} variant="borderless">
             <Title level={5} style={{ margin: '0 0 12px 0' }}>Hi，{username}~</Title>
             <div>
               <span style={{ background: '#4045D6', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>
@@ -107,7 +107,7 @@ const Workbench: React.FC = () => {
 
         {/* Today's Burn/Install Count */}
         <Col xs={24} sm={12} lg={6}>
-          <Card bodyStyle={{ padding: 20, height: 120, position: 'relative' }} bordered={false}>
+          <Card styles={{ body: { padding: 20, height: 120, position: 'relative' } }} variant="borderless">
             <Text type="secondary" style={{ fontSize: 12 }}>今日烧录/安装量</Text>
             <div style={{ fontSize: 32, fontWeight: 'bold', margin: '4px 0', color: '#1d2129' }}>
               {stats.todayTasks}
@@ -124,7 +124,7 @@ const Workbench: React.FC = () => {
 
         {/* Success Rate */}
         <Col xs={24} sm={12} lg={6}>
-          <Card bodyStyle={{ padding: 20, height: 120, position: 'relative' }} bordered={false}>
+          <Card styles={{ body: { padding: 20, height: 120, position: 'relative' } }} variant="borderless">
             <Text type="secondary" style={{ fontSize: 12 }}>成功率</Text>
             <div style={{ fontSize: 32, fontWeight: 'bold', margin: '4px 0', color: '#1d2129' }}>
               {stats.successRate}%
@@ -141,7 +141,7 @@ const Workbench: React.FC = () => {
 
         {/* Burner Status */}
         <Col xs={24} sm={12} lg={6}>
-          <Card bodyStyle={{ padding: 20, height: 120, position: 'relative' }} bordered={false}>
+          <Card styles={{ body: { padding: 20, height: 120, position: 'relative' } }} variant="borderless">
             <Text type="secondary" style={{ fontSize: 12 }}>烧录器状态</Text>
             <div style={{ display: 'flex', alignItems: 'center', marginTop: 16, gap: 16 }}>
               <div style={{ display: 'flex', alignItems: 'baseline' }}>
@@ -167,7 +167,7 @@ const Workbench: React.FC = () => {
       {/* Middle Row: Shortcuts & Notifications */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={12}>
-          <Card title="快捷方式" bordered={false} bodyStyle={{ padding: '20px 24px' }}>
+          <Card title="快捷方式" variant="borderless" styles={{ body: { padding: '20px 24px' } }}>
             <Row gutter={[16, 16]}>
               <Col span={8}>
                 <div 
@@ -206,7 +206,7 @@ const Workbench: React.FC = () => {
           </Card>
         </Col>
         <Col xs={24} lg={12}>
-          <Card title="动态通知" extra={<a href="#">更多&gt;&gt;</a>} bordered={false} bodyStyle={{ padding: '12px 24px' }}>
+          <Card title="动态通知" extra={<span style={{ color: '#666' }}>最近更新</span>} variant="borderless" styles={{ body: { padding: '12px 24px' } }}>
             <List
               dataSource={notifications}
               renderItem={(item) => (
@@ -223,7 +223,7 @@ const Workbench: React.FC = () => {
       </Row>
 
       {/* Bottom Row: Charts */}
-      <Card title="安装成功率趋势" bordered={false} style={{ marginTop: 16 }} extra={<Space><a href="#" style={{ color: '#4045D6', borderBottom: '2px solid #4045D6', paddingBottom: 2 }}>近半年</a><a href="#" style={{ color: '#666' }}>近一年</a></Space>}>
+      <Card title="安装成功率趋势" variant="borderless" style={{ marginTop: 16 }} extra={<Space><span style={{ color: '#4045D6', borderBottom: '2px solid #4045D6', paddingBottom: 2 }}>近半年</span><span style={{ color: '#666' }}>近一年</span></Space>}>
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={trendData} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -235,7 +235,7 @@ const Workbench: React.FC = () => {
         </ResponsiveContainer>
       </Card>
 
-      <Card title="目标安装数量统计" bordered={false} style={{ marginTop: 16, marginBottom: 24 }} extra={<Space><a href="#" style={{ color: '#4045D6', borderBottom: '2px solid #4045D6', paddingBottom: 2 }}>近半年</a><a href="#" style={{ color: '#666' }}>近一年</a></Space>}>
+      <Card title="目标安装数量统计" variant="borderless" style={{ marginTop: 16, marginBottom: 24 }} extra={<Space><span style={{ color: '#4045D6', borderBottom: '2px solid #4045D6', paddingBottom: 2 }}>近半年</span><span style={{ color: '#666' }}>近一年</span></Space>}>
         <ResponsiveContainer width="100%" height={300}>
           <BarChart data={targetData} layout="vertical" margin={{ top: 20, right: 30, left: 20, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" horizontal={false} />

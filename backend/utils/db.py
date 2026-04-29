@@ -578,6 +578,7 @@ def ensure_schema():
     ensure_column("login_logs", "log_type", "VARCHAR(20)")
     ensure_column("operation_logs", "ip_address", "VARCHAR(50)")
     ensure_column("tasks", "repository_id", "INTEGER")
+    ensure_column("tasks", "task_type", "VARCHAR(20)")
     ensure_column("tasks", "serial_number", "VARCHAR(100)")
     ensure_column("tasks", "keep_local", "INTEGER")
     ensure_column("tasks", "integrity", "INTEGER")
