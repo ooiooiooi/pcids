@@ -81,7 +81,6 @@ function guessCodeartsMetaFromKey(key: string) {
 }
 
 const Repository: React.FC = () => {
-  const [mode, setMode] = useState<'online' | 'offline'>('online')
   const [treeLoading, setTreeLoading] = useState(false)
   const [treeRaw, setTreeRaw] = useState<any[]>([])
   const [searchKeyword, setSearchKeyword] = useState('')
@@ -186,16 +185,14 @@ const Repository: React.FC = () => {
   const refreshTree = async () => {
     setTreeLoading(true)
     try {
-      const res: any = await repositoryApi.getTree({ mode })
+      const res: any = await repositoryApi.getTree({ mode: 'online' })
       if (res?.code === 0) {
         setTreeRaw(res.data || [])
       }
     } catch (e: any) {
-      if (mode === 'online') {
-        const errDetail = e?.response?.data?.detail
-        message.error(errDetail || '云端同步失败，请检查同步配置中的 IAM 账号、区域、项目ID及仓库ID是否正确')
-        setTreeRaw([])
-      }
+      const errDetail = e?.response?.data?.detail
+      message.error(errDetail || '云端同步失败，请检查同步配置中的 IAM 账号、区域、项目ID及仓库ID是否正确')
+      setTreeRaw([])
     } finally {
       setTreeLoading(false)
     }
@@ -213,7 +210,7 @@ const Repository: React.FC = () => {
   useEffect(() => {
     refreshCodeartsConfig()
     refreshTree()
-  }, [mode])
+  }, [])
 
   useEffect(() => {
     if (!isCreateProjectOpen && !isSyncConfigOpen) return
@@ -842,15 +839,6 @@ const Repository: React.FC = () => {
           <Button type="link" icon={<ReloadOutlined />} onClick={() => { refreshCodeartsConfig(); refreshTree() }}>
             同步CodeArts
           </Button>
-          <Select
-            value={mode}
-            style={{ width: 140 }}
-            onChange={(val) => setMode(val)}
-            options={[
-              { label: '云端 (Online)', value: 'online' },
-              { label: '局域网 (Offline)', value: 'offline' },
-            ]}
-          />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <Select
