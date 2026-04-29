@@ -96,6 +96,8 @@ def _http_get_json(url: str, token: Optional[str] = None, timeout_seconds: int =
     headers = {"Accept": "application/json"}
     if token:
         headers["X-Auth-Token"] = token
+    # CodeArts APIs require Content-Type: application/json for most GET requests as well
+    headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         body = resp.read().decode("utf-8", errors="ignore")
@@ -498,12 +500,14 @@ async def get_repository_tree(
                 def traverse_codearts(current_repo_id, current_relative_path):
                     # Call ShowFileTree API
                     url = f"{base_url}/cloudartifact/v5/{tenant_id}/{project_id}/{current_repo_id}/file-tree"
-                    params = f"?path={current_relative_path}"
                     
                     import urllib.parse
                     safe_params = "?path=" + urllib.parse.quote(current_relative_path)
                     
                     resp = _http_get_json(url + safe_params, token=token)
+                    if resp.get("error"):
+                        err_obj = resp.get("error", {})
+                        raise Exception(f"获取目录失败: {err_obj.get('reason', '未知错误')} (URL: {url+safe_params})")
                     if resp.get("error_code") or resp.get("error_msg"):
                         raise Exception(f"获取目录失败: {resp.get('error_msg', '未知错误')} (URL: {url+safe_params})")
                     nodes = _extract_list(resp)
