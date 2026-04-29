@@ -1,12 +1,14 @@
 """
 制品仓库路由
 """
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Body
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
 import os
 import shutil
 import uuid
 import hashlib
 import json
+import logging
+import re
 from datetime import datetime
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -20,6 +22,39 @@ from backend.routers.auth import get_current_user
 from backend.utils.permission import require_permission
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_SENSITIVE_LOG_KEYS = {"password", "token", "download_password"}
+
+
+def _sanitize_log_data(value):
+    if isinstance(value, dict):
+        sanitized = {}
+        for k, v in value.items():
+            if str(k).lower() in _SENSITIVE_LOG_KEYS:
+                sanitized[k] = "***"
+            else:
+                sanitized[k] = _sanitize_log_data(v)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_log_data(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_log_data(v) for v in value)
+    return value
+
+
+def _current_user_log_context(current_user: Optional[User]) -> dict:
+    if not current_user:
+        return {}
+    return {
+        "user_id": getattr(current_user, "id", None),
+        "username": getattr(current_user, "username", None),
+    }
+
+
+def _log_event(event: str, level: str = "info", **kwargs) -> None:
+    payload = _sanitize_log_data(kwargs)
+    log_fn = getattr(logger, level, logger.info)
+    log_fn("%s | %s", event, json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def repository_to_dict(r):
@@ -37,6 +72,12 @@ def repository_to_dict(r):
         "download_count": getattr(r, "download_count", None),
         "last_download_time": getattr(r, "last_download_time", None),
         "project_key": getattr(r, "project_key", None),
+        "source_type": getattr(r, "source_type", None),
+        "remote_repo_id": getattr(r, "remote_repo_id", None),
+        "display_path": getattr(r, "display_path", None),
+        "download_uri": getattr(r, "download_uri", None),
+        "repo_detail": _safe_json_loads(getattr(r, "repo_detail_json", None)),
+        "file_detail": _safe_json_loads(getattr(r, "file_detail_json", None)),
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
@@ -64,6 +105,17 @@ def _extract_list(payload):
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
+        result = payload.get("result")
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            children = result.get("children")
+            if isinstance(children, list):
+                return children
+            for k in ["data", "items", "projects", "packages", "versions", "results"]:
+                v = result.get(k)
+                if isinstance(v, list):
+                    return v
         for k in ["data", "items", "projects", "packages", "versions", "results"]:
             v = payload.get(k)
             if isinstance(v, list):
@@ -91,6 +143,14 @@ def _guess_name(item: dict) -> str:
     iid = _guess_id(item)
     return iid or "-"
 
+
+def _urlopen_no_proxy(req, timeout_seconds: int):
+    import urllib.request
+
+    # Force direct outbound requests and ignore any proxy variables from the host environment.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(req, timeout=timeout_seconds)
+
 def _http_get_json(url: str, token: Optional[str] = None, timeout_seconds: int = 10):
     import urllib.request
     headers = {"Accept": "application/json"}
@@ -99,7 +159,20 @@ def _http_get_json(url: str, token: Optional[str] = None, timeout_seconds: int =
     # CodeArts APIs require Content-Type: application/json for most GET requests as well
     headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+    with _urlopen_no_proxy(req, timeout_seconds) as resp:
+        body = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(body) if body else {}
+
+
+def _http_post_json(url: str, payload: Optional[dict] = None, token: Optional[str] = None, timeout_seconds: int = 10):
+    import urllib.request
+
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if token:
+        headers["X-Auth-Token"] = token
+    data = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with _urlopen_no_proxy(req, timeout_seconds) as resp:
         body = resp.read().decode("utf-8", errors="ignore")
     return json.loads(body) if body else {}
 
@@ -114,7 +187,7 @@ def _http_download_file(url: str, dst_path: str, token: Optional[str] = None, us
     elif token:
         headers["X-Auth-Token"] = token
     req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+    with _urlopen_no_proxy(req, timeout_seconds) as resp:
         total = 0
         with open(dst_path, "wb") as f:
             while True:
@@ -145,7 +218,7 @@ def _get_iam_token(domain_name: str, username: str, password: str, region: str) 
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _urlopen_no_proxy(req, 30) as resp:
         return resp.headers.get("X-Subject-Token")
 
 def _safe_format_path(template: str, **kwargs) -> str:
@@ -153,6 +226,346 @@ def _safe_format_path(template: str, **kwargs) -> str:
     for k, v in kwargs.items():
         out = out.replace("{" + k + "}", str(v))
     return out
+
+
+def _merge_codearts_config(existing: dict, payload: dict) -> dict:
+    merged = dict(existing or {})
+    for k in [
+        "enabled",
+        "base_url",
+        "projects_path",
+        "packages_path",
+        "versions_path",
+        "download_path",
+        "domain_name",
+        "username",
+        "password",
+        "region",
+        "tenant_id",
+        "project_id",
+        "download_username",
+        "download_password",
+    ]:
+        if k in payload:
+            merged[k] = payload.get(k)
+    if "token" in payload:
+        token = str(payload.get("token") or "").strip()
+        if token:
+            merged["token"] = token
+    if "repo_ids" in payload:
+        repo_ids = payload.get("repo_ids")
+        if isinstance(repo_ids, list):
+            merged["repo_ids"] = [str(x).strip() for x in repo_ids if str(x).strip()]
+    return merged
+
+
+def _normalize_relative_path(path_value: Optional[str], fallback_name: Optional[str] = None) -> str:
+    path_text = str(path_value or "").strip()
+    if not path_text or path_text == "/":
+        safe_name = str(fallback_name or "").strip() or "unknown"
+        return f"/{safe_name}"
+    return re.sub(r"^/+", "/", path_text)
+
+
+def _extract_result_dict(payload: dict) -> dict:
+    result = payload.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _parse_display_size_to_bytes(display_size: Optional[str]) -> Optional[int]:
+    text = str(display_size or "").strip()
+    if not text:
+        return None
+    match = re.search(r"([\d\.]+)\s*([KMG]?B)", text, re.I)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = match.group(2).upper()
+    if unit == "KB":
+        return int(number * 1024)
+    if unit == "MB":
+        return int(number * 1024 * 1024)
+    if unit == "GB":
+        return int(number * 1024 * 1024 * 1024)
+    return int(number)
+
+
+def _raise_codearts_error(prefix: str, payload: dict, url: str) -> None:
+    if payload.get("error"):
+        err_obj = payload.get("error", {})
+        raise Exception(f"{prefix}: {err_obj.get('reason', '未知错误')} (URL: {url})")
+    if payload.get("status") == "error":
+        reason = payload.get("message") or payload.get("error_msg") or payload.get("reason") or "未知错误"
+        raise Exception(f"{prefix}: {reason} (URL: {url})")
+    if payload.get("error_code") or payload.get("error_msg"):
+        raise Exception(f"{prefix}: {payload.get('error_msg', '未知错误')} (URL: {url})")
+
+
+def _compose_codearts_file_path(path_value: Optional[str], name: Optional[str]) -> str:
+    base_path = str(path_value or "").strip()
+    filename = str(name or "").strip()
+    if not base_path:
+        return _normalize_relative_path(filename or "/", filename)
+    normalized = _normalize_relative_path(base_path, filename)
+    if normalized.endswith("/"):
+        normalized = normalized.rstrip("/")
+    if filename:
+        if normalized in ("", "/"):
+            return f"/{filename}"
+        return f"{normalized}/{filename}"
+    return normalized or "/"
+
+
+def _compose_codearts_file_name(project_id: str, path_value: Optional[str], name: Optional[str]) -> str:
+    relative = _compose_codearts_file_path(path_value, name)
+    return f"{project_id}{relative}"
+
+
+def _coerce_size_bytes(raw_size: Optional[object], display_size: Optional[str] = None) -> Optional[int]:
+    if raw_size not in (None, ""):
+        text = str(raw_size).strip()
+        if text.isdigit():
+            return int(text)
+        parsed = _parse_display_size_to_bytes(text)
+        if parsed is not None:
+            return parsed
+    return _parse_display_size_to_bytes(display_size)
+
+
+def _get_codearts_project_list(base_url: str, token: str) -> list[dict]:
+    last_error: Optional[Exception] = None
+    tried_paths: list[str] = []
+    for path in ["/devreposerver/v5/files/list", "/DevRepoServer/v5/files/list"]:
+        url = f"{base_url}{path}"
+        tried_paths.append(url)
+        try:
+            resp = _http_post_json(url, payload={}, token=token)
+            _raise_codearts_error("获取项目信息失败", resp, url)
+            return _extract_list(resp)
+        except Exception as e:
+            last_error = e
+            if "404" in str(e):
+                continue
+            raise
+    raise Exception(f"获取项目信息失败，已尝试: {', '.join(tried_paths)}；最后错误: {last_error}")
+
+
+def _get_codearts_project_versions(base_url: str, token: str, project_id: str) -> list[dict]:
+    last_error: Optional[Exception] = None
+    tried_paths: list[str] = []
+    for path in [
+        f"/devreposerver/v5/{project_id}/files/version",
+        f"/DevRepoServer/v5/{project_id}/files/version",
+    ]:
+        url = f"{base_url}{path}"
+        tried_paths.append(url)
+        try:
+            resp = _http_get_json(url, token=token)
+            _raise_codearts_error("获取发布库文件失败", resp, url)
+            return _extract_list(resp)
+        except Exception as e:
+            last_error = e
+            if "404" in str(e):
+                continue
+            raise
+    raise Exception(f"获取发布库文件失败，已尝试: {', '.join(tried_paths)}；最后错误: {last_error}")
+
+
+def _get_codearts_file_info(base_url: str, token: str, project_id: str, path_value: Optional[str], name: Optional[str]) -> dict:
+    import urllib.parse
+
+    file_name = _compose_codearts_file_name(project_id, path_value, name)
+    last_error: Optional[Exception] = None
+    tried_paths: list[str] = []
+    query = urllib.parse.urlencode({"file_name": file_name})
+    for path in [f"/devreposerver/v5/files/info?{query}", f"/DevRepoServer/v5/files/info?{query}"]:
+        url = f"{base_url}{path}"
+        tried_paths.append(url)
+        try:
+            resp = _http_get_json(url, token=token)
+            _raise_codearts_error("获取文件详情失败", resp, url)
+            return _extract_result_dict(resp)
+        except Exception as e:
+            last_error = e
+            if "404" in str(e):
+                continue
+            raise
+    raise Exception(f"获取文件详情失败，已尝试: {', '.join(tried_paths)}；最后错误: {last_error}")
+
+
+def _build_project_stats(items: list[dict]) -> dict[str, dict]:
+    stats: dict[str, dict] = {}
+    for item in items:
+        project_id = str(item.get("project_id") or "").strip()
+        if not project_id:
+            continue
+        size = _coerce_size_bytes((item.get("file_detail") or {}).get("size"), item.get("display_size"))
+        row = stats.setdefault(project_id, {"artifact_count": 0, "total_size_bytes": 0})
+        row["artifact_count"] += 1
+        row["total_size_bytes"] += int(size or 0)
+    for row in stats.values():
+        row["total_size_mb"] = round(row["total_size_bytes"] / (1024 * 1024), 2)
+    return stats
+
+
+def _list_codearts_project_files(base_url: str, token: str, project_info: dict) -> list[dict]:
+    project_id = str(project_info.get("project_id") or "").strip()
+    if not project_id:
+        return []
+    repo_name = str(project_info.get("repo_name") or "").strip()
+    web_url = str(project_info.get("web_url") or "").strip()
+    archive_url = str(project_info.get("download_url_with_id") or "").strip()
+    versions = _get_codearts_project_versions(base_url, token, project_id)
+    results: list[dict] = []
+    for item in versions:
+        filename = str(item.get("name") or "").strip() or "unknown"
+        display_path = _compose_codearts_file_path(item.get("path"), filename)
+        file_info = _get_codearts_file_info(base_url, token, project_id, item.get("path"), filename)
+        merged_file_detail = dict(item)
+        merged_file_detail.update(file_info)
+        download_uri = str(file_info.get("download_url_with_id") or file_info.get("download_url") or "").strip() or None
+        results.append(
+            {
+                "project_id": project_id,
+                "project_name": str(project_info.get("name") or "").strip() or project_id,
+                "remote_repo_id": str(file_info.get("repo_name") or repo_name or "").strip() or None,
+                "name": filename,
+                "display_path": display_path,
+                "display_size": file_info.get("size") or item.get("size"),
+                "download_uri": download_uri,
+                "web_url": str(file_info.get("web_url") or web_url or "").strip() or None,
+                "archive_download_url": str(file_info.get("download_url_with_id") or archive_url or "").strip() or None,
+                "repo_detail": dict(project_info),
+                "file_detail": merged_file_detail,
+            }
+        )
+    return results
+
+
+def _remove_repository_local_file(repo: Repository) -> None:
+    file_url = str(getattr(repo, "file_url", "") or "")
+    rel = file_url.lstrip("/") if file_url.startswith("/") else file_url
+    if rel.startswith("uploads/") and os.path.exists(rel) and os.path.isfile(rel):
+        try:
+            os.remove(rel)
+        except Exception:
+            logger.exception(
+                "repository.local_file.delete_failed | %s",
+                json.dumps({"repo_db_id": getattr(repo, "id", None), "file_path": rel}, ensure_ascii=False, default=str),
+            )
+
+
+def _build_local_tree(repos: list[Repository]) -> list[dict]:
+    def new_branch(title: str, key: str, **kwargs):
+        node = {"title": title, "key": key, "children": [], "_children_index": {}}
+        node.update(kwargs)
+        return node
+
+    def finalize(nodes: list[dict]) -> list[dict]:
+        def walk(items: list[dict]) -> list[dict]:
+            out = []
+            for node in items:
+                next_node = {k: v for k, v in node.items() if k != "_children_index"}
+                children = node.get("children") or []
+                if children:
+                    next_node["children"] = walk(children)
+                out.append(next_node)
+            out.sort(key=lambda x: (1 if x.get("isLeaf") else 0, str(x.get("title") or "")))
+            return out
+
+        return walk(nodes)
+
+    project_map: dict[str, dict] = {}
+    upload_children: list[dict] = []
+
+    for r in repos:
+        source_type = str(getattr(r, "source_type", "") or "")
+        if not getattr(r, "file_url", None) and source_type != "codearts_sync":
+            continue
+
+        project_key = str(getattr(r, "project_key", "") or "")
+        remote_repo_id = str(getattr(r, "remote_repo_id", "") or getattr(r, "repo_id", "") or "unknown")
+        project_id = project_key[5:] if project_key.startswith("proj_") else project_key
+        repo_detail = _safe_json_loads(getattr(r, "repo_detail_json", None))
+        file_detail = _safe_json_loads(getattr(r, "file_detail_json", None))
+        project_name = str(repo_detail.get("name") or repo_detail.get("project_name") or project_id or "未命名项目")
+        size = getattr(r, "size", None)
+        if size is None:
+            size = _coerce_size_bytes(file_detail.get("size"))
+
+        file_node = {
+            "title": str(getattr(r, "name", "") or "未命名文件"),
+            "key": f"local_file_{r.id}",
+            "isLeaf": True,
+            "repo_id": r.id,
+            "file_url": getattr(r, "file_url", None),
+            "size": size,
+            "version": getattr(r, "version", None),
+            "md5": getattr(r, "md5", None) or file_detail.get("md5") or ((file_detail.get("checksums") or {}).get("md5")),
+            "sha256": getattr(r, "sha256", None) or file_detail.get("sha256") or ((file_detail.get("checksums") or {}).get("sha256")),
+            "download_count": getattr(r, "download_count", None) or ((file_detail.get("downloadInfo") or {}).get("downloadCount")),
+            "last_download_time": getattr(r, "last_download_time", None) or ((file_detail.get("downloadInfo") or {}).get("lastDownloaded")),
+            "project_id": project_id or None,
+            "remote_repo_id": remote_repo_id,
+            "download_uri": getattr(r, "download_uri", None) or file_detail.get("download_url_with_id") or file_detail.get("download_url"),
+            "display_path": getattr(r, "display_path", None),
+            "repo_detail": repo_detail,
+            "file_detail": file_detail,
+            "web_url": repo_detail.get("web_url"),
+        }
+
+        if source_type != "codearts_sync":
+            upload_children.append(file_node)
+            continue
+
+        project_node = project_map.get(project_key)
+        if not project_node:
+            project_node = new_branch(
+                project_name,
+                project_key or f"proj_local_{len(project_map) + 1}",
+                project_id=project_id or None,
+                repo_detail=repo_detail,
+                remote_repo_id=remote_repo_id or None,
+                web_url=repo_detail.get("web_url"),
+            )
+            project_map[project_key] = project_node
+        elif not project_node.get("repo_detail") and repo_detail:
+            project_node["repo_detail"] = repo_detail
+            project_node["title"] = project_name
+
+        display_path = _normalize_relative_path(getattr(r, "display_path", None) or getattr(r, "description", None), getattr(r, "name", None))
+        parts = [p for p in display_path.strip("/").split("/") if p]
+        folder_parts = parts[:-1]
+        file_name = parts[-1] if parts else str(getattr(r, "name", "") or "未命名文件")
+
+        cursor = project_node
+        current_path_parts: list[str] = []
+        for folder_name in folder_parts:
+            current_path_parts.append(folder_name)
+            folder_key = "/".join(current_path_parts)
+            next_folder = cursor["_children_index"].get(folder_key)
+            if not next_folder:
+                next_folder = new_branch(
+                    folder_name,
+                    f"dir_sync_{project_id}_{folder_key}",
+                    project_id=project_id or None,
+                    remote_repo_id=remote_repo_id,
+                    repo_detail=repo_detail,
+                )
+                cursor["_children_index"][folder_key] = next_folder
+                cursor["children"].append(next_folder)
+            cursor = next_folder
+
+        file_node["title"] = file_name
+        cursor["children"].append(file_node)
+
+    tree_data = list(project_map.values())
+    if upload_children:
+        upload_root = new_branch("本地上传制品", "local_uploaded_root")
+        upload_root["children"] = upload_children
+        tree_data.append(upload_root)
+
+    return finalize(tree_data)
 
 def _default_permission_config_for_group(group: str) -> dict:
     if group == "member":
@@ -273,6 +686,14 @@ async def get_codearts_config(
         cfg["password"] = ""
     cfg["token_present"] = token_present
     cfg["password_present"] = password_present
+    _log_event(
+        "repository.codearts_config.get",
+        **_current_user_log_context(current_user),
+        enabled=bool(cfg.get("enabled")),
+        repo_count=len(cfg.get("repo_ids") or []) if isinstance(cfg.get("repo_ids"), list) else 0,
+        token_present=token_present,
+        password_present=password_present,
+    )
     return {"code": 0, "message": "success", "data": cfg}
 
 
@@ -283,38 +704,195 @@ async def set_codearts_config(
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("repository:sync")),
 ):
+    _log_event(
+        "repository.codearts_config.set.start",
+        **_current_user_log_context(current_user),
+        payload=payload,
+    )
     existing = _safe_json_loads(getattr(current_user, "codearts_config_json", None))
-    merged = dict(existing)
-    for k in [
-        "enabled",
-        "base_url",
-        "projects_path",
-        "packages_path",
-        "versions_path",
-        "download_path",
-        "domain_name",
-        "username",
-        "password",
-        "region",
-        "tenant_id",
-        "project_id",
-        "download_username",
-        "download_password"
-    ]:
-        if k in payload:
-            merged[k] = payload.get(k)
-    if "token" in payload:
-        token = str(payload.get("token") or "").strip()
-        if token:
-            merged["token"] = token
-    if "repo_ids" in payload:
-        repo_ids = payload.get("repo_ids")
-        if isinstance(repo_ids, list):
-            merged["repo_ids"] = [str(x).strip() for x in repo_ids if str(x).strip()]
+    merged = _merge_codearts_config(existing, payload)
     current_user.codearts_config_json = json.dumps(merged, ensure_ascii=False)
     db.add(current_user)
     db.commit()
+    _log_event(
+        "repository.codearts_config.set.success",
+        **_current_user_log_context(current_user),
+        enabled=bool(merged.get("enabled")),
+        repo_count=len(merged.get("repo_ids") or []) if isinstance(merged.get("repo_ids"), list) else 0,
+        region=merged.get("region"),
+        project_id=merged.get("project_id"),
+    )
     return {"code": 0, "message": "保存成功", "data": {"enabled": bool(merged.get("enabled"))}}
+
+
+@router.post("/codearts/sync", response_model=Response)
+async def sync_codearts_project(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("repository:sync")),
+):
+    ensure_schema()
+    _log_event(
+        "repository.codearts_sync.start",
+        **_current_user_log_context(current_user),
+        payload=payload,
+    )
+
+    existing = _safe_json_loads(getattr(current_user, "codearts_config_json", None))
+    merged = _merge_codearts_config(existing, payload)
+    current_user.codearts_config_json = json.dumps(merged, ensure_ascii=False)
+    db.add(current_user)
+    db.commit()
+
+    enabled = bool(merged.get("enabled"))
+    domain_name = str(merged.get("domain_name") or "").strip()
+    username = str(merged.get("username") or "").strip()
+    password = str(merged.get("password") or "").strip()
+    region = str(merged.get("region") or "cn-north-4").strip()
+    tenant_id = str(merged.get("tenant_id") or "").strip()
+    project_id = str(merged.get("project_id") or "").strip()
+    base_url = str(merged.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
+    repo_ids = [str(x).strip() for x in (merged.get("repo_ids") or []) if str(x).strip()]
+
+    if not enabled:
+        raise HTTPException(status_code=400, detail="CodeArts 未启用")
+    if not domain_name or not username or not password:
+        raise HTTPException(status_code=400, detail="IAM认证信息(账号名/用户名/密码)未配置完整")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="项目ID未配置完整")
+
+    try:
+        token = _get_iam_token(domain_name, username, password, region)
+    except Exception as e:
+        logger.exception(
+            "repository.codearts_sync.token_error | %s",
+            json.dumps(
+                _sanitize_log_data(
+                    {
+                        **_current_user_log_context(current_user),
+                        "region": region,
+                        "tenant_id": tenant_id,
+                        "project_id": project_id,
+                        "repo_ids": repo_ids,
+                    }
+                ),
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+        raise HTTPException(status_code=502, detail=f"获取IAM Token失败: {str(e)}")
+
+    base_url = base_url.replace("{region}", region)
+
+    try:
+        project_list = _get_codearts_project_list(base_url, token)
+        project_info = next((p for p in project_list if str(p.get("project_id") or "").strip() == project_id), None)
+        if not project_info:
+            raise Exception(f"未找到项目ID为 {project_id} 的远端项目")
+        if repo_ids:
+            repo_name = str(project_info.get("repo_name") or "").strip()
+            if repo_name and repo_name not in repo_ids:
+                raise Exception(f"项目 {project_id} 对应的仓库为 {repo_name}，与当前填写的目标仓库ID不一致")
+        codearts_files = _list_codearts_project_files(base_url, token, project_info)
+    except Exception as e:
+        logger.exception(
+            "repository.codearts_sync.list_error | %s",
+            json.dumps(
+                _sanitize_log_data(
+                    {
+                        **_current_user_log_context(current_user),
+                        "tenant_id": tenant_id,
+                        "project_id": project_id,
+                        "repo_ids": repo_ids,
+                    }
+                ),
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+        raise HTTPException(status_code=502, detail=f"远程项目遍历失败: {str(e)}")
+
+    project_key = f"proj_{project_id}"
+    _ensure_project_member_seed(db, project_key, current_user)
+    project_stats = _build_project_stats(codearts_files)
+
+    existing_rows = (
+        db.query(Repository)
+        .filter(
+            Repository.project_key == project_key,
+            Repository.created_by_user_id == current_user.id,
+            Repository.source_type == "codearts_sync",
+        )
+        .all()
+    )
+    for row in existing_rows:
+        _remove_repository_local_file(row)
+        db.delete(row)
+    db.flush()
+
+    upload_dir = "uploads/repositories"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    synced_count = 0
+    skipped_count = 0
+    for item in codearts_files:
+        download_uri = str(item.get("download_uri") or "").strip()
+        filename = str(item.get("name") or "artifact.bin").strip() or "artifact.bin"
+        remote_repo_id = str(item.get("remote_repo_id") or "").strip() or None
+        repo_detail = dict(item.get("repo_detail") or {})
+        file_detail = dict(item.get("file_detail") or {})
+        project_stat = project_stats.get(project_id)
+        if project_stat:
+            repo_detail["artifact_count"] = project_stat.get("artifact_count")
+            repo_detail["total_size_mb"] = project_stat.get("total_size_mb")
+            repo_detail["project_name"] = item.get("project_name") or repo_detail.get("name")
+        size = _coerce_size_bytes(file_detail.get("size"), item.get("display_size"))
+        checksums = file_detail.get("checksums") or {}
+        md5_value = file_detail.get("md5") or checksums.get("md5")
+        sha256_value = file_detail.get("sha256") or checksums.get("sha256")
+
+        repo = Repository(
+            name=filename,
+            description=str(item.get("display_path") or "").strip() or None,
+            version=None,
+            file_url=None,
+            size=size,
+            md5=md5_value,
+            sha256=sha256_value,
+            project_key=project_key,
+            repo_id=remote_repo_id,
+            tenant=tenant_id,
+        )
+        repo.created_by_user_id = current_user.id
+        repo.source_type = "codearts_sync"
+        repo.remote_repo_id = remote_repo_id
+        repo.display_path = str(item.get("display_path") or "").strip() or None
+        repo.download_uri = download_uri or None
+        repo.repo_detail_json = json.dumps(repo_detail, ensure_ascii=False) if repo_detail else None
+        repo.file_detail_json = json.dumps(file_detail, ensure_ascii=False) if file_detail else None
+        db.add(repo)
+        synced_count += 1
+
+    db.commit()
+    _log_event(
+        "repository.codearts_sync.success",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        synced_count=synced_count,
+        skipped_count=skipped_count,
+        repo_count=len(repo_ids),
+    )
+    return {
+        "code": 0,
+        "message": "同步成功",
+        "data": {
+            "project_key": project_key,
+            "synced_count": synced_count,
+            "skipped_count": skipped_count,
+            "repo_count": len(repo_ids),
+        },
+    }
 
 
 @router.post("/codearts/import", response_model=Response)
@@ -324,6 +902,11 @@ async def import_codearts_artifact(
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("repository:add")),
 ):
+    _log_event(
+        "repository.codearts_import.start",
+        **_current_user_log_context(current_user),
+        payload=payload,
+    )
     cfg = _safe_json_loads(getattr(current_user, "codearts_config_json", None))
     enabled = bool(cfg.get("enabled"))
     base_url = str(cfg.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
@@ -337,13 +920,29 @@ async def import_codearts_artifact(
     project_id_cfg = str(cfg.get("project_id") or "").strip()
 
     if not enabled:
+        _log_event("repository.codearts_import.disabled", level="warning", **_current_user_log_context(current_user))
         raise HTTPException(status_code=400, detail="CodeArts 未启用")
     if not domain_name or not username or not password:
+        _log_event("repository.codearts_import.invalid_config", level="warning", **_current_user_log_context(current_user))
         raise HTTPException(status_code=400, detail="IAM认证信息(账号名/用户名/密码)未配置完整")
 
     try:
         token = _get_iam_token(domain_name, username, password, region)
     except Exception as e:
+        logger.exception(
+            "repository.codearts_import.token_error | %s",
+            json.dumps(
+                _sanitize_log_data(
+                    {
+                        **_current_user_log_context(current_user),
+                        "region": region,
+                        "project_id": project_id_cfg,
+                    }
+                ),
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
         raise HTTPException(status_code=401, detail=f"获取IAM Token失败: {str(e)}")
 
     base_url = base_url.replace("{region}", region)
@@ -358,8 +957,26 @@ async def import_codearts_artifact(
     download_uri = str(payload.get("download_uri") or "").strip()
 
     if not project_id or not package_id or not version_id or not repo_id:
+        _log_event(
+            "repository.codearts_import.missing_args",
+            level="warning",
+            **_current_user_log_context(current_user),
+            project_id=project_id,
+            package_id=package_id,
+            version_id=version_id,
+            repo_id=repo_id,
+        )
         raise HTTPException(status_code=400, detail="缺少 project_id/package_id/version_id/repo_id")
     if not download_uri:
+        _log_event(
+            "repository.codearts_import.missing_download_uri",
+            level="warning",
+            **_current_user_log_context(current_user),
+            project_id=project_id,
+            package_id=package_id,
+            version_id=version_id,
+            repo_id=repo_id,
+        )
         raise HTTPException(status_code=400, detail="缺少文件的下载链接(download_uri)")
 
     project_key = f"proj_{project_id}"
@@ -382,6 +999,23 @@ async def import_codearts_artifact(
                 os.remove(file_path)
             except Exception:
                 pass
+        logger.exception(
+            "repository.codearts_import.download_error | %s",
+            json.dumps(
+                _sanitize_log_data(
+                    {
+                        **_current_user_log_context(current_user),
+                        "project_id": project_id,
+                        "package_id": package_id,
+                        "version_id": version_id,
+                        "repo_id": repo_id,
+                        "download_uri": download_uri,
+                    }
+                ),
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
         raise HTTPException(status_code=502, detail=f"下载失败：{str(e)}")
 
     md5v, sha256v = _compute_hashes(file_path)
@@ -402,6 +1036,14 @@ async def import_codearts_artifact(
     db.add(repo)
     db.commit()
     db.refresh(repo)
+    _log_event(
+        "repository.codearts_import.success",
+        **_current_user_log_context(current_user),
+        repo_db_id=repo.id,
+        project_key=project_key,
+        repo_id=repo.repo_id,
+        size=size,
+    )
 
     return {
         "code": 0,
@@ -430,147 +1072,35 @@ async def get_repository_tree(
     """
     query = _apply_repository_scope(db.query(Repository), current_user)
     repos = query.all()
+    _log_event(
+        "repository.tree.get.start",
+        **_current_user_log_context(current_user),
+        mode=mode,
+        local_repo_count=len(repos),
+    )
     
     if mode == "offline":
-        children = []
-        for r in repos:
-            if r.file_url:
-                children.append({
-                    "title": f"{r.name} (v{r.version or '1.0'})",
-                    "key": f"local_file_{r.id}",
-                    "isLeaf": True,
-                    "repo_id": r.id,
-                    "file_url": r.file_url,
-                    "size": r.size,
-                    "version": r.version,
-                    "md5": getattr(r, "md5", None),
-                    "sha256": getattr(r, "sha256", None),
-                    "download_count": getattr(r, "download_count", None),
-                    "last_download_time": getattr(r, "last_download_time", None),
-                })
-        
-        tree_data = [
-            {
-                "title": "局域网本地制品仓 (Offline)",
-                "key": "local_root",
-                "children": [
-                    {
-                        "title": "已上传的制品",
-                        "key": "local_uploaded",
-                        "children": children
-                    }
-                ] if children else []
-            }
-        ]
+        tree_data = _build_local_tree(repos)
+        _log_event(
+            "repository.tree.get.offline_success",
+            **_current_user_log_context(current_user),
+            root_count=len(tree_data),
+            artifact_count=len(
+                [
+                    r
+                    for r in repos
+                    if str(getattr(r, "source_type", "") or "") == "codearts_sync" or getattr(r, "file_url", None)
+                ]
+            ),
+        )
     else:
-        cfg = _safe_json_loads(getattr(current_user, "codearts_config_json", None))
-        enabled = bool(cfg.get("enabled"))
-        base_url = str(cfg.get("base_url") or "").rstrip("/")
-        token = str(cfg.get("token") or "").strip()
-        repo_ids_cfg = cfg.get("repo_ids")
-        repo_ids: list[str] = []
-        if isinstance(repo_ids_cfg, list):
-            repo_ids = [str(x).strip() for x in repo_ids_cfg if str(x).strip()]
-        if not repo_ids:
-            repo_ids = ["default"]
-        projects_path = str(cfg.get("projects_path") or "/projects")
-        packages_path = str(cfg.get("packages_path") or "/projects/{project_id}/packages")
-        versions_path = str(cfg.get("versions_path") or "/packages/{package_id}/versions")
-
-        if enabled:
-            domain_name = str(cfg.get("domain_name") or "").strip()
-            username = str(cfg.get("username") or "").strip()
-            password = str(cfg.get("password") or "").strip()
-            region = str(cfg.get("region") or "cn-north-4").strip()
-            tenant_id = str(cfg.get("tenant_id") or "").strip()
-            project_id = str(cfg.get("project_id") or "").strip()
-            base_url = str(cfg.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
-            
-            if not domain_name or not username or not password:
-                enabled = False
-            else:
-                try:
-                    token = _get_iam_token(domain_name, username, password, region)
-                    base_url = base_url.replace("{region}", region)
-                except Exception as e:
-                    # Ignore the error when token cannot be fetched, so the tree_data stays empty
-                    # but doesn't crash the whole UI or page initialization.
-                    # Or we can raise it, but for a better user experience on load, we just disable it.
-                    enabled = False
-                    raise HTTPException(status_code=401, detail=f"获取IAM Token失败: {str(e)}")
-
-        if enabled and base_url:
-            try:
-                def traverse_codearts(current_repo_id, current_relative_path):
-                    # Call ShowFileTree API
-                    url = f"{base_url}/cloudartifact/v5/{tenant_id}/{project_id}/{current_repo_id}/file-tree"
-                    
-                    import urllib.parse
-                    safe_params = "?path=" + urllib.parse.quote(current_relative_path)
-                    
-                    resp = _http_get_json(url + safe_params, token=token)
-                    if resp.get("error"):
-                        err_obj = resp.get("error", {})
-                        raise Exception(f"获取目录失败: {err_obj.get('reason', '未知错误')} (URL: {url+safe_params})")
-                    if resp.get("error_code") or resp.get("error_msg"):
-                        raise Exception(f"获取目录失败: {resp.get('error_msg', '未知错误')} (URL: {url+safe_params})")
-                    nodes = _extract_list(resp)
-                    results = []
-                    for n in nodes:
-                        node_name = n.get("name")
-                        is_folder = n.get("folder", False)
-                        if current_relative_path == "/":
-                            full_relative_path = f"/{node_name}"
-                        else:
-                            full_relative_path = f"{current_relative_path}/{node_name}"
-                        full_relative_path = re.sub(r'^/+', '/', full_relative_path.strip())
-
-                        node_data = {
-                            "title": node_name,
-                            "key": f"ca_{current_repo_id}_{full_relative_path}",
-                            "isLeaf": not is_folder,
-                            "repo_id": current_repo_id,
-                            "file_url": None,
-                            "size": None,
-                            "version": node_name,
-                            "project_id": project_id,
-                            "package_id": "pkg_default",
-                            "version_id": "ver_default",
-                            "download_uri": n.get("download_uri"),
-                        }
-
-                        if is_folder:
-                            node_data["children"] = traverse_codearts(current_repo_id, full_relative_path)
-                        else:
-                            # Optional: fetch detail for exact size/checksums here if needed, 
-                            # but skipping to keep tree loading fast. We can rely on display_size.
-                            pass
-                        results.append(node_data)
-                    return results
-
-                warehouses = []
-                for idx, rid in enumerate(repo_ids):
-                    warehouses.append(
-                        {
-                            "title": f"华为云制品仓库 {rid}",
-                            "key": f"repo_{idx}_{rid}",
-                            "repo_id": rid,
-                            "children": [
-                                {
-                                    "title": f"项目 {project_id}",
-                                    "key": f"proj_{project_id}",
-                                    "project_id": project_id,
-                                    "children": traverse_codearts(rid, "/")
-                                }
-                            ],
-                        }
-                    )
-                tree_data = warehouses
-            except Exception as e:
-                raise HTTPException(status_code=502, detail=f"CodeArts同步失败: {str(e)}")
-
-        if not enabled:
-            tree_data = []
+        tree_data = _build_local_tree(repos)
+    _log_event(
+        "repository.tree.get.success",
+        **_current_user_log_context(current_user),
+        mode=mode,
+        root_count=len(tree_data),
+    )
     return {
         "code": 0,
         "message": "success",
@@ -585,24 +1115,25 @@ async def delete_project(
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("repository:delete")),
 ):
+    _log_event("repository.project.delete.start", **_current_user_log_context(current_user), project_key=project_key)
     _ensure_project_member_seed(db, project_key, current_user)
     _require_project_permission(db, project_key, current_user, "delete_project")
 
     repos = db.query(Repository).filter(Repository.project_key == project_key).all()
+    deleted_repo_count = len(repos)
     for r in repos:
-        file_url = str(getattr(r, "file_url", "") or "")
-        if file_url.startswith("/"):
-            rel = file_url.lstrip("/")
-            if rel.startswith("uploads/") and os.path.exists(rel) and os.path.isfile(rel):
-                try:
-                    os.remove(rel)
-                except Exception:
-                    pass
+        _remove_repository_local_file(r)
         db.delete(r)
 
     db.query(RepositoryProjectMember).filter(RepositoryProjectMember.project_key == project_key).delete(synchronize_session=False)
     db.query(RepositoryProjectSetting).filter(RepositoryProjectSetting.project_key == project_key).delete(synchronize_session=False)
     db.commit()
+    _log_event(
+        "repository.project.delete.success",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        deleted_repo_count=deleted_repo_count,
+    )
     return {"code": 0, "message": "删除成功", "data": {"project_key": project_key}}
 
 
@@ -642,6 +1173,12 @@ async def list_project_members(
                 "inviter_username": getattr(inv, "username", None) if inv else None,
             }
         )
+    _log_event(
+        "repository.project_members.list",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        member_count=len(data),
+    )
     return {"code": 0, "message": "success", "data": data}
 
 
@@ -676,6 +1213,14 @@ async def invite_project_member(
     if existing:
         existing.role = role
         db.commit()
+        _log_event(
+            "repository.project_members.upsert_role",
+            **_current_user_log_context(current_user),
+            project_key=project_key,
+            target_user_id=user.id,
+            target_username=user.username,
+            role=role,
+        )
         return {"code": 0, "message": "已更新成员角色", "data": {"id": existing.id}}
 
     m = RepositoryProjectMember(
@@ -688,6 +1233,14 @@ async def invite_project_member(
     db.add(m)
     db.commit()
     db.refresh(m)
+    _log_event(
+        "repository.project_members.invite",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        target_user_id=user.id,
+        target_username=user.username,
+        role=role,
+    )
     return {"code": 0, "message": "邀请成功", "data": {"id": m.id}}
 
 
@@ -715,6 +1268,13 @@ async def update_project_member_role(
         raise HTTPException(status_code=404, detail="成员不存在")
     m.role = role
     db.commit()
+    _log_event(
+        "repository.project_members.update_role",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        target_user_id=user_id,
+        role=role,
+    )
     return {"code": 0, "message": "更新成功"}
 
 
@@ -737,6 +1297,12 @@ async def delete_project_member(
         raise HTTPException(status_code=404, detail="成员不存在")
     db.delete(m)
     db.commit()
+    _log_event(
+        "repository.project_members.delete",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        target_user_id=user_id,
+    )
     return {"code": 0, "message": "删除成功"}
 
 
@@ -750,6 +1316,12 @@ async def get_project_permissions(
     if not _is_super_admin(current_user) and not _get_current_user_project_role(db, project_key, current_user):
         raise HTTPException(status_code=403, detail="无项目权限")
     cfg = _get_project_permissions_by_group(db, project_key)
+    _log_event(
+        "repository.project_permissions.get",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        groups=list(cfg.keys()),
+    )
     return {"code": 0, "message": "success", "data": cfg}
 
 
@@ -788,6 +1360,12 @@ async def set_project_permissions(
     row.permission_config_json = json.dumps(next_cfg, ensure_ascii=False)
     row.updated_by_user_id = current_user.id
     db.commit()
+    _log_event(
+        "repository.project_permissions.set",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        group=group or "all",
+    )
     return {"code": 0, "message": "保存成功", "data": next_cfg}
 
 
@@ -809,6 +1387,14 @@ async def list_repositories(
 
     total = query.count()
     data = query.order_by(Repository.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    _log_event(
+        "repository.list",
+        **_current_user_log_context(current_user),
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        total=total,
+    )
 
     return {
         "code": 0,
@@ -826,6 +1412,7 @@ async def get_repository(repo_id_db: int, db: Session = Depends(get_db), current
     repo = _apply_repository_scope(db.query(Repository), current_user).filter(Repository.id == repo_id_db).first()
     if not repo:
         raise HTTPException(status_code=404, detail="项目不存在")
+    _log_event("repository.get", **_current_user_log_context(current_user), repo_db_id=repo_id_db)
     return repository_to_dict(repo)
 
 
@@ -856,6 +1443,14 @@ async def download_repository_file(
     repo.download_count = (repo.download_count or 0) + 1
     repo.last_download_time = datetime.utcnow()
     db.commit()
+    _log_event(
+        "repository.download",
+        **_current_user_log_context(current_user),
+        repo_db_id=repo.id,
+        project_key=project_key,
+        download_count=repo.download_count,
+        file_path=file_path,
+    )
 
     filename = os.path.basename(file_path)
     return FileResponse(path=file_path, filename=filename, media_type="application/octet-stream")
@@ -882,6 +1477,13 @@ async def upload_repository_file(
         shutil.copyfileobj(file.file, buffer)
 
     md5v, sha256v = _compute_hashes(file_path)
+    _log_event(
+        "repository.upload",
+        **_current_user_log_context(current_user),
+        filename=file.filename,
+        stored_path=file_path,
+        size=os.path.getsize(file_path),
+    )
         
     return {
         "code": 0,
@@ -904,11 +1506,20 @@ async def create_repository(
 ):
     repo = Repository(**data.model_dump())
     repo.created_by_user_id = current_user.id
+    repo.source_type = getattr(repo, "source_type", None) or "local_upload"
     db.add(repo)
     db.commit()
     db.refresh(repo)
     if getattr(repo, "project_key", None):
         _ensure_project_member_seed(db, repo.project_key, current_user)
+    _log_event(
+        "repository.create",
+        **_current_user_log_context(current_user),
+        repo_db_id=repo.id,
+        repo_id=repo.repo_id,
+        project_key=repo.project_key,
+        name=repo.name,
+    )
     return {"code": 0, "message": "创建成功", "data": {"id": repo.id}}
 
 
@@ -926,6 +1537,12 @@ async def update_repository(
         setattr(repo, field, value)
     db.commit()
     db.refresh(repo)
+    _log_event(
+        "repository.update",
+        **_current_user_log_context(current_user),
+        repo_db_id=repo_id_db,
+        fields=list(data.model_dump(exclude_unset=True).keys()),
+    )
     return {"code": 0, "message": "更新成功"}
 
 
@@ -939,6 +1556,16 @@ async def delete_repository(
     repo = db.query(Repository).filter(Repository.id == repo_id_db).first()
     if not repo:
         raise HTTPException(status_code=404, detail="项目不存在")
+    repo_name = repo.name
+    repo_code = repo.repo_id
+    _remove_repository_local_file(repo)
     db.delete(repo)
     db.commit()
+    _log_event(
+        "repository.delete",
+        **_current_user_log_context(current_user),
+        repo_db_id=repo_id_db,
+        repo_id=repo_code,
+        name=repo_name,
+    )
     return {"code": 0, "message": "删除成功"}

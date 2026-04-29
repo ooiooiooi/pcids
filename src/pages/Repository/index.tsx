@@ -50,6 +50,27 @@ function formatBytes(val?: number | null) {
   return `${gb.toFixed(2)} GB`
 }
 
+function pickDisplaySize(size?: number | null, displaySize?: string | null) {
+  if (displaySize) return displaySize
+  return formatBytes(size)
+}
+
+function collectLeafFiles(node?: AnyNode | null): AnyNode[] {
+  if (!node) return []
+  if (node.node_type === 'file' || node.isLeaf) return [node]
+  const children = Array.isArray(node.children) ? (node.children as AnyNode[]) : []
+  return children.flatMap((child) => collectLeafFiles(child))
+}
+
+function firstFilled(...values: Array<any>) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue
+    const text = String(value).trim()
+    if (text) return text
+  }
+  return ''
+}
+
 function deriveApiBaseUrl() {
   return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://127.0.0.1:8000/api'
@@ -80,6 +101,9 @@ function guessCodeartsMetaFromKey(key: string) {
   return { project_id: m[1], package_id: m[2], version_id: m[3] }
 }
 
+const CODEARTS_FORM_DRAFT_KEY = 'pcids.repository.codeartsFormDraft'
+const CODEARTS_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsFormSecretDraft'
+
 const Repository: React.FC = () => {
   const [treeLoading, setTreeLoading] = useState(false)
   const [treeRaw, setTreeRaw] = useState<any[]>([])
@@ -95,6 +119,8 @@ const Repository: React.FC = () => {
 
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
   const [isSyncConfigOpen, setIsSyncConfigOpen] = useState(false)
+  const [createProjectSubmitting, setCreateProjectSubmitting] = useState(false)
+  const [syncConfigSubmitting, setSyncConfigSubmitting] = useState(false)
   const [isUploadOpen, setIsUploadOpen] = useState(false)
   const [rightTabKey, setRightTabKey] = useState<'detail' | 'members' | 'permissions'>('detail')
 
@@ -138,6 +164,16 @@ const Repository: React.FC = () => {
       for (const it of items || []) {
         const key = String(it.key ?? it._id ?? it.title ?? Math.random())
         const title = String(it.title ?? '')
+        if (
+          key.startsWith('repo_0_default') ||
+          key.startsWith('proj_default') ||
+          key.includes('pkg_default') ||
+          key.includes('ver_default') ||
+          title === '项目1' ||
+          title === '制品仓库1'
+        ) {
+          continue
+        }
         const meta = guessCodeartsMetaFromKey(key)
         const next: AnyNode = {
           title,
@@ -158,8 +194,12 @@ const Repository: React.FC = () => {
           package_id: it.package_id ?? meta?.package_id ?? null,
           version_id: it.version_id ?? meta?.version_id ?? null,
           download_uri: it.download_uri ?? null,
+          display_path: it.display_path ?? null,
+          repo_detail: it.repo_detail ?? null,
+          file_detail: it.file_detail ?? null,
         }
         if (key.startsWith('proj_')) next.node_type = 'project'
+        else if (key.startsWith('repo_sync_')) next.node_type = 'repository'
         else if (key.startsWith('pkg_')) next.node_type = 'package'
         else if (key.startsWith('ver_') || next.isLeaf) next.node_type = 'file'
         else next.node_type = 'folder'
@@ -179,19 +219,19 @@ const Repository: React.FC = () => {
     const baseUrl = String(codeartsCfg?.base_url || '').trim()
     const tokenPresent = Boolean(codeartsCfg?.token_present)
     const username = String(codeartsCfg?.username || '').trim()
-    return enabled && Boolean(baseUrl) && (tokenPresent || Boolean(username))
+    return enabled && (Boolean(baseUrl) || tokenPresent || Boolean(username))
   }, [codeartsCfg])
 
   const refreshTree = async () => {
     setTreeLoading(true)
     try {
-      const res: any = await repositoryApi.getTree({ mode: 'online' })
+      const res: any = await repositoryApi.getTree({ mode: 'offline' })
       if (res?.code === 0) {
         setTreeRaw(res.data || [])
       }
     } catch (e: any) {
       const errDetail = e?.response?.data?.detail
-      message.error(errDetail || '云端同步失败，请检查同步配置中的 IAM 账号、区域、项目ID及仓库ID是否正确')
+      message.error(errDetail || '本地项目加载失败，请稍后重试')
       setTreeRaw([])
     } finally {
       setTreeLoading(false)
@@ -207,6 +247,48 @@ const Repository: React.FC = () => {
     }
   }
 
+  const inferRegionFromRepoId = (repoId?: string) => {
+    const text = String(repoId || '').trim()
+    const match = text.match(/^(cn-[a-z]+-\d+)_/)
+    return match?.[1] || ''
+  }
+
+  const loadCodeartsFormDraft = () => {
+    let draft: Record<string, any> = {}
+    let secretDraft: Record<string, any> = {}
+    try {
+      draft = JSON.parse(window.localStorage.getItem(CODEARTS_FORM_DRAFT_KEY) || '{}')
+    } catch {
+      draft = {}
+    }
+    try {
+      secretDraft = JSON.parse(window.sessionStorage.getItem(CODEARTS_FORM_SECRET_DRAFT_KEY) || '{}')
+    } catch {
+      secretDraft = {}
+    }
+    return { ...draft, ...secretDraft }
+  }
+
+  const persistCodeartsFormDraft = (values: Record<string, any>) => {
+    const plainDraft = {
+      domain_name: String(values.domain_name || '').trim(),
+      username: String(values.username || '').trim(),
+      region: String(values.region || '').trim(),
+      tenant_name: String(values.tenant_name || '').trim(),
+      tenant_id: String(values.tenant_id || '').trim(),
+      project_id: String(values.project_id || '').trim(),
+      repo_id_0: String(values.repo_id_0 || '').trim(),
+      repo_ids_extra: Array.isArray(values.repo_ids_extra) ? values.repo_ids_extra.map((x: any) => String(x || '').trim()).filter(Boolean) : [],
+      download_username: String(values.download_username || '').trim(),
+    }
+    const secretDraft = {
+      password: String(values.password || ''),
+      download_password: String(values.download_password || ''),
+    }
+    window.localStorage.setItem(CODEARTS_FORM_DRAFT_KEY, JSON.stringify(plainDraft))
+    window.sessionStorage.setItem(CODEARTS_FORM_SECRET_DRAFT_KEY, JSON.stringify(secretDraft))
+  }
+
   useEffect(() => {
     refreshCodeartsConfig()
     refreshTree()
@@ -215,13 +297,14 @@ const Repository: React.FC = () => {
   useEffect(() => {
     if (!isCreateProjectOpen && !isSyncConfigOpen) return
     const repoId0 = Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 0 ? String(codeartsCfg.repo_ids[0]) : ''
+    const inferredRegion = inferRegionFromRepoId(repoId0)
     const repoIdsExtra =
       Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 1 ? codeartsCfg.repo_ids.slice(1).map((x: any) => String(x)) : []
     const values: any = {
       domain_name: codeartsCfg?.domain_name || '',
       username: codeartsCfg?.username || '',
       password: '',
-      region: codeartsCfg?.region || 'cn-north-4',
+      region: codeartsCfg?.region || inferredRegion || '',
       tenant_name: codeartsCfg?.tenant_name || '',
       tenant_id: codeartsCfg?.tenant_id || '',
       project_id: codeartsCfg?.project_id || '',
@@ -230,8 +313,14 @@ const Repository: React.FC = () => {
       download_username: codeartsCfg?.download_username || '',
       download_password: '',
     }
-    if (isCreateProjectOpen) createProjectForm.setFieldsValue(values)
-    if (isSyncConfigOpen) syncConfigForm.setFieldsValue(values)
+    const draftValues = loadCodeartsFormDraft()
+    const mergedValues = {
+      ...values,
+      ...draftValues,
+      region: String(draftValues.region || values.region || inferRegionFromRepoId(draftValues.repo_id_0 || values.repo_id_0) || '').trim(),
+    }
+    if (isCreateProjectOpen) createProjectForm.setFieldsValue(mergedValues)
+    if (isSyncConfigOpen) syncConfigForm.setFieldsValue(mergedValues)
   }, [isCreateProjectOpen, isSyncConfigOpen, codeartsCfg, createProjectForm, syncConfigForm])
 
   useEffect(() => {
@@ -343,14 +432,14 @@ const Repository: React.FC = () => {
   }
 
   const handleDownloadLocalFile = () => {
-    if (!selectedNode?.repo_id) return
+    if (!selectedNode?.repo_id || !selectedNode?.file_url) return
     const apiBaseUrl = deriveApiBaseUrl()
     const url = `${apiBaseUrl}/repositories/${selectedNode.repo_id}/download`
     window.open(url)
   }
 
   const handleDeleteLocalFile = async () => {
-    if (!selectedNode?.repo_id) return
+    if (!selectedNode?.repo_id || !selectedNode?.file_url) return
     Modal.confirm({
       title: '删除本地文件',
       content: '确认删除该制品文件？',
@@ -434,18 +523,23 @@ const Repository: React.FC = () => {
     <Form
       layout="vertical"
       form={isCreateProjectOpen ? createProjectForm : syncConfigForm}
+      onValuesChange={(_, allValues) => persistCodeartsFormDraft(allValues)}
       onFinish={async (values) => {
+        const isCreateAction = isCreateProjectOpen
+        if (isCreateAction) setCreateProjectSubmitting(true)
+        else setSyncConfigSubmitting(true)
         try {
           const repoIds = [
             String(values.repo_id_0 || '').trim(),
             ...(Array.isArray(values.repo_ids_extra) ? values.repo_ids_extra.map((x: any) => String(x || '').trim()) : []),
           ].filter(Boolean)
+          const inferredRegion = inferRegionFromRepoId(repoIds[0])
           const payload: any = {
             enabled: true,
             domain_name: String(values.domain_name || '').trim(),
             username: String(values.username || '').trim(),
             password: String(values.password || '').trim() || undefined, // undefined if empty to avoid overriding with empty string
-            region: String(values.region || 'cn-north-4').trim(),
+            region: String(values.region || inferredRegion || '').trim(),
             tenant_name: String(values.tenant_name || '').trim(),
             tenant_id: String(values.tenant_id || '').trim(),
             project_id: String(values.project_id || '').trim(),
@@ -453,9 +547,16 @@ const Repository: React.FC = () => {
             download_username: String(values.download_username || '').trim(),
             download_password: String(values.download_password || '').trim() || undefined,
           }
-          const res: any = await repositoryApi.setCodeartsConfig(payload)
+          persistCodeartsFormDraft(values)
+          const res: any = isCreateAction ? await repositoryApi.syncCodeartsProject(payload) : await repositoryApi.setCodeartsConfig(payload)
           if (res?.code === 0) {
-            message.success('保存成功')
+            if (isCreateAction) {
+              const syncedCount = Number(res?.data?.synced_count || 0)
+              const skippedCount = Number(res?.data?.skipped_count || 0)
+              message.success(`同步成功，已落地 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`)
+            } else {
+              message.success('保存成功')
+            }
             setIsCreateProjectOpen(false)
             setIsSyncConfigOpen(false)
             createProjectForm.resetFields()
@@ -463,13 +564,17 @@ const Repository: React.FC = () => {
             refreshCodeartsConfig()
             refreshTree()
           }
-        } catch {
-          /* ignore */
+        } catch (e: any) {
+          const errDetail = e?.response?.data?.detail
+          message.error(errDetail || (isCreateAction ? 'CodeArts 同步失败，请稍后重试' : '同步配置保存失败，请稍后重试'))
+        } finally {
+          if (isCreateAction) setCreateProjectSubmitting(false)
+          else setSyncConfigSubmitting(false)
         }
       }}
     >
       <div style={{ background: 'rgba(0,0,0,0.03)', padding: '12px 16px', borderRadius: 6, marginBottom: 16, color: 'rgba(0,0,0,0.65)' }}>
-        配置华为云 IAM 认证及目标仓库信息，用于获取并下载对应制品仓库的内容。
+        配置华为云 IAM 认证和项目标识。新增项目会先查询项目信息，再按项目发布库文件路径构建左侧树。
       </div>
       <Row gutter={16}>
         <Col span={12}>
@@ -497,8 +602,8 @@ const Repository: React.FC = () => {
       </Row>
       <Row gutter={16}>
         <Col span={12}>
-          <Form.Item label="租户ID(Tenant ID)" name="tenant_id" rules={[{ required: true, message: '请输入租户ID' }]}>
-            <Input placeholder="请输入租户ID" />
+          <Form.Item label="租户ID(Tenant ID，可选)" name="tenant_id">
+            <Input placeholder="新接口暂不强依赖，可选填写" />
           </Form.Item>
         </Col>
         <Col span={12}>
@@ -521,8 +626,8 @@ const Repository: React.FC = () => {
       </Row>
       <Row gutter={16}>
         <Col span={12}>
-          <Form.Item label="目标仓库ID" name="repo_id_0" rules={[{ required: true, message: '请输入仓库ID' }]}>
-            <Input placeholder="请输入要拉取的制品仓库ID" />
+          <Form.Item label="目标仓库ID(可选)" name="repo_id_0">
+            <Input placeholder="可选，用于和项目实际仓库做一致性校验" />
           </Form.Item>
         </Col>
       </Row>
@@ -534,8 +639,7 @@ const Repository: React.FC = () => {
                 <Col span={12}>
                   <Form.Item
                     {...field}
-                    label={idx === 0 ? '仓库ID' : '仓库ID'}
-                    rules={[{ required: true, message: '请输入仓库ID' }]}
+                    label={idx === 0 ? '附加仓库ID(可选)' : '附加仓库ID(可选)'}
                   >
                     <Input placeholder="请输入仓库ID" />
                   </Form.Item>
@@ -553,7 +657,7 @@ const Repository: React.FC = () => {
             ))}
             <div style={{ marginTop: 4 }}>
               <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add()}>
-                新增仓库ID
+                新增附加仓库ID
               </Button>
             </div>
           </>
@@ -813,20 +917,107 @@ const Repository: React.FC = () => {
 
   const detailPairs = useMemo(() => {
     if (!selectedNode) return []
-    const isFile = selectedNode.node_type === 'file'
-    const fileType = isFile ? 'Generic' : '-'
-    const relativePath = Array.isArray(selectedNode.path_titles) ? `/${selectedNode.path_titles.slice(1).join('/')}` : '-'
-    const warehouseUrl = selectedNode.file_url ? String(selectedNode.file_url) : '-'
+    const repoDetail = (selectedNode.repo_detail || {}) as Record<string, any>
+    const fileDetail = (selectedNode.file_detail || {}) as Record<string, any>
+    const projectName = String(repoDetail.name || repoDetail.project_name || selectedNode.path_titles?.[0] || selectedNode.title || '-')
+    const repoFormat = String(repoDetail.format || 'Generic')
+    const descendantFiles = collectLeafFiles(selectedNode)
+    const firstLeaf = descendantFiles[0]
+    const firstLeafDetail = ((firstLeaf?.file_detail || {}) as Record<string, any>)
+    const relativePath =
+      selectedNode.node_type === 'project'
+        ? '--'
+        : String(
+            selectedNode.display_path ||
+              (Array.isArray(selectedNode.path_titles) ? `/${selectedNode.path_titles.slice(1).join('/')}` : '-') ||
+              '-',
+          )
+    const downloadUrl =
+      selectedNode.node_type === 'project'
+        ? '--'
+        : firstFilled(
+            fileDetail.download_url,
+            fileDetail.download_url_with_id,
+            firstLeafDetail.download_url,
+            firstLeafDetail.download_url_with_id,
+            selectedNode.download_uri,
+            '-',
+          )
+    const displaySize = pickDisplaySize(selectedNode.size, fileDetail.size || fileDetail.display_size || selectedNode.raw?.display_size)
+    const totalFileCount = descendantFiles.length
+    const totalBytes = descendantFiles.reduce((sum, item) => sum + Number(item.size || 0), 0)
+    const aggregatedSize = formatBytes(totalBytes)
+    const createdBy = firstFilled(fileDetail.created_user_name, fileDetail.createdBy, firstLeafDetail.created_user_name, firstLeafDetail.createdBy, repoDetail.created_user_name, repoDetail.createdUserName, '-')
+    const createdTime = firstFilled(fileDetail.created_time, fileDetail.created, firstLeafDetail.created_time, firstLeafDetail.created, repoDetail.created_time, repoDetail.createdTime, '-')
+    const modifiedBy = firstFilled(fileDetail.modified_user_name, fileDetail.modifiedBy, firstLeafDetail.modified_user_name, firstLeafDetail.modifiedBy, repoDetail.modified_user_name, repoDetail.modifiedUserName, '-')
+    const modifiedTime = firstFilled(fileDetail.modified_time, fileDetail.modified_time_to_string, fileDetail.lastModified, firstLeafDetail.modified_time, firstLeafDetail.modified_time_to_string, firstLeafDetail.lastModified, repoDetail.modified_time, repoDetail.modifiedTime, '-')
+    const repoDescription = firstFilled(repoDetail.description, repoDetail.project_desc, '-')
+
+    if (selectedNode.node_type === 'project') {
+      return [
+        { label: '仓库名称', value: projectName },
+        { label: '制品类型', value: repoFormat },
+        { label: '相对路径', value: '--' },
+        { label: '下载地址', value: '--' },
+        { label: '创建人', value: createdBy },
+        { label: '创建时间', value: formatDateTime(createdTime) },
+        { label: '修改人', value: modifiedBy },
+        { label: '修改时间', value: formatDateTime(modifiedTime) },
+        { label: '制品数量 / 大小', value: `${repoDetail.artifact_count ?? totalFileCount} / ${repoDetail.total_size_mb ? `${repoDetail.total_size_mb} MB` : aggregatedSize}` },
+        { label: '仓库描述', value: repoDescription },
+      ]
+    }
+
+    if (selectedNode.node_type === 'folder' || selectedNode.node_type === 'repository') {
+      return [
+        { label: '仓库名称', value: projectName },
+        { label: '制品类型', value: repoFormat },
+        { label: '相对路径', value: relativePath },
+        { label: '下载地址', value: downloadUrl },
+        { label: '创建人', value: createdBy },
+        { label: '创建时间', value: formatDateTime(createdTime) },
+        { label: '修改人', value: modifiedBy },
+        { label: '修改时间', value: formatDateTime(modifiedTime) },
+        { label: '制品数量 / 大小', value: `${totalFileCount} / ${aggregatedSize}` },
+      ]
+    }
+
+    if (selectedNode.node_type === 'file') {
+      return [
+        { label: '仓库名称', value: projectName },
+        { label: '制品类型', value: repoFormat },
+        { label: '相对路径', value: relativePath },
+        { label: '下载地址', value: downloadUrl },
+        { label: '发布版本', value: fileDetail.version || fileDetail.build_version || '-' },
+        { label: '创建人', value: createdBy },
+        { label: '创建时间', value: formatDateTime(createdTime) },
+        { label: '修改人', value: modifiedBy },
+        { label: '修改时间', value: formatDateTime(modifiedTime) },
+        { label: '大小', value: displaySize },
+      ]
+    }
+
     return [
-      { label: '仓库名称', value: String(selectedNode.title || '-') },
-      { label: '制品类型', value: fileType },
-      { label: '仓库地址', value: warehouseUrl },
+      { label: '名称', value: String(selectedNode.title || '-') },
       { label: '相对路径', value: relativePath },
-      { label: '大小', value: formatBytes(selectedNode.size) },
-      { label: '最后下载时间', value: formatDateTime(selectedNode.last_download_time) },
-      { label: '下载次数', value: selectedNode.download_count ?? '-' },
-      { label: 'SHA-256', value: selectedNode.sha256 || '-' },
-      { label: 'MD5', value: selectedNode.md5 || '-' },
+      { label: '仓库名称', value: projectName },
+    ]
+  }, [selectedNode])
+
+  const checksumPairs = useMemo(() => {
+    if (!selectedNode) return []
+    if (selectedNode.node_type === 'project') return []
+    const fileDetail = (selectedNode.file_detail || {}) as Record<string, any>
+    const checksums = (fileDetail.checksums || {}) as Record<string, any>
+    if (selectedNode.node_type === 'file') {
+      return [
+        { label: 'SHA-256', value: firstFilled(fileDetail.sha256, checksums.sha256, selectedNode.sha256, '--') },
+        { label: 'MD5', value: firstFilled(fileDetail.md5, checksums.md5, selectedNode.md5, '--') },
+      ]
+    }
+    return [
+      { label: 'SHA-256', value: '--' },
+      { label: 'MD5', value: '--' },
     ]
   }, [selectedNode])
 
@@ -914,6 +1105,7 @@ const Repository: React.FC = () => {
                           boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
                         }}
                       >
+                        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>详细信息</div>
                         <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', rowGap: 10, columnGap: 16 }}>
                           {detailPairs.map((p) => (
                             <div key={p.label} style={{ display: 'contents' }}>
@@ -923,7 +1115,29 @@ const Repository: React.FC = () => {
                           ))}
                         </div>
                       </div>
-                      {(selectedNode.project_id && selectedNode.package_id && selectedNode.version_id) || selectedNode.repo_id ? (
+                      {checksumPairs.length > 0 ? (
+                        <div
+                          style={{
+                            marginTop: 16,
+                            background: '#fff',
+                            border: '1px solid #f0f0f0',
+                            borderRadius: 8,
+                            padding: 16,
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                          }}
+                        >
+                          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>校验和</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', rowGap: 10, columnGap: 16 }}>
+                            {checksumPairs.map((p) => (
+                              <div key={p.label} style={{ display: 'contents' }}>
+                                <div style={{ color: 'rgba(0,0,0,0.65)' }}>{p.label}</div>
+                                <div style={{ color: 'rgba(0,0,0,0.88)', wordBreak: 'break-all' }}>{p.value}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      {(selectedNode.project_id && selectedNode.package_id && selectedNode.version_id) || (selectedNode.repo_id && selectedNode.file_url) ? (
                         <div style={{ marginTop: 12 }}>
                           <Space>
                             {selectedNode.project_id && selectedNode.package_id && selectedNode.version_id && (
@@ -931,7 +1145,7 @@ const Repository: React.FC = () => {
                                 下载到本地
                               </Button>
                             )}
-                            {selectedNode.repo_id && (
+                            {selectedNode.repo_id && selectedNode.file_url && (
                               <>
                                 <Button type="primary" onClick={handleDownloadLocalFile}>
                                   下载到本地
@@ -961,8 +1175,13 @@ const Repository: React.FC = () => {
         width={656}
         okText="确 定"
         cancelText="取 消"
+        confirmLoading={createProjectSubmitting}
         onOk={() => createProjectForm.submit()}
-        onCancel={() => { setIsCreateProjectOpen(false); createProjectForm.resetFields() }}
+        onCancel={() => {
+          if (createProjectSubmitting) return
+          setIsCreateProjectOpen(false)
+          createProjectForm.resetFields()
+        }}
       >
         {createOrSyncProjectFormJSX}
       </Modal>
@@ -973,8 +1192,13 @@ const Repository: React.FC = () => {
         width={656}
         okText="确 定"
         cancelText="取 消"
+        confirmLoading={syncConfigSubmitting}
         onOk={() => syncConfigForm.submit()}
-        onCancel={() => { setIsSyncConfigOpen(false); syncConfigForm.resetFields() }}
+        onCancel={() => {
+          if (syncConfigSubmitting) return
+          setIsSyncConfigOpen(false)
+          syncConfigForm.resetFields()
+        }}
       >
         {createOrSyncProjectFormJSX}
       </Modal>

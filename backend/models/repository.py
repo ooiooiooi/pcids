@@ -27,6 +27,12 @@ class Repository(Base, TimestampMixin):
     download_count: Mapped[Optional[int]] = mapped_column(Integer, default=0)
     last_download_time: Mapped[Optional[datetime]] = mapped_column(DateTime)
     permission_config_json: Mapped[Optional[str]] = mapped_column(Text)
+    source_type: Mapped[Optional[str]] = mapped_column(String(30))
+    remote_repo_id: Mapped[Optional[str]] = mapped_column(String(100))
+    display_path: Mapped[Optional[str]] = mapped_column(String(500))
+    download_uri: Mapped[Optional[str]] = mapped_column(Text)
+    repo_detail_json: Mapped[Optional[str]] = mapped_column(Text)
+    file_detail_json: Mapped[Optional[str]] = mapped_column(Text)
 
 
 class RepositoryProjectMember(Base, TimestampMixin):

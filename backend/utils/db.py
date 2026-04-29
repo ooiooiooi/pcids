@@ -623,6 +623,12 @@ def ensure_schema():
     ensure_column("repositories", "created_by_user_id", "INTEGER")
     ensure_column("repositories", "project_key", "VARCHAR(200)")
     ensure_column("repositories", "permission_config_json", "TEXT")
+    ensure_column("repositories", "source_type", "VARCHAR(30)")
+    ensure_column("repositories", "remote_repo_id", "VARCHAR(100)")
+    ensure_column("repositories", "display_path", "VARCHAR(500)")
+    ensure_column("repositories", "download_uri", "TEXT")
+    ensure_column("repositories", "repo_detail_json", "TEXT")
+    ensure_column("repositories", "file_detail_json", "TEXT")
     ensure_column("users", "codearts_config_json", "TEXT")
 
 

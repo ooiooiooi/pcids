@@ -39,17 +39,24 @@ request.interceptors.response.use(
   (error) => {
     if (error.response) {
       const { status, data } = error.response
+      const requestUrl = String(error.config?.url || '')
+      const isAuthApi = requestUrl.includes('/auth/')
+      const shouldRedirectToLogin = status === 401 && isAuthApi
 
-      if (status === 401) {
+      if (shouldRedirectToLogin) {
         const currentHash = window.location.hash
         if (!currentHash.startsWith('#/login')) {
           localStorage.removeItem('token')
           localStorage.removeItem('user')
           window.location.href = '#/login'
         }
+      } else if (status === 401) {
+        if (!requestUrl.includes('/auth/login')) {
+          message.error(data?.detail || '请求未通过认证')
+        }
       } else if (status === 403) {
         // 如果是登录接口，不需要在这里弹出错误，交由页面处理
-        if (!error.config.url?.includes('/auth/login')) {
+        if (!requestUrl.includes('/auth/login')) {
           if (data?.detail) {
             message.error(data.detail)
           } else {
@@ -60,7 +67,7 @@ request.interceptors.response.use(
         message.error('资源不存在')
       } else {
         // 对于其他错误，如果也是登录接口，也交由页面处理
-        if (!error.config.url?.includes('/auth/login')) {
+        if (!requestUrl.includes('/auth/login')) {
           message.error(data?.detail || '请求失败')
         }
       }
@@ -228,6 +235,7 @@ export const repositoryApi = {
   getTree: (params?: { mode?: 'online' | 'offline' }) => request.get('/repositories/tree', { params }),
   getCodeartsConfig: () => request.get('/repositories/codearts/config'),
   setCodeartsConfig: (data: Record<string, any>) => request.post('/repositories/codearts/config', data),
+  syncCodeartsProject: (data: Record<string, any>) => request.post('/repositories/codearts/sync', data),
   importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; repo_id?: string; download_uri?: string; name?: string; version?: string; description?: string }) =>
     request.post('/repositories/codearts/import', data),
   listProjectMembers: (projectKey: string) => request.get(`/repositories/projects/${projectKey}/members`),
