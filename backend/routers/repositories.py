@@ -500,6 +500,8 @@ async def get_repository_tree(
                     url = f"{base_url}/cloudartifact/v5/{tenant_id}/{project_id}/{current_repo_id}/file-tree"
                     params = f"?path={current_relative_path}"
                     resp = _http_get_json(url + params, token=token)
+                    if resp.get("error_code") or resp.get("error_msg"):
+                        raise Exception(f"获取目录失败: {resp.get('error_msg', '未知错误')}")
                     nodes = _extract_list(resp)
                     results = []
                     for n in nodes:
@@ -541,43 +543,22 @@ async def get_repository_tree(
                             "title": f"华为云制品仓库 {rid}",
                             "key": f"repo_{idx}_{rid}",
                             "repo_id": rid,
-                            "children": traverse_codearts(rid, "/"),
+                            "children": [
+                                {
+                                    "title": f"项目 {project_id}",
+                                    "key": f"proj_{project_id}",
+                                    "project_id": project_id,
+                                    "children": traverse_codearts(rid, "/")
+                                }
+                            ],
                         }
                     )
                 tree_data = warehouses
-            except Exception:
-                enabled = False
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"CodeArts同步失败: {str(e)}")
 
         if not enabled:
-            children = []
-            for r in repos:
-                children.append({
-                    "title": f"{r.name}",
-                    "key": f"pkg_{r.id}",
-                    "children": [
-                        {
-                            "title": f"{r.version or 'v1.0.0'}",
-                            "key": f"ver_{r.id}_rel",
-                            "isLeaf": True,
-                            "repo_id": r.id,
-                            "file_url": r.file_url,
-                            "size": r.size,
-                            "version": r.version,
-                            "md5": getattr(r, "md5", None),
-                            "sha256": getattr(r, "sha256", None),
-                            "download_count": getattr(r, "download_count", None),
-                            "last_download_time": getattr(r, "last_download_time", None),
-                        }
-                    ]
-                })
-
-            tree_data = [
-                {
-                    "title": "制品仓库1",
-                    "key": "repo_0_default",
-                    "children": [{"title": "项目", "key": "repo_0_default_projects", "children": [{"title": "项目 1", "key": "proj_default", "children": children}]}],
-                }
-            ]
+            tree_data = []
     return {
         "code": 0,
         "message": "success",

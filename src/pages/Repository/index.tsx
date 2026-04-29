@@ -190,8 +190,12 @@ const Repository: React.FC = () => {
       if (res?.code === 0) {
         setTreeRaw(res.data || [])
       }
-    } catch {
-      /* interceptor handles it */
+    } catch (e: any) {
+      if (mode === 'online') {
+        const errDetail = e?.response?.data?.detail
+        message.error(errDetail || '云端同步失败，请检查同步配置中的 IAM 账号、区域、项目ID及仓库ID是否正确')
+        setTreeRaw([])
+      }
     } finally {
       setTreeLoading(false)
     }
