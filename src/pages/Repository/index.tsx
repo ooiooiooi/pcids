@@ -376,13 +376,15 @@ const Repository: React.FC = () => {
   }
 
   const moreMenuItems = [
-    { key: 'sync-config', label: '配置 CodeArts 同步参数' },
+    { key: 'create-project', label: '新增项目' },
+    { key: 'sync-config', label: '当前同步配置' },
     { key: 'upload-artifact', label: '上传本地制品' },
     { key: 'member-permission', label: '项目成员及权限' },
     { key: 'delete-project', label: '删除当前项目', danger: true },
   ]
 
   const handleMoreMenuClick = async ({ key }: { key: string }) => {
+    if (key === 'create-project') setIsCreateProjectOpen(true)
     if (key === 'sync-config') setIsSyncConfigOpen(true)
     if (key === 'upload-artifact') {
       setUploadedFileMeta(null)
