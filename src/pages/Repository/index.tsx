@@ -384,8 +384,14 @@ const Repository: React.FC = () => {
   ]
 
   const handleMoreMenuClick = async ({ key }: { key: string }) => {
-    if (key === 'create-project') setIsCreateProjectOpen(true)
-    if (key === 'sync-config') setIsSyncConfigOpen(true)
+    if (key === 'create-project') {
+      await refreshCodeartsConfig()
+      setIsCreateProjectOpen(true)
+    }
+    if (key === 'sync-config') {
+      await refreshCodeartsConfig()
+      setIsSyncConfigOpen(true)
+    }
     if (key === 'upload-artifact') {
       setUploadedFileMeta(null)
       uploadForm.resetFields()
