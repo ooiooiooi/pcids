@@ -158,6 +158,7 @@ const Repository: React.FC = () => {
           project_id: it.project_id ?? meta?.project_id ?? null,
           package_id: it.package_id ?? meta?.package_id ?? null,
           version_id: it.version_id ?? meta?.version_id ?? null,
+          download_uri: it.download_uri ?? null,
         }
         if (key.startsWith('proj_')) next.node_type = 'project'
         else if (key.startsWith('pkg_')) next.node_type = 'package'
@@ -323,6 +324,8 @@ const Repository: React.FC = () => {
         project_id: String(selectedNode.project_id),
         package_id: String(selectedNode.package_id),
         version_id: String(selectedNode.version_id),
+        repo_id: String(selectedNode.repo_id || ''),
+        download_uri: String(selectedNode.download_uri || ''),
         name: String(selectedNode.title || 'CodeArts制品'),
         version: selectedNode.version ? String(selectedNode.version) : undefined,
       })

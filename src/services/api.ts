@@ -228,7 +228,7 @@ export const repositoryApi = {
   getTree: (params?: { mode?: 'online' | 'offline' }) => request.get('/repositories/tree', { params }),
   getCodeartsConfig: () => request.get('/repositories/codearts/config'),
   setCodeartsConfig: (data: Record<string, any>) => request.post('/repositories/codearts/config', data),
-  importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; name?: string; version?: string; description?: string }) =>
+  importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; repo_id?: string; download_uri?: string; name?: string; version?: string; description?: string }) =>
     request.post('/repositories/codearts/import', data),
   listProjectMembers: (projectKey: string) => request.get(`/repositories/projects/${projectKey}/members`),
   inviteProjectMember: (projectKey: string, data: { username: string; role?: 'admin' | 'member' }) =>
