@@ -89,7 +89,7 @@ async def get_products(
         order_func = desc if sort_order == "desc" else asc
         query = query.order_by(order_func(getattr(Product, sort_field)))
     else:
-        query = query.order_by(Product.updated_at.desc())
+        query = query.order_by(Product.created_at.desc())
         
     products = query.offset((page - 1) * page_size).limit(page_size).all()
 

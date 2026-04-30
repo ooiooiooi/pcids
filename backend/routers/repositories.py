@@ -1232,6 +1232,8 @@ async def download_codearts_artifact_to_server(
     project_id = str(payload.get("project_id") or "").strip()
     download_uri = str(payload.get("download_uri") or "").strip()
     preferred_name = str(payload.get("name") or "").strip() or None
+    repo_db_id = payload.get("id")
+    target = str(payload.get("target") or "server").strip()
 
     if not project_id:
         raise HTTPException(status_code=400, detail="缺少 project_id")
@@ -1259,14 +1261,14 @@ async def download_codearts_artifact_to_server(
                 os.remove(file_path)
             except Exception:
                 pass
-        raise HTTPException(status_code=502, detail=f"下载到服务器失败：{str(e)}")
+        raise HTTPException(status_code=502, detail=f"下载到本地存储失败：{str(e)}")
 
     cfg = _get_repository_download_config()
     server_ip = str(cfg.get("server_ip") or "").strip()
     server_port = cfg.get("server_port")
     server_api_path = str(cfg.get("server_api_path") or "/upload").strip()
 
-    if server_ip and server_port:
+    if target == "server" and server_ip and server_port:
         import requests
         target_url = f"http://{server_ip}:{server_port}{server_api_path}"
         try:
@@ -1278,20 +1280,28 @@ async def download_codearts_artifact_to_server(
             logger.exception("repository.codearts_download_server.internal_transfer_error | %s", str(e))
             raise HTTPException(status_code=502, detail=f"内网传输到目标服务器失败：{str(e)}")
 
+    saved_path_url = _normalize_repository_file_url(file_path)
+
+    if repo_db_id:
+        repo_record = db.query(Repository).filter(Repository.id == repo_db_id).first()
+        if repo_record:
+            repo_record.file_url = saved_path_url
+            db.commit()
+
     _log_event(
         "repository.codearts_download_server.success",
         **_current_user_log_context(current_user),
         project_key=project_key,
         file_path=file_path,
-        target_server=f"{server_ip}:{server_port}" if server_ip and server_port else "local",
+        target_server=f"{server_ip}:{server_port}" if (target == "server" and server_ip and server_port) else "local",
     )
     return {
         "code": 0,
-        "message": "下载并传输到服务器成功" if server_ip and server_port else "下载成功",
+        "message": "下载并传输到服务器成功" if (target == "server" and server_ip and server_port) else "下载成功",
         "data": {
-            "saved_path": _normalize_repository_file_url(file_path),
+            "saved_path": saved_path_url,
             "filename": filename,
-            "target_server": f"{server_ip}:{server_port}" if server_ip and server_port else "local",
+            "target_server": f"{server_ip}:{server_port}" if (target == "server" and server_ip and server_port) else "local",
         },
     }
 

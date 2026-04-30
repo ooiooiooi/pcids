@@ -154,11 +154,7 @@ const Repository: React.FC = () => {
   const [permConfig, setPermConfig] = useState<any>({})
   const [permGroup, setPermGroup] = useState<'admin' | 'member'>('admin')
   const [permDraft, setPermDraft] = useState<Record<string, boolean>>({})
-
-  const selectedNode = useMemo(() => {
-    if (!selectedNodeKey) return null
-    return nodeMapRef.current.get(selectedNodeKey) || null
-  }, [selectedNodeKey])
+  const [downloading, setDownloading] = useState(false)
 
   const treeData: AnyNode[] = useMemo(() => {
     const map = new Map<string, AnyNode>()
@@ -216,6 +212,11 @@ const Repository: React.FC = () => {
 
     return build(treeRaw, [])
   }, [treeRaw])
+
+  const selectedNode = useMemo(() => {
+    if (!selectedNodeKey) return null
+    return nodeMapRef.current.get(selectedNodeKey) || null
+  }, [selectedNodeKey, treeData])
 
   const filteredTreeData = useMemo(() => filterTreeByKeyword(treeData, searchKeyword), [treeData, searchKeyword])
 
@@ -410,11 +411,14 @@ const Repository: React.FC = () => {
 
   const handleDownloadToServer = async () => {
     if (!selectedNode || !selectedNode.project_id || !selectedNode.download_uri) return
+    setDownloading(true)
     try {
       const res: any = await repositoryApi.downloadCodeartsArtifactToServer({
         project_id: String(selectedNode.project_id),
         download_uri: String(selectedNode.download_uri || ''),
         name: String(selectedNode.title || 'CodeArts制品'),
+        id: selectedNode.repo_id ? Number(selectedNode.repo_id) : undefined,
+        target: 'server'
       })
       if (res?.code === 0) {
         const targetServer = res?.data?.target_server
@@ -424,36 +428,40 @@ const Repository: React.FC = () => {
           const savedPath = String(res?.data?.saved_path || '').trim()
           message.success(savedPath ? `已下载到本地服务器：${savedPath}` : '已下载到服务器')
         }
+        refreshTree()
       }
-    } catch {
-      /* ignore */
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '传输到服务器失败')
+    } finally {
+      setDownloading(false)
     }
   }
 
   const handleDownloadToLocal = async () => {
     if (!selectedNode || !selectedNode.project_id || !selectedNode.download_uri) return
+    setDownloading(true)
     try {
-      const blob: any = await repositoryApi.downloadCodeartsArtifactToLocal({
+      const res: any = await repositoryApi.downloadCodeartsArtifactToServer({
         project_id: String(selectedNode.project_id),
         download_uri: String(selectedNode.download_uri || ''),
         name: String(selectedNode.title || 'CodeArts制品'),
+        id: selectedNode.repo_id ? Number(selectedNode.repo_id) : undefined,
+        target: 'local'
       })
-      triggerBrowserDownload(blob as Blob, String(selectedNode.title || 'artifact.bin'))
-      message.success('已开始下载到本地')
-    } catch {
-      /* ignore */
+      if (res?.code === 0) {
+        message.success(`已下载到本地配置目录：${res?.data?.saved_path || ''}`)
+        refreshTree()
+      }
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '下载到本地失败')
+    } finally {
+      setDownloading(false)
     }
   }
 
   const handleDownloadLocalFile = async () => {
-    if (!selectedNode?.repo_id || !selectedNode?.file_url) return
-    try {
-      const blob: any = await repositoryApi.downloadLocalRepositoryFile(Number(selectedNode.repo_id))
-      triggerBrowserDownload(blob as Blob, String(selectedNode.title || 'artifact.bin'))
-      message.success('已开始下载到本地')
-    } catch {
-      /* ignore */
-    }
+    if (!selectedNode?.file_url) return
+    message.info(`文件已在本地目录: ${selectedNode.file_url}`)
   }
 
   const handleDeleteLocalFile = async () => {
@@ -1103,25 +1111,26 @@ const Repository: React.FC = () => {
               {((selectedNode.project_id && selectedNode.download_uri) || (selectedNode.repo_id && selectedNode.file_url)) && (
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
                   <Space>
+                    {selectedNode.repo_id && !selectedNode.file_url && selectedNode.download_uri && (
+                      <Button type="primary" loading={downloading} onClick={handleDownloadToLocal}>
+                        在线安装
+                      </Button>
+                    )}
+                    {selectedNode.repo_id && selectedNode.file_url && (
+                      <Button type="primary" disabled>
+                        离线安装
+                      </Button>
+                    )}
                     {selectedNode.project_id && selectedNode.download_uri && (
                       <Dropdown
                         menu={{ items: remoteDownloadMenuItems as any, onClick: handleDownloadMenuClick as any }}
                         trigger={['click']}
+                        disabled={downloading}
                       >
                         <Button type="link">
                           下载 <DownOutlined />
                         </Button>
                       </Dropdown>
-                    )}
-                    {selectedNode.repo_id && selectedNode.file_url && (
-                      <>
-                        <Button type="link" onClick={handleDownloadLocalFile}>
-                          下载到本地
-                        </Button>
-                        <Button danger icon={<DeleteOutlined />} onClick={handleDeleteLocalFile}>
-                          删除本地文件
-                        </Button>
-                      </>
                     )}
                   </Space>
                 </div>

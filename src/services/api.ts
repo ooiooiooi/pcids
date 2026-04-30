@@ -238,7 +238,7 @@ export const repositoryApi = {
   syncCodeartsProject: (data: Record<string, any>) => request.post('/repositories/codearts/sync', data),
   importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; repo_id?: string; download_uri?: string; name?: string; version?: string; description?: string }) =>
     request.post('/repositories/codearts/import', data),
-  downloadCodeartsArtifactToServer: (data: { project_id: string; download_uri: string; name?: string }) =>
+  downloadCodeartsArtifactToServer: (data: { project_id: string; download_uri: string; name?: string; id?: number; target?: 'server' | 'local' }) =>
     request.post('/repositories/codearts/download/server', data),
   downloadCodeartsArtifactToLocal: (params: { project_id: string; download_uri: string; name?: string }) =>
     request.get('/repositories/codearts/download/local', { params, responseType: 'blob' }),

@@ -5,9 +5,16 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 from contextlib import asynccontextmanager
 from datetime import datetime
+import logging
+from logging.handlers import TimedRotatingFileHandler
+import json
 import os
+from pathlib import Path
+import time
+from urllib.parse import parse_qs
 import uvicorn
 
 from backend.utils.db import init_db, SessionLocal
@@ -16,13 +23,175 @@ from backend.routers import auth, users, roles, products, burners, scripts, task
 from backend.routers.auth import SECRET_KEY, ALGORITHM
 from jose import jwt, JWTError
 
+
+def configure_logging():
+    level_name = str(os.environ.get("LOG_LEVEL", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger = logging.getLogger()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    log_dir = Path(__file__).resolve().parents[1] / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "backend.log"
+
+    root_logger.setLevel(level)
+
+    has_stream_handler = any(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+        for handler in root_logger.handlers
+    )
+    if not has_stream_handler:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(level)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    file_handler_exists = any(
+        isinstance(handler, TimedRotatingFileHandler) and Path(getattr(handler, "baseFilename", "")) == log_file
+        for handler in root_logger.handlers
+    )
+    if not file_handler_exists:
+        file_handler = TimedRotatingFileHandler(
+            filename=log_file,
+            when="midnight",
+            interval=1,
+            backupCount=14,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
+_SENSITIVE_LOG_KEYS = {"password", "token", "download_password", "authorization", "access_token", "refresh_token"}
+_MAX_BODY_SUMMARY_LENGTH = 1000
+
+
+def _sanitize_log_data(value):
+    if isinstance(value, dict):
+        sanitized = {}
+        for k, v in value.items():
+            if str(k).lower() in _SENSITIVE_LOG_KEYS:
+                sanitized[k] = "***"
+            else:
+                sanitized[k] = _sanitize_log_data(v)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_log_data(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_log_data(v) for v in value)
+    if isinstance(value, str) and len(value) > _MAX_BODY_SUMMARY_LENGTH:
+        return value[:_MAX_BODY_SUMMARY_LENGTH] + "...(truncated)"
+    return value
+
+
+async def _build_request_body_summary(request: Request):
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+
+    try:
+        body = await request.body()
+    except RuntimeError:
+        return {"body_error": "stream_consumed"}
+    if not body:
+        return None
+
+    content_type = str(request.headers.get("content-type") or "").lower()
+    summary = {
+        "content_type": content_type or None,
+        "body_size": len(body),
+    }
+
+    if "application/json" in content_type:
+        try:
+            summary["body"] = _sanitize_log_data(json.loads(body.decode("utf-8")))
+        except Exception:
+            summary["body_text"] = body.decode("utf-8", errors="ignore")[:_MAX_BODY_SUMMARY_LENGTH]
+        return summary
+
+    if "application/x-www-form-urlencoded" in content_type:
+        try:
+            parsed = parse_qs(body.decode("utf-8", errors="ignore"), keep_blank_values=True)
+            normalized = {k: v if len(v) > 1 else (v[0] if v else "") for k, v in parsed.items()}
+            summary["body"] = _sanitize_log_data(normalized)
+        except Exception:
+            summary["body_text"] = body.decode("utf-8", errors="ignore")[:_MAX_BODY_SUMMARY_LENGTH]
+        return summary
+
+    if "multipart/form-data" in content_type:
+        summary["body_text"] = "<multipart omitted>"
+        return summary
+
+    summary["body_text"] = body.decode("utf-8", errors="ignore")[:_MAX_BODY_SUMMARY_LENGTH]
+    return summary
+
+
+def _extract_request_context(request: Request) -> dict:
+    return {
+        "method": request.method,
+        "path": request.url.path,
+        "query": str(request.url.query or "") or None,
+        "client_ip": request.headers.get("x-forwarded-for") or (request.client.host if request.client else None),
+    }
+
 class OperationLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.method not in ["POST", "PUT", "DELETE"]:
-            return await call_next(request)
-            
-        response = await call_next(request)
-            
+        start_time = time.perf_counter()
+        request_context = _extract_request_context(request)
+        body_summary = await _build_request_body_summary(request) if request.url.path.startswith("/api/") else None
+        response: Response | None = None
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            logger.exception(
+                "request.exception | %s",
+                json.dumps(
+                    _sanitize_log_data(
+                        {
+                            **request_context,
+                            "duration_ms": duration_ms,
+                            "request_body_summary": body_summary,
+                        }
+                    ),
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+            raise
+
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        if request.url.path.startswith("/api/"):
+            logger.info(
+                "request.completed | %s",
+                json.dumps(
+                    {
+                        **request_context,
+                        "status_code": response.status_code,
+                        "duration_ms": duration_ms,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+        if response.status_code >= 400 and request.url.path.startswith("/api/"):
+            logger.warning(
+                "request.failed | %s",
+                json.dumps(
+                    _sanitize_log_data(
+                        {
+                            **request_context,
+                            "status_code": response.status_code,
+                            "duration_ms": duration_ms,
+                            "request_body_summary": body_summary,
+                        }
+                    ),
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             return response
@@ -113,8 +282,8 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
                 )
                 db.add(log)
                 db.commit()
-        except Exception as e:
-            print("Log error:", e)
+        except Exception:
+            logger.exception("operation_log.write_failed")
         finally:
             db.close()
             
