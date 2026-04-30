@@ -1,6 +1,7 @@
 import { Table, Button, Space, Modal, message, Tag, Popconfirm, Select, Input, Row, Col, Typography, Checkbox, InputNumber } from 'antd'
 import { PlusOutlined, SearchOutlined, DesktopOutlined, AppstoreOutlined } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { taskApi, productApi, burnerApi, scriptApi, repositoryApi } from '../../services/api'
 import { Permission } from '../../hooks'
 import dayjs from 'dayjs'
@@ -31,6 +32,8 @@ const parseJsonSafe = (value?: string | null) => {
 }
 
 const Burning: React.FC = () => {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
@@ -116,14 +119,23 @@ const Burning: React.FC = () => {
     } catch { /* ignore */ }
   }
 
-  const handleOpenWizard = () => {
+  const handleOpenWizard = async (initialState?: any) => {
     setCurrentStep(0)
-    setPlatform(null)
-    setWizardData({ software: null, boardId: null, osId: null, options: ['local', 'integrity'], retryCount: 1 })
+    setPlatform(initialState?.taskType || null)
+    setWizardData({ software: initialState?.softwareId || null, boardId: null, osId: null, options: ['local', 'integrity'], retryCount: 1 })
     setArtifactKeyword('')
-    fetchWizardData()
+    await fetchWizardData()
     setIsWizardOpen(true)
   }
+
+  useEffect(() => {
+    const state = location.state as any
+    if (state?.openWizard) {
+      handleOpenWizard(state)
+      // Clear state to avoid reopening on refresh
+      navigate('/burning', { replace: true, state: {} })
+    }
+  }, [location.state])
 
   const handleNext = () => {
     if (currentStep === 0 && !platform) {

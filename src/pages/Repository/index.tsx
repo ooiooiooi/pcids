@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Button,
   Checkbox,
@@ -118,6 +119,7 @@ const CODEARTS_FORM_DRAFT_KEY = 'pcids.repository.codeartsFormDraft'
 const CODEARTS_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsFormSecretDraft'
 
 const Repository: React.FC = () => {
+  const navigate = useNavigate()
   const [treeLoading, setTreeLoading] = useState(false)
   const [treeRaw, setTreeRaw] = useState<any[]>([])
   const [searchKeyword, setSearchKeyword] = useState('')
@@ -409,6 +411,13 @@ const Repository: React.FC = () => {
     loadPermissions(currentProjectKey)
   }, [isMemberPermissionOpen, currentProjectKey])
 
+  const jumpToWizard = (repoId: string | number, filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase() || ''
+    const osExtensions = ['iso', 'img', 'qcow2', 'ova', 'raw', 'qcow', 'vdi', 'vhd']
+    const taskType = osExtensions.includes(ext) ? 'os' : 'board'
+    navigate('/burning', { state: { openWizard: true, softwareId: Number(repoId), taskType } })
+  }
+
   const handleDownloadToServer = async () => {
     if (!selectedNode || !selectedNode.project_id || !selectedNode.download_uri) return
     setDownloading(true)
@@ -451,6 +460,10 @@ const Repository: React.FC = () => {
       if (res?.code === 0) {
         message.success(`已下载到本地配置目录：${res?.data?.saved_path || ''}`)
         refreshTree()
+        const idToJump = selectedNode.repo_id ? Number(selectedNode.repo_id) : undefined
+        if (idToJump) {
+          jumpToWizard(idToJump, String(selectedNode.title || ''))
+        }
       }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '下载到本地失败')
@@ -1117,7 +1130,7 @@ const Repository: React.FC = () => {
                       </Button>
                     )}
                     {selectedNode.repo_id && selectedNode.file_url && (
-                      <Button type="primary" disabled>
+                      <Button type="primary" onClick={() => jumpToWizard(Number(selectedNode.repo_id), String(selectedNode.title || ''))}>
                         离线安装
                       </Button>
                     )}
