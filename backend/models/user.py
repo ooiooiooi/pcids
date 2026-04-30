@@ -34,13 +34,8 @@ class User(Base, TimestampMixin):
 
     def get_permissions(self) -> List[str]:
         """获取用户所有权限编码"""
-        if self.username == "admin" or (self.role and self.role.name == "管理员"):
-            if not self.role:
-                return ["all"]
-            codes = [p.code for p in self.role.permissions]
-            if "all" not in codes:
-                return ["all", *codes]
-            return codes
+        if self.username == "admin":
+            return ["all"]
         if not self.role:
             return []
         return [p.code for p in self.role.permissions]

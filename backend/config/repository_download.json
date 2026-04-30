@@ -1,0 +1,7 @@
+{
+  "server_download_root": "/Users/mac/Downloads/pcids_repositories/server",
+  "download_root": "/Users/mac/Downloads/pcids_repositories/server",
+  "server_ip": "127.0.0.1",
+  "server_port": 8080,
+  "server_api_path": "/upload"
+}

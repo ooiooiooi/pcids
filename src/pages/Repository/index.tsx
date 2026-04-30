@@ -21,6 +21,7 @@ import {
 import type { DataNode } from 'antd/es/tree'
 import {
   DeleteOutlined,
+  DownOutlined,
   EllipsisOutlined,
   FileOutlined,
   FolderOutlined,
@@ -31,6 +32,18 @@ import {
 import { repositoryApi, userApi } from '../../services/api'
 
 type AnyNode = DataNode & Record<string, any>
+
+function triggerBrowserDownload(blobData: Blob, filename: string) {
+  const blob = blobData instanceof Blob ? blobData : new Blob([blobData])
+  const objectUrl = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(objectUrl)
+}
 
 function formatDateTime(val?: string | null) {
   if (!val) return '-'
@@ -118,17 +131,9 @@ const Repository: React.FC = () => {
   const [currentProjectKey, setCurrentProjectKey] = useState<string>('')
 
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
-  const [isSyncConfigOpen, setIsSyncConfigOpen] = useState(false)
+  const [isMemberPermissionOpen, setIsMemberPermissionOpen] = useState(false)
   const [createProjectSubmitting, setCreateProjectSubmitting] = useState(false)
-  const [syncConfigSubmitting, setSyncConfigSubmitting] = useState(false)
-  const [isUploadOpen, setIsUploadOpen] = useState(false)
-  const [rightTabKey, setRightTabKey] = useState<'detail' | 'members' | 'permissions'>('detail')
-
   const [createProjectForm] = Form.useForm()
-  const [syncConfigForm] = Form.useForm()
-  const [uploadForm] = Form.useForm()
-  const [uploadSubmitting, setUploadSubmitting] = useState(false)
-  const [uploadedFileMeta, setUploadedFileMeta] = useState<any>(null)
 
   const [membersLoading, setMembersLoading] = useState(false)
   const [members, setMembers] = useState<any[]>([])
@@ -295,7 +300,7 @@ const Repository: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    if (!isCreateProjectOpen && !isSyncConfigOpen) return
+    if (!isCreateProjectOpen) return
     const repoId0 = Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 0 ? String(codeartsCfg.repo_ids[0]) : ''
     const inferredRegion = inferRegionFromRepoId(repoId0)
     const repoIdsExtra =
@@ -320,8 +325,7 @@ const Repository: React.FC = () => {
       region: String(draftValues.region || values.region || inferRegionFromRepoId(draftValues.repo_id_0 || values.repo_id_0) || '').trim(),
     }
     if (isCreateProjectOpen) createProjectForm.setFieldsValue(mergedValues)
-    if (isSyncConfigOpen) syncConfigForm.setFieldsValue(mergedValues)
-  }, [isCreateProjectOpen, isSyncConfigOpen, codeartsCfg, createProjectForm, syncConfigForm])
+  }, [isCreateProjectOpen, codeartsCfg, createProjectForm])
 
   useEffect(() => {
     const projects: Array<{ label: string; value: string }> = []
@@ -399,43 +403,57 @@ const Repository: React.FC = () => {
   }
 
   useEffect(() => {
-    if (!selectedNode) return
-    if (rightTabKey === 'members') {
-      const projectKey = ensureProjectKey()
-      if (projectKey) loadMembers(projectKey)
-    }
-    if (rightTabKey === 'permissions') {
-      const projectKey = ensureProjectKey()
-      if (projectKey) loadPermissions(projectKey)
-    }
-  }, [rightTabKey, selectedNodeKey])
+    if (!isMemberPermissionOpen || !currentProjectKey) return
+    loadMembers(currentProjectKey)
+    loadPermissions(currentProjectKey)
+  }, [isMemberPermissionOpen, currentProjectKey])
 
-  const handleImportToLocal = async () => {
-    if (!selectedNode || !selectedNode.project_id || !selectedNode.package_id || !selectedNode.version_id) return
+  const handleDownloadToServer = async () => {
+    if (!selectedNode || !selectedNode.project_id || !selectedNode.download_uri) return
     try {
-      const res: any = await repositoryApi.importCodeartsArtifact({
+      const res: any = await repositoryApi.downloadCodeartsArtifactToServer({
         project_id: String(selectedNode.project_id),
-        package_id: String(selectedNode.package_id),
-        version_id: String(selectedNode.version_id),
-        repo_id: String(selectedNode.repo_id || ''),
         download_uri: String(selectedNode.download_uri || ''),
         name: String(selectedNode.title || 'CodeArts制品'),
-        version: selectedNode.version ? String(selectedNode.version) : undefined,
       })
       if (res?.code === 0) {
-        message.success('下载成功')
-        refreshTree()
+        const targetServer = res?.data?.target_server
+        if (targetServer && targetServer !== 'local') {
+          message.success(`已下载并传输到目标服务器：${targetServer}`)
+        } else {
+          const savedPath = String(res?.data?.saved_path || '').trim()
+          message.success(savedPath ? `已下载到本地服务器：${savedPath}` : '已下载到服务器')
+        }
       }
     } catch {
       /* ignore */
     }
   }
 
-  const handleDownloadLocalFile = () => {
+  const handleDownloadToLocal = async () => {
+    if (!selectedNode || !selectedNode.project_id || !selectedNode.download_uri) return
+    try {
+      const blob: any = await repositoryApi.downloadCodeartsArtifactToLocal({
+        project_id: String(selectedNode.project_id),
+        download_uri: String(selectedNode.download_uri || ''),
+        name: String(selectedNode.title || 'CodeArts制品'),
+      })
+      triggerBrowserDownload(blob as Blob, String(selectedNode.title || 'artifact.bin'))
+      message.success('已开始下载到本地')
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const handleDownloadLocalFile = async () => {
     if (!selectedNode?.repo_id || !selectedNode?.file_url) return
-    const apiBaseUrl = deriveApiBaseUrl()
-    const url = `${apiBaseUrl}/repositories/${selectedNode.repo_id}/download`
-    window.open(url)
+    try {
+      const blob: any = await repositoryApi.downloadLocalRepositoryFile(Number(selectedNode.repo_id))
+      triggerBrowserDownload(blob as Blob, String(selectedNode.title || 'artifact.bin'))
+      message.success('已开始下载到本地')
+    } catch {
+      /* ignore */
+    }
   }
 
   const handleDeleteLocalFile = async () => {
@@ -462,10 +480,22 @@ const Repository: React.FC = () => {
     })
   }
 
+  const handleDownloadMenuClick = async ({ key }: { key: string }) => {
+    if (key === 'server') {
+      await handleDownloadToServer()
+    }
+    if (key === 'local') {
+      await handleDownloadToLocal()
+    }
+  }
+
+  const remoteDownloadMenuItems = [
+    { key: 'server', label: '服务器' },
+    { key: 'local', label: '本地' },
+  ]
+
   const moreMenuItems = [
     { key: 'create-project', label: '新增项目' },
-    { key: 'sync-config', label: '当前同步配置' },
-    { key: 'upload-artifact', label: '上传本地制品' },
     { key: 'member-permission', label: '项目成员及权限' },
     { key: 'delete-project', label: '删除当前项目', danger: true },
   ]
@@ -475,19 +505,12 @@ const Repository: React.FC = () => {
       await refreshCodeartsConfig()
       setIsCreateProjectOpen(true)
     }
-    if (key === 'sync-config') {
-      await refreshCodeartsConfig()
-      setIsSyncConfigOpen(true)
-    }
-    if (key === 'upload-artifact') {
-      setUploadedFileMeta(null)
-      uploadForm.resetFields()
-      setIsUploadOpen(true)
-    }
     if (key === 'member-permission') {
-      const projectKey = ensureProjectKey()
-      if (!projectKey) return
-      setRightTabKey('members')
+      if (!currentProjectKey) {
+        message.error('请先选择项目')
+        return
+      }
+      setIsMemberPermissionOpen(true)
     }
     if (key === 'delete-project') {
       Modal.confirm({
@@ -508,7 +531,6 @@ const Repository: React.FC = () => {
               setSelectedKeys([])
               setSelectedNodeKey('')
               setCurrentProjectKey('')
-              setRightTabKey('detail')
               refreshTree()
             }
           } catch {
@@ -522,12 +544,10 @@ const Repository: React.FC = () => {
   const createOrSyncProjectFormJSX = (
     <Form
       layout="vertical"
-      form={isCreateProjectOpen ? createProjectForm : syncConfigForm}
+      form={createProjectForm}
       onValuesChange={(_, allValues) => persistCodeartsFormDraft(allValues)}
       onFinish={async (values) => {
-        const isCreateAction = isCreateProjectOpen
-        if (isCreateAction) setCreateProjectSubmitting(true)
-        else setSyncConfigSubmitting(true)
+        setCreateProjectSubmitting(true)
         try {
           const repoIds = [
             String(values.repo_id_0 || '').trim(),
@@ -548,28 +568,21 @@ const Repository: React.FC = () => {
             download_password: String(values.download_password || '').trim() || undefined,
           }
           persistCodeartsFormDraft(values)
-          const res: any = isCreateAction ? await repositoryApi.syncCodeartsProject(payload) : await repositoryApi.setCodeartsConfig(payload)
+          const res: any = await repositoryApi.syncCodeartsProject(payload)
           if (res?.code === 0) {
-            if (isCreateAction) {
-              const syncedCount = Number(res?.data?.synced_count || 0)
-              const skippedCount = Number(res?.data?.skipped_count || 0)
-              message.success(`同步成功，已落地 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`)
-            } else {
-              message.success('保存成功')
-            }
+            const syncedCount = Number(res?.data?.synced_count || 0)
+            const skippedCount = Number(res?.data?.skipped_count || 0)
+            message.success(`同步成功，已落地 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`)
             setIsCreateProjectOpen(false)
-            setIsSyncConfigOpen(false)
             createProjectForm.resetFields()
-            syncConfigForm.resetFields()
             refreshCodeartsConfig()
             refreshTree()
           }
         } catch (e: any) {
           const errDetail = e?.response?.data?.detail
-          message.error(errDetail || (isCreateAction ? 'CodeArts 同步失败，请稍后重试' : '同步配置保存失败，请稍后重试'))
+          message.error(errDetail || 'CodeArts 同步失败，请稍后重试')
         } finally {
-          if (isCreateAction) setCreateProjectSubmitting(false)
-          else setSyncConfigSubmitting(false)
+          setCreateProjectSubmitting(false)
         }
       }}
     >
@@ -1070,7 +1083,6 @@ const Repository: React.FC = () => {
                 setSelectedKeys(nextKeys)
                 const key = nextKeys[0] ? String(nextKeys[0]) : ''
                 setSelectedNodeKey(key)
-              setRightTabKey('detail')
                 if (info?.node?.project_id) setCurrentProjectKey(`proj_${info.node.project_id}`)
                 if (String(key).startsWith('proj_')) setCurrentProjectKey(String(key))
               }}
@@ -1087,24 +1099,42 @@ const Repository: React.FC = () => {
           )}
 
           {selectedNode && (
-            <Tabs
-              activeKey={rightTabKey}
-              onChange={(k) => setRightTabKey(k as any)}
-              items={[
-                {
-                  key: 'detail',
-                  label: '详细信息',
-                  children: (
-                    <div>
-                      <div
-                        style={{
-                          background: '#fff',
-                          border: '1px solid #f0f0f0',
-                          borderRadius: 8,
-                          padding: 16,
-                          boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-                        }}
+            <div>
+              {((selectedNode.project_id && selectedNode.download_uri) || (selectedNode.repo_id && selectedNode.file_url)) && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                  <Space>
+                    {selectedNode.project_id && selectedNode.download_uri && (
+                      <Dropdown
+                        menu={{ items: remoteDownloadMenuItems as any, onClick: handleDownloadMenuClick as any }}
+                        trigger={['click']}
                       >
+                        <Button type="link">
+                          下载 <DownOutlined />
+                        </Button>
+                      </Dropdown>
+                    )}
+                    {selectedNode.repo_id && selectedNode.file_url && (
+                      <>
+                        <Button type="link" onClick={handleDownloadLocalFile}>
+                          下载到本地
+                        </Button>
+                        <Button danger icon={<DeleteOutlined />} onClick={handleDeleteLocalFile}>
+                          删除本地文件
+                        </Button>
+                      </>
+                    )}
+                  </Space>
+                </div>
+              )}
+              <div
+                style={{
+                  background: '#fff',
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 8,
+                  padding: 16,
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                }}
+              >
                         <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>详细信息</div>
                         <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', rowGap: 10, columnGap: 16 }}>
                           {detailPairs.map((p) => (
@@ -1137,37 +1167,25 @@ const Repository: React.FC = () => {
                           </div>
                         </div>
                       ) : null}
-                      {(selectedNode.project_id && selectedNode.package_id && selectedNode.version_id) || (selectedNode.repo_id && selectedNode.file_url) ? (
-                        <div style={{ marginTop: 12 }}>
-                          <Space>
-                            {selectedNode.project_id && selectedNode.package_id && selectedNode.version_id && (
-                              <Button type="primary" onClick={handleImportToLocal}>
-                                下载到本地
-                              </Button>
-                            )}
-                            {selectedNode.repo_id && selectedNode.file_url && (
-                              <>
-                                <Button type="primary" onClick={handleDownloadLocalFile}>
-                                  下载到本地
-                                </Button>
-                                <Button danger icon={<DeleteOutlined />} onClick={handleDeleteLocalFile}>
-                                  删除本地文件
-                                </Button>
-                              </>
-                            )}
-                          </Space>
-                        </div>
-                      ) : null}
-                    </div>
-                  ),
-                },
-                { key: 'members', label: '项目成员', children: membersPanelJSX },
-                { key: 'permissions', label: '权限设置', children: permissionsPanelJSX },
-              ]}
-            />
+            </div>
           )}
         </div>
       </div>
+
+      <Modal
+        title="项目成员及权限"
+        open={isMemberPermissionOpen}
+        width={800}
+        footer={null}
+        onCancel={() => setIsMemberPermissionOpen(false)}
+      >
+        <Tabs
+          items={[
+            { key: 'members', label: '项目成员', children: membersPanelJSX },
+            { key: 'permissions', label: '权限设置', children: permissionsPanelJSX },
+          ]}
+        />
+      </Modal>
 
       <Modal
         title="新建项目"
@@ -1185,124 +1203,6 @@ const Repository: React.FC = () => {
       >
         {createOrSyncProjectFormJSX}
       </Modal>
-
-      <Modal
-        title="同步配置"
-        open={isSyncConfigOpen}
-        width={656}
-        okText="确 定"
-        cancelText="取 消"
-        confirmLoading={syncConfigSubmitting}
-        onOk={() => syncConfigForm.submit()}
-        onCancel={() => {
-          if (syncConfigSubmitting) return
-          setIsSyncConfigOpen(false)
-          syncConfigForm.resetFields()
-        }}
-      >
-        {createOrSyncProjectFormJSX}
-      </Modal>
-
-      <Modal
-        title="上传本地制品"
-        open={isUploadOpen}
-        width={640}
-        okText="确 定"
-        cancelText="取 消"
-        confirmLoading={uploadSubmitting}
-        onOk={() => uploadForm.submit()}
-        onCancel={() => {
-          if (uploadSubmitting) return
-          setIsUploadOpen(false)
-          setUploadedFileMeta(null)
-          uploadForm.resetFields()
-        }}
-      >
-        <Form
-          layout="vertical"
-          form={uploadForm}
-          onFinish={async (values) => {
-            if (!uploadedFileMeta?.file_url) {
-              message.error('请先上传制品文件')
-              return
-            }
-            setUploadSubmitting(true)
-            try {
-              const payload = {
-                name: String(values.name || '').trim(),
-                version: String(values.version || '').trim() || undefined,
-                description: String(values.description || '').trim() || undefined,
-                project_key: String(values.project_key || '').trim() || undefined,
-                file_url: uploadedFileMeta.file_url,
-                size: uploadedFileMeta.size,
-                md5: uploadedFileMeta.md5,
-                sha256: uploadedFileMeta.sha256,
-              }
-              const res: any = await repositoryApi.create(payload)
-              if (res?.code === 0) {
-                message.success('上传成功')
-                setIsUploadOpen(false)
-                setUploadedFileMeta(null)
-                uploadForm.resetFields()
-                refreshTree()
-              }
-            } catch {
-              /* ignore */
-            } finally {
-              setUploadSubmitting(false)
-            }
-          }}
-        >
-          <Form.Item label="制品名称" name="name" rules={[{ required: true, message: '请输入制品名称' }]}>
-            <Input placeholder="请输入制品名称" />
-          </Form.Item>
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item label="版本" name="version">
-                <Input placeholder="如 v1.0.0" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item label="项目标识" name="project_key">
-                <Input placeholder="可选，如 proj_local_demo" />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item label="描述" name="description">
-            <Input.TextArea rows={3} placeholder="请输入描述" />
-          </Form.Item>
-          <Form.Item label="制品文件" required>
-            <Upload
-              maxCount={1}
-              showUploadList
-              fileList={uploadedFileMeta ? [{ uid: '-1', name: uploadedFileMeta.filename || '已上传文件', status: 'done' as const }] : []}
-              customRequest={async (options: any) => {
-                try {
-                  const res: any = await repositoryApi.uploadFile(options.file as File)
-                  if (res?.code === 0) {
-                    setUploadedFileMeta(res.data)
-                    if (!uploadForm.getFieldValue('name')) {
-                      uploadForm.setFieldValue('name', res.data?.filename?.replace(/\.[^.]+$/, '') || '')
-                    }
-                    options.onSuccess?.(res.data)
-                    message.success('文件上传成功')
-                  }
-                } catch (error) {
-                  options.onError?.(error)
-                }
-              }}
-            >
-              <Button type="dashed" icon={<PlusOutlined />}>选择并上传文件</Button>
-            </Upload>
-            {uploadedFileMeta?.file_url ? (
-              <div style={{ marginTop: 12, color: 'rgba(0,0,0,0.65)' }}>
-                已上传：{uploadedFileMeta.filename}，大小：{formatBytes(uploadedFileMeta.size)}
-              </div>
-            ) : null}
-          </Form.Item>
-        </Form>
-      </Modal>
-
       <Modal
         title="邀请成员"
         open={isInviteOpen}
@@ -1351,7 +1251,7 @@ const Repository: React.FC = () => {
               <Checkbox
                 indeterminate={inviteAllIndeterminate}
                 checked={inviteAllChecked}
-                onChange={(e) => {
+                onChange={(e: any) => {
                   const checked = e.target.checked
                   if (checked) {
                     setInviteSelectedUsernames((prev) => Array.from(new Set([...prev, ...displayedInviteUsernames])))
@@ -1379,7 +1279,7 @@ const Repository: React.FC = () => {
                     <div key={username} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
                       <Checkbox
                         checked={checked}
-                        onChange={(e) => {
+                        onChange={(e: any) => {
                           const nextChecked = e.target.checked
                           setInviteSelectedUsernames((prev) => (nextChecked ? Array.from(new Set([...prev, username])) : prev.filter((x) => x !== username)))
                         }}
@@ -1414,7 +1314,7 @@ const Repository: React.FC = () => {
                     <Tag
                       key={u}
                       closable
-                      onClose={(e) => {
+                      onClose={(e: any) => {
                         e.preventDefault()
                         setInviteSelectedUsernames((prev) => prev.filter((x) => x !== u))
                       }}

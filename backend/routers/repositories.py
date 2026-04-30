@@ -1,7 +1,7 @@
 """
 制品仓库路由
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Query
 import os
 import shutil
 import uuid
@@ -10,9 +10,10 @@ import json
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy.orm import Session
 from typing import Optional
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, StreamingResponse
 from backend.utils.db import get_db, ensure_schema
 from backend.models.user import User
 from backend.models import Repository
@@ -24,6 +25,7 @@ from backend.utils.permission import require_permission
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _SENSITIVE_LOG_KEYS = {"password", "token", "download_password"}
+_REPOSITORY_DOWNLOAD_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "repository_download.json"
 
 
 def _sanitize_log_data(value):
@@ -98,6 +100,61 @@ def _safe_json_loads(v: Optional[str]) -> dict:
         return dict(json.loads(v))
     except Exception:
         return {}
+
+
+def _get_repository_download_config() -> dict:
+    if _REPOSITORY_DOWNLOAD_CONFIG_PATH.exists():
+        try:
+            return _safe_json_loads(_REPOSITORY_DOWNLOAD_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _get_repository_download_root() -> str:
+    default_root = Path(__file__).resolve().parents[2] / "uploads" / "repositories"
+    cfg = _get_repository_download_config()
+    configured = str(cfg.get("server_download_root") or cfg.get("download_root") or "").strip()
+    target = Path(configured).expanduser() if configured else default_root
+    target.mkdir(parents=True, exist_ok=True)
+    return str(target)
+
+
+def _normalize_repository_file_url(file_path: str) -> str:
+    return str(Path(file_path).expanduser().resolve())
+
+
+def _is_path_within_root(file_path: str, root_path: str) -> bool:
+    try:
+        Path(file_path).resolve().relative_to(Path(root_path).resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_repository_file_path(file_url: Optional[str]) -> Optional[str]:
+    raw = str(file_url or "").strip()
+    if not raw:
+        return None
+
+    if raw.startswith("/uploads/"):
+        candidate = Path(__file__).resolve().parents[2] / raw.lstrip("/")
+    else:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path("/") / raw.lstrip("/")
+
+    normalized = candidate.resolve()
+    if normalized.exists():
+        return str(normalized)
+
+    raw_path = str(candidate)
+    if raw_path.startswith("//"):
+        fallback = Path(raw_path[1:]).resolve()
+        if fallback.exists():
+            return str(fallback)
+
+    return str(normalized)
 
 def _extract_list(payload):
     if payload is None:
@@ -332,6 +389,61 @@ def _coerce_size_bytes(raw_size: Optional[object], display_size: Optional[str] =
     return _parse_display_size_to_bytes(display_size)
 
 
+def _sanitize_download_filename(filename: Optional[str]) -> str:
+    raw = str(filename or "").strip() or "artifact.bin"
+    sanitized = re.sub(r'[\\/:*?"<>|]+', "_", raw).strip(" .")
+    return sanitized or f"artifact_{uuid.uuid4().hex}.bin"
+
+
+def _guess_download_filename(download_uri: str, preferred_name: Optional[str] = None) -> str:
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(str(download_uri or "").strip())
+    path_name = urllib.parse.unquote(Path(parsed.path).name or "")
+    return _sanitize_download_filename(preferred_name or path_name or "artifact.bin")
+
+
+def _unique_download_path(root_dir: str, filename: str) -> str:
+    candidate = Path(root_dir) / filename
+    if not candidate.exists():
+        return str(candidate)
+    stem = candidate.stem
+    suffix = candidate.suffix
+    return str(candidate.with_name(f"{stem}_{uuid.uuid4().hex[:8]}{suffix}"))
+
+
+def _open_remote_download_stream(url: str, token: str, timeout_seconds: int = 60):
+    import urllib.request
+
+    headers = {
+        "Accept": "application/octet-stream",
+        "Content-Type": "application/json",
+        "X-Auth-Token": token,
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    return _urlopen_no_proxy(req, timeout_seconds)
+
+
+def _build_codearts_download_context(current_user: User) -> tuple[dict, str]:
+    cfg = _safe_json_loads(getattr(current_user, "codearts_config_json", None))
+    enabled = bool(cfg.get("enabled"))
+    domain_name = str(cfg.get("domain_name") or "").strip()
+    username = str(cfg.get("username") or "").strip()
+    password = str(cfg.get("password") or "").strip()
+    region = str(cfg.get("region") or "cn-north-4").strip()
+
+    if not enabled:
+        raise HTTPException(status_code=400, detail="CodeArts 未启用")
+    if not domain_name or not username or not password:
+        raise HTTPException(status_code=400, detail="IAM认证信息(账号名/用户名/密码)未配置完整")
+
+    try:
+        token = _get_iam_token(domain_name, username, password, region)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"获取IAM Token失败: {str(e)}")
+    return cfg, token
+
+
 def _get_codearts_project_list(base_url: str, token: str) -> list[dict]:
     last_error: Optional[Exception] = None
     tried_paths: list[str] = []
@@ -443,15 +555,24 @@ def _list_codearts_project_files(base_url: str, token: str, project_info: dict) 
 
 
 def _remove_repository_local_file(repo: Repository) -> None:
-    file_url = str(getattr(repo, "file_url", "") or "")
-    rel = file_url.lstrip("/") if file_url.startswith("/") else file_url
-    if rel.startswith("uploads/") and os.path.exists(rel) and os.path.isfile(rel):
+    file_path = _resolve_repository_file_path(getattr(repo, "file_url", None))
+    if not file_path:
+        return
+    allowed_roots = [
+        _get_repository_download_root(),
+        str((Path(__file__).resolve().parents[2] / "uploads" / "repositories").resolve()),
+    ]
+    if (
+        os.path.exists(file_path)
+        and os.path.isfile(file_path)
+        and any(_is_path_within_root(file_path, root) for root in allowed_roots)
+    ):
         try:
-            os.remove(rel)
+            os.remove(file_path)
         except Exception:
             logger.exception(
                 "repository.local_file.delete_failed | %s",
-                json.dumps({"repo_db_id": getattr(repo, "id", None), "file_path": rel}, ensure_ascii=False, default=str),
+                json.dumps({"repo_db_id": getattr(repo, "id", None), "file_path": file_path}, ensure_ascii=False, default=str),
             )
 
 
@@ -615,6 +736,7 @@ def _ensure_project_member_seed(db: Session, project_key: str, current_user: Use
     exists = db.query(RepositoryProjectMember.id).filter(RepositoryProjectMember.project_key == project_key).first()
     if exists:
         return
+        
     m = RepositoryProjectMember(
         project_key=project_key,
         user_id=current_user.id,
@@ -623,6 +745,19 @@ def _ensure_project_member_seed(db: Session, project_key: str, current_user: Use
         joined_at=datetime.utcnow(),
     )
     db.add(m)
+    
+    if current_user.username != "admin":
+        admin_user = db.query(User).filter(User.username == "admin").first()
+        if admin_user:
+            admin_member = RepositoryProjectMember(
+                project_key=project_key,
+                user_id=admin_user.id,
+                role="admin",
+                inviter_user_id=current_user.id,
+                joined_at=datetime.utcnow(),
+            )
+            db.add(admin_member)
+            
     db.commit()
 
 def _get_current_user_project_role(db: Session, project_key: str, current_user: User) -> Optional[str]:
@@ -634,10 +769,13 @@ def _get_current_user_project_role(db: Session, project_key: str, current_user: 
     return row.role if row else None
 
 def _is_super_admin(current_user: User) -> bool:
-    return getattr(getattr(current_user, "role", None), "name", None) == "管理员"
+    return current_user.username == "admin"
 
 def _require_project_permission(db: Session, project_key: str, current_user: User, perm_key: str) -> None:
     if _is_super_admin(current_user):
+        return
+    data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+    if data_scope == "all":
         return
     role = _get_current_user_project_role(db, project_key, current_user)
     if not role:
@@ -647,30 +785,55 @@ def _require_project_permission(db: Session, project_key: str, current_user: Use
     if not bool((group_cfg or {}).get(perm_key)):
         raise HTTPException(status_code=403, detail="无权限执行该操作")
 
-def _apply_repository_scope(query, current_user: User):
+def _apply_repository_scope(query, db: Session, current_user: User):
+    if _is_super_admin(current_user):
+        return query
+        
     data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+    
+    if data_scope == "all":
+        return query
+        
     if data_scope == "self":
         return query.filter(Repository.created_by_user_id == current_user.id)
-    if isinstance(data_scope, str) and data_scope.startswith("tenant:"):
-        tenant = data_scope.split(":", 1)[1].strip()
-        if tenant:
-            return query.filter(Repository.tenant == tenant)
-    return query
+    
+    member_project_keys = [
+        row[0] for row in db.query(RepositoryProjectMember.project_key)
+        .filter(RepositoryProjectMember.user_id == current_user.id).all()
+    ]
+    
+    from sqlalchemy import or_
+    return query.filter(
+        or_(
+            Repository.project_key.in_(member_project_keys),
+            (Repository.project_key == None) | (Repository.project_key == ""),
+            Repository.created_by_user_id == current_user.id
+        )
+    )
 
-def _apply_codearts_scope(projects: list[dict], current_user: User):
+def _apply_codearts_scope(projects: list[dict], db: Session, current_user: User):
+    if _is_super_admin(current_user):
+        return projects
+
     data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
-    if isinstance(data_scope, str) and data_scope.startswith("project:"):
-        allowed = {p.strip() for p in data_scope.split(":", 1)[1].split(",") if p.strip()}
-        if not allowed:
-            return projects
-        out = []
-        for p in projects:
-            pid = _guess_id(p)
-            name = _guess_name(p)
-            if (pid and pid in allowed) or (name and name in allowed):
-                out.append(p)
-        return out
-    return projects
+    
+    if data_scope == "all":
+        return projects
+
+    member_project_keys = [
+        row[0] for row in db.query(RepositoryProjectMember.project_key)
+        .filter(RepositoryProjectMember.user_id == current_user.id).all()
+    ]
+    
+    allowed_ids = {k[5:] for k in member_project_keys if k.startswith("proj_")}
+
+    out = []
+    for p in projects:
+        pid = _guess_id(p)
+        name = _guess_name(p)
+        if (pid and pid in allowed_ids) or (name and name in allowed_ids):
+            out.append(p)
+    return out
 
 
 @router.get("/codearts/config", response_model=Response)
@@ -831,9 +994,6 @@ async def sync_codearts_project(
         db.delete(row)
     db.flush()
 
-    upload_dir = "uploads/repositories"
-    os.makedirs(upload_dir, exist_ok=True)
-
     synced_count = 0
     skipped_count = 0
     for item in codearts_files:
@@ -956,7 +1116,7 @@ async def import_codearts_artifact(
     description = str(payload.get("description") or "").strip() or None
     download_uri = str(payload.get("download_uri") or "").strip()
 
-    if not project_id or not package_id or not version_id or not repo_id:
+    if not project_id:
         _log_event(
             "repository.codearts_import.missing_args",
             level="warning",
@@ -966,7 +1126,7 @@ async def import_codearts_artifact(
             version_id=version_id,
             repo_id=repo_id,
         )
-        raise HTTPException(status_code=400, detail="缺少 project_id/package_id/version_id/repo_id")
+        raise HTTPException(status_code=400, detail="缺少 project_id")
     if not download_uri:
         _log_event(
             "repository.codearts_import.missing_download_uri",
@@ -981,10 +1141,13 @@ async def import_codearts_artifact(
 
     project_key = f"proj_{project_id}"
     _ensure_project_member_seed(db, project_key, current_user)
-    _require_project_permission(db, project_key, current_user, "download_file")
+    
+    if not _is_super_admin(current_user):
+        data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+        if data_scope != "all":
+            _require_project_permission(db, project_key, current_user, "download_file")
 
-    upload_dir = "uploads/repositories"
-    os.makedirs(upload_dir, exist_ok=True)
+    upload_dir = _get_repository_download_root()
     safe_filename = f"{uuid.uuid4().hex}.bin"
     file_path = os.path.join(upload_dir, safe_filename)
 
@@ -1025,12 +1188,12 @@ async def import_codearts_artifact(
         name=name,
         description=description,
         version=version,
-        file_url=f"/{file_path}",
+        file_url=_normalize_repository_file_url(file_path),
         size=size,
         md5=md5v,
         sha256=sha256v,
         project_key=project_key,
-        repo_id=f"codearts:{project_id}:{package_id}:{version_id}",
+        repo_id=f"codearts:{project_id}:{package_id or 'na'}:{version_id or uuid.uuid4().hex}",
     )
     repo.created_by_user_id = current_user.id
     db.add(repo)
@@ -1054,8 +1217,140 @@ async def import_codearts_artifact(
             "size": repo.size,
             "md5": repo.md5,
             "sha256": repo.sha256,
+            "saved_path": repo.file_url,
         },
     }
+
+
+@router.post("/codearts/download/server", response_model=Response)
+async def download_codearts_artifact_to_server(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("repository:add")),
+):
+    project_id = str(payload.get("project_id") or "").strip()
+    download_uri = str(payload.get("download_uri") or "").strip()
+    preferred_name = str(payload.get("name") or "").strip() or None
+
+    if not project_id:
+        raise HTTPException(status_code=400, detail="缺少 project_id")
+    if not download_uri:
+        raise HTTPException(status_code=400, detail="缺少文件的下载链接(download_uri)")
+
+    project_key = f"proj_{project_id}"
+    _ensure_project_member_seed(db, project_key, current_user)
+    
+    if not _is_super_admin(current_user):
+        data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+        if data_scope != "all":
+            _require_project_permission(db, project_key, current_user, "download_file")
+
+    _, token = _build_codearts_download_context(current_user)
+    download_root = _get_repository_download_root()
+    filename = _guess_download_filename(download_uri, preferred_name)
+    file_path = _unique_download_path(download_root, filename)
+
+    try:
+        _http_download_file(download_uri, file_path, token=token)
+    except Exception as e:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        raise HTTPException(status_code=502, detail=f"下载到服务器失败：{str(e)}")
+
+    cfg = _get_repository_download_config()
+    server_ip = str(cfg.get("server_ip") or "").strip()
+    server_port = cfg.get("server_port")
+    server_api_path = str(cfg.get("server_api_path") or "/upload").strip()
+
+    if server_ip and server_port:
+        import requests
+        target_url = f"http://{server_ip}:{server_port}{server_api_path}"
+        try:
+            with open(file_path, "rb") as f:
+                files = {"file": (filename, f, "application/octet-stream")}
+                resp = requests.post(target_url, files=files, timeout=300)
+                resp.raise_for_status()
+        except Exception as e:
+            logger.exception("repository.codearts_download_server.internal_transfer_error | %s", str(e))
+            raise HTTPException(status_code=502, detail=f"内网传输到目标服务器失败：{str(e)}")
+
+    _log_event(
+        "repository.codearts_download_server.success",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        file_path=file_path,
+        target_server=f"{server_ip}:{server_port}" if server_ip and server_port else "local",
+    )
+    return {
+        "code": 0,
+        "message": "下载并传输到服务器成功" if server_ip and server_port else "下载成功",
+        "data": {
+            "saved_path": _normalize_repository_file_url(file_path),
+            "filename": filename,
+            "target_server": f"{server_ip}:{server_port}" if server_ip and server_port else "local",
+        },
+    }
+
+
+@router.get("/codearts/download/local")
+async def download_codearts_artifact_to_local(
+    project_id: str = Query(...),
+    download_uri: str = Query(...),
+    name: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project_id = str(project_id or "").strip()
+    download_uri = str(download_uri or "").strip()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="缺少 project_id")
+    if not download_uri:
+        raise HTTPException(status_code=400, detail="缺少文件的下载链接(download_uri)")
+
+    project_key = f"proj_{project_id}"
+    _ensure_project_member_seed(db, project_key, current_user)
+    
+    if not _is_super_admin(current_user):
+        data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+        if data_scope != "all":
+            _require_project_permission(db, project_key, current_user, "download_file")
+
+    _, token = _build_codearts_download_context(current_user)
+    filename = _guess_download_filename(download_uri, name)
+    try:
+        upstream = _open_remote_download_stream(download_uri, token=token)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"下载到本地失败：{str(e)}")
+
+    def iter_stream():
+        try:
+            while True:
+                chunk = upstream.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            upstream.close()
+
+    import urllib.parse
+
+    media_type = upstream.headers.get("Content-Type") or "application/octet-stream"
+    content_disposition = f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
+    _log_event(
+        "repository.codearts_download_local.proxy",
+        **_current_user_log_context(current_user),
+        project_key=project_key,
+        filename=filename,
+    )
+    return StreamingResponse(
+        iter_stream(),
+        media_type=media_type,
+        headers={"Content-Disposition": content_disposition},
+    )
 
 
 @router.get("/tree", response_model=dict)
@@ -1070,7 +1365,7 @@ async def get_repository_tree(
     对接 CodeArts API 或 本地制品包
     - mode: online (云端) 或 offline (局域网本地)
     """
-    query = _apply_repository_scope(db.query(Repository), current_user)
+    query = _apply_repository_scope(db.query(Repository), db, current_user)
     repos = query.all()
     _log_event(
         "repository.tree.get.start",
@@ -1147,7 +1442,8 @@ async def list_project_members(
     from sqlalchemy.orm import aliased
 
     _ensure_project_member_seed(db, project_key, current_user)
-    if not _is_super_admin(current_user) and not _get_current_user_project_role(db, project_key, current_user):
+    data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+    if not _is_super_admin(current_user) and data_scope != "all" and not _get_current_user_project_role(db, project_key, current_user):
         raise HTTPException(status_code=403, detail="无项目权限")
 
     inviter = aliased(UserModel)
@@ -1254,7 +1550,8 @@ async def update_project_member_role(
     _: None = Depends(require_permission("repository:perm_change")),
 ):
     _ensure_project_member_seed(db, project_key, current_user)
-    if not _is_super_admin(current_user) and _get_current_user_project_role(db, project_key, current_user) != "admin":
+    data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+    if not _is_super_admin(current_user) and data_scope != "all" and _get_current_user_project_role(db, project_key, current_user) != "admin":
         raise HTTPException(status_code=403, detail="无项目权限")
     role = str(payload.get("role") or "member").strip() or "member"
     if role not in ["admin", "member"]:
@@ -1313,7 +1610,8 @@ async def get_project_permissions(
     current_user: User = Depends(get_current_user),
 ):
     _ensure_project_member_seed(db, project_key, current_user)
-    if not _is_super_admin(current_user) and not _get_current_user_project_role(db, project_key, current_user):
+    data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+    if not _is_super_admin(current_user) and data_scope != "all" and not _get_current_user_project_role(db, project_key, current_user):
         raise HTTPException(status_code=403, detail="无项目权限")
     cfg = _get_project_permissions_by_group(db, project_key)
     _log_event(
@@ -1334,7 +1632,8 @@ async def set_project_permissions(
     _: None = Depends(require_permission("repository:perm_change")),
 ):
     _ensure_project_member_seed(db, project_key, current_user)
-    if not _is_super_admin(current_user) and _get_current_user_project_role(db, project_key, current_user) != "admin":
+    data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+    if not _is_super_admin(current_user) and data_scope != "all" and _get_current_user_project_role(db, project_key, current_user) != "admin":
         raise HTTPException(status_code=403, detail="无项目权限")
     row = db.query(RepositoryProjectSetting).filter(RepositoryProjectSetting.project_key == project_key).first()
     if not row:
@@ -1378,7 +1677,7 @@ async def list_repositories(
     current_user: User = Depends(get_current_user)
 ):
     ensure_schema()
-    query = _apply_repository_scope(db.query(Repository), current_user)
+    query = _apply_repository_scope(db.query(Repository), db, current_user)
 
     if keyword:
         query = query.filter(
@@ -1409,7 +1708,7 @@ async def list_repositories(
 @router.get("/{repo_id_db}", response_model=dict)
 async def get_repository(repo_id_db: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ensure_schema()
-    repo = _apply_repository_scope(db.query(Repository), current_user).filter(Repository.id == repo_id_db).first()
+    repo = _apply_repository_scope(db.query(Repository), db, current_user).filter(Repository.id == repo_id_db).first()
     if not repo:
         raise HTTPException(status_code=404, detail="项目不存在")
     _log_event("repository.get", **_current_user_log_context(current_user), repo_db_id=repo_id_db)
@@ -1422,7 +1721,7 @@ async def download_repository_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    repo = _apply_repository_scope(db.query(Repository), current_user).filter(Repository.id == repo_id_db).first()
+    repo = _apply_repository_scope(db.query(Repository), db, current_user).filter(Repository.id == repo_id_db).first()
     if not repo:
         raise HTTPException(status_code=404, detail="项目不存在")
     if not repo.file_url:
@@ -1430,13 +1729,21 @@ async def download_repository_file(
 
     project_key = getattr(repo, "project_key", None)
     if project_key and not _is_super_admin(current_user):
-        _require_project_permission(db, project_key, current_user, "download_file")
+        data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
+        if data_scope != "all":
+            _require_project_permission(db, project_key, current_user, "download_file")
 
-    url = str(repo.file_url)
-    if not url.startswith("/uploads/"):
+    file_path = _resolve_repository_file_path(repo.file_url)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    allowed_roots = [
+        _get_repository_download_root(),
+        str((Path(__file__).resolve().parents[2] / "uploads" / "repositories").resolve()),
+    ]
+    if not any(_is_path_within_root(file_path, root) for root in allowed_roots):
         raise HTTPException(status_code=400, detail="不支持下载该文件")
 
-    file_path = url.lstrip("/")
     if not os.path.exists(file_path) or not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="文件不存在")
 
@@ -1466,8 +1773,7 @@ async def upload_repository_file(
     """
     局域网离线模式：上传制品包文件
     """
-    upload_dir = "uploads/repositories"
-    os.makedirs(upload_dir, exist_ok=True)
+    upload_dir = _get_repository_download_root()
     
     file_ext = os.path.splitext(file.filename)[1]
     safe_filename = f"{uuid.uuid4().hex}{file_ext}"
@@ -1490,7 +1796,7 @@ async def upload_repository_file(
         "message": "文件上传成功",
         "data": {
             "filename": file.filename,
-            "file_url": f"/{file_path}",
+            "file_url": _normalize_repository_file_url(file_path),
             "size": os.path.getsize(file_path),
             "md5": md5v,
             "sha256": sha256v,

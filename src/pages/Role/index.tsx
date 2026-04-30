@@ -203,10 +203,9 @@ const Role: React.FC = () => {
             <Button
               type="link"
               onClick={async () => {
-                const nextStatus = record.status === 1 ? 0 : 1
                 try {
-                  await roleApi.update(record.id, { status: nextStatus })
-                  message.success(nextStatus === 1 ? '启用成功' : '禁用成功')
+                  await roleApi.update(record.id, { status: record.status === 1 ? 0 : 1 })
+                  message.success('状态更新成功')
                   fetchRoles()
                 } catch { /* ignore */ }
               }}
