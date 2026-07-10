@@ -6,6 +6,7 @@ from datetime import datetime
 import ftplib
 import glob
 import hashlib
+import io
 import json
 import logging
 import os
@@ -2303,8 +2304,11 @@ def _validate_task_creation_payload(
             if not str(config.get("harmony_device_id") or "").strip():
                 raise HTTPException(status_code=400, detail="请选择鸿蒙设备")
         elif os_type == "yinghui":
-            deploy_mode = str(config.get("deployment_mode") or "").strip()
-            if deploy_mode not in {"FTP+Telnet", "armory包管理工具"}:
+            deploy_mode = str(config.get("deployment_mode") or "FTP").strip()
+            if deploy_mode in {"FTP+Telnet", ""}:
+                deploy_mode = "FTP"
+                config["deployment_mode"] = "FTP"
+            if deploy_mode != "FTP":
                 raise HTTPException(status_code=400, detail="请选择翼辉部署方式")
             if not str(getattr(task, "target_ip", None) or "").strip():
                 raise HTTPException(status_code=400, detail="请输入目标地址")
@@ -2313,14 +2317,10 @@ def _validate_task_creation_payload(
             ftp_port = _safe_int(config.get("ftp_port") or getattr(task, "target_port", None), default=0)
             if ftp_port < 1 or ftp_port > 65535:
                 raise HTTPException(status_code=400, detail="FTP端口需在1-65535之间")
-            if deploy_mode == "FTP+Telnet":
-                telnet_port = _safe_int(config.get("telnet_port"), default=0)
-                if telnet_port < 1 or telnet_port > 65535:
-                    raise HTTPException(status_code=400, detail="Telnet端口需在1-65535之间")
             if not str(config.get("login_username") or "").strip():
                 raise HTTPException(status_code=400, detail="请输入登录用户")
-            if not str(config.get("login_password") or ""):
-                raise HTTPException(status_code=400, detail="请输入登录密码")
+            if not _safe_bool(config.get("login_passwordless")) and not str(config.get("login_password") or ""):
+                raise HTTPException(status_code=400, detail="请输入登录密码，或启用免密登录")
             if not str(config.get("install_dir") or "").strip():
                 raise HTTPException(status_code=400, detail="请输入安装目录")
         else:
@@ -2571,27 +2571,50 @@ async def test_os_connection(
     target_ip = str(payload.get("target_ip") or "").strip()
     if os_type == "yinghui":
         ftp_port = _safe_int(payload.get("ftp_port") or payload.get("target_port"), default=21)
-        telnet_port = _safe_int(payload.get("telnet_port"), default=23)
-        deploy_mode = str(payload.get("deployment_mode") or "FTP+Telnet").strip()
+        login_username = str(payload.get("login_username") or "").strip()
+        login_passwordless = _safe_bool(payload.get("login_passwordless"))
+        login_password = "" if login_passwordless else str(payload.get("login_password") or "")
+        install_dir = str(payload.get("install_dir") or "/apps").strip() or "/apps"
         if not target_ip:
             raise HTTPException(status_code=400, detail="请输入目标地址")
         if ftp_port < 1 or ftp_port > 65535:
             raise HTTPException(status_code=400, detail="FTP端口需在1-65535之间")
-        if deploy_mode == "FTP+Telnet" and (telnet_port < 1 or telnet_port > 65535):
-            raise HTTPException(status_code=400, detail="Telnet端口需在1-65535之间")
+        if not login_username:
+            raise HTTPException(status_code=400, detail="请输入登录用户")
+        if not login_passwordless and not login_password:
+            raise HTTPException(status_code=400, detail="请输入登录密码，或启用免密登录")
         checks = []
-        for label, port in [("FTP", ftp_port), ("Telnet", telnet_port)]:
-            if label == "Telnet" and deploy_mode != "FTP+Telnet":
-                continue
+        ftp_client = None
+        try:
+            ftp_client = ftplib.FTP()
+            ftp_client.connect(target_ip, ftp_port, timeout=5)
+            ftp_client.login(login_username, login_password)
+            remote_dir = _ftp_ensure_remote_dirs(ftp_client, install_dir)
+            probe_name = f".pcids_write_probe_{uuid.uuid4().hex[:8]}"
+            ftp_client.storbinary(f"STOR {probe_name}", io.BytesIO(b"pcids-write-probe\n"))
             try:
-                with socket.create_connection((target_ip, port), timeout=5):
-                    checks.append(f"{label}端口连通")
-            except Exception as exc:
-                return {
-                    "code": 0,
-                    "message": "连接测试完成",
-                    "data": {"success": False, "message": f"{label}端口不通：{str(exc)}"},
-                }
+                ftp_client.delete(probe_name)
+            except Exception:
+                pass
+            checks.append(
+                ("FTP 登录及写入验证成功" if not login_passwordless else "FTP 免密登录及写入验证成功")
+                + f"：{remote_dir or install_dir}"
+            )
+        except Exception as exc:
+            return {
+                "code": 0,
+                "message": "连接测试完成",
+                "data": {"success": False, "message": _format_sylix_ftp_stage_error("登录或写入验证", exc)},
+            }
+        finally:
+            if ftp_client:
+                try:
+                    ftp_client.quit()
+                except Exception:
+                    try:
+                        ftp_client.close()
+                    except Exception:
+                        pass
         return {
             "code": 0,
             "message": "连接测试完成",
@@ -5063,6 +5086,66 @@ async def _execute_os_task_via_hdc(
     return ok, "\n".join(log_parts), reason if not ok else ""
 
 
+def _format_sylix_ftp_error(exc: Exception) -> str:
+    raw = (str(exc).strip() or exc.__class__.__name__).rstrip("。.")
+    if isinstance(exc, ConnectionResetError) or "WinError 10054" in raw:
+        return (
+            f"FTP 控制连接被目标主机重置：{raw}。"
+            "请检查目标板 FTP 服务是否稳定运行、账号密码是否正确、安装目录是否允许写入，"
+            "以及防火墙/网关是否拦截 FTP 数据连接。"
+        )
+    if isinstance(exc, TimeoutError) or isinstance(exc, socket.timeout):
+        return f"FTP 连接或上传超时：{raw}。请检查目标板 FTP 服务、网络连通性和端口配置。"
+    if isinstance(exc, ftplib.error_perm):
+        if raw.startswith("551") or "write" in raw.lower():
+            return f"FTP 文件写入被拒绝：{raw}。请检查安装目录是否存在、是否允许 FTP 用户写入、文件系统是否只读，以及目标板剩余空间。"
+        return f"FTP 权限或认证失败：{raw}。请检查账号密码和安装目录写入权限。"
+    if isinstance(exc, ftplib.all_errors):
+        return f"FTP 下发失败：{raw}。请检查 FTP 服务状态、登录参数、目标目录和主动/被动模式网络连通性。"
+    return raw
+
+
+def _format_sylix_ftp_stage_error(stage: str, exc: Exception) -> str:
+    return f"FTP {stage}失败：{_format_sylix_ftp_error(exc)}"
+
+
+SYLIXOS_STARTUP_FILE = "/etc/startup.sh"
+
+
+def _ftp_read_text_file(ftp_client: ftplib.FTP, remote_path: str) -> str:
+    chunks: list[bytes] = []
+    ftp_client.retrbinary(f"RETR {remote_path}", chunks.append)
+    data = b"".join(chunks)
+    return data.decode("utf-8", errors="ignore")
+
+
+def _ftp_write_text_file(ftp_client: ftplib.FTP, remote_path: str, content: str) -> None:
+    _ftp_ensure_remote_dirs(ftp_client, posixpath.dirname(remote_path) or "/")
+    ftp_client.storbinary(f"STOR {posixpath.basename(remote_path)}", io.BytesIO(content.encode("utf-8")))
+
+
+def _ensure_sylix_autostart_entry(ftp_client: ftplib.FTP, executable_path: str) -> str:
+    startup_path = SYLIXOS_STARTUP_FILE
+    executable = str(executable_path or "").strip()
+    if not executable.startswith("/"):
+        executable = "/" + executable
+    try:
+        content = _ftp_read_text_file(ftp_client, startup_path)
+    except ftplib.error_perm as exc:
+        raw = str(exc)
+        if not raw.startswith("550"):
+            raise
+        content = "#!/bin/sh\n"
+    lines = content.splitlines()
+    if executable not in {line.strip() for line in lines}:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(executable)
+        content = "\n".join(lines).rstrip() + "\n"
+        _ftp_write_text_file(ftp_client, startup_path, content)
+    return startup_path
+
+
 async def _execute_os_task_via_sylix(
     task: BurningTask,
     config: dict,
@@ -5075,37 +5158,80 @@ async def _execute_os_task_via_sylix(
         return False, "", "缺少目标主机地址"
     if not used_file_path or not os.path.exists(used_file_path):
         return False, "", "缺少可用的安装包文件"
-    deploy_mode = str(config.get("deployment_mode") or "FTP+Telnet").strip()
+    deploy_mode = str(config.get("deployment_mode") or "FTP").strip()
+    if deploy_mode in {"FTP+Telnet", ""}:
+        deploy_mode = "FTP"
     ftp_port = _safe_int(config.get("ftp_port") or getattr(task, "target_port", None), default=21)
     username = _get_login_username(config)
     password = str(config.get("login_password") or "")
-    install_dir = str(config.get("install_dir") or "/apps/helloworld/").strip() or "/apps/helloworld/"
+    install_dir = str(config.get("install_dir") or "/apps").strip() or "/apps"
+    boot_autostart = _safe_bool(config.get("boot_autostart"))
     remote_name = _sanitize_remote_name(used_file_path)
+    remote_artifact_path = posixpath.join(install_dir.rstrip("/") or "/", remote_name)
     log_parts = [f"翼辉部署方式：{deploy_mode}", f"目标主机：{target_ip}:{ftp_port}", f"安装目录：{install_dir}"]
 
     def upload() -> tuple[bool, str]:
-        try:
-            ftp_client = ftplib.FTP()
-            ftp_client.connect(target_ip, ftp_port, timeout=min(timeout_seconds or 120, 60))
-            ftp_client.login(username, password)
-            for part in [p for p in install_dir.strip("/").split("/") if p]:
+        attempt_logs: list[str] = []
+        last_error = ""
+        for passive in (True, False):
+            ftp_client: Optional[ftplib.FTP] = None
+            mode_label = "PASV 被动模式" if passive else "PORT 主动模式"
+            stage = "初始化"
+            try:
+                ftp_client = ftplib.FTP(timeout=min(timeout_seconds or 120, 60))
+                stage = "连接"
+                ftp_client.connect(target_ip, ftp_port, timeout=min(timeout_seconds or 120, 60))
+                stage = "登录"
+                ftp_client.login(username, password)
+                stage = "设置传输模式"
+                ftp_client.set_pasv(passive)
+                stage = "准备安装目录"
+                remote_dir = _ftp_ensure_remote_dirs(ftp_client, install_dir)
+                stage = "写入文件"
+                with open(used_file_path, "rb") as artifact_file:
+                    ftp_client.storbinary(f"STOR {remote_name}", artifact_file)
                 try:
-                    ftp_client.mkd(part)
+                    ftp_client.voidcmd(f"SITE CHMOD 755 {remote_name}")
                 except Exception:
                     pass
-                ftp_client.cwd(part)
-            with open(used_file_path, "rb") as artifact_file:
-                ftp_client.storbinary(f"STOR {remote_name}", artifact_file)
-            ftp_client.quit()
-            return True, f"安装包已通过 FTP 上传至：{install_dir.rstrip('/')}/{remote_name}"
-        except Exception as exc:
-            return False, str(exc)
+                if boot_autostart:
+                    stage = "设置开机自启"
+                    startup_path = _ensure_sylix_autostart_entry(ftp_client, remote_artifact_path)
+                    attempt_logs.append(f"[INFO] 已写入开机自启：{startup_path} -> {remote_artifact_path}")
+                    if monitor:
+                        monitor.record(
+                            "sylix-autostart",
+                            "success",
+                            "开机自启写入完成",
+                            startup_file=startup_path,
+                            command=remote_artifact_path,
+                        )
+                stage = "结束会话"
+                ftp_client.quit()
+                attempt_logs.append(f"[INFO] FTP {mode_label} 上传成功：{remote_artifact_path}")
+                return True, "\n".join(attempt_logs + [f"安装包已通过 FTP 上传至：{remote_artifact_path}"])
+            except Exception as exc:
+                last_error = _format_sylix_ftp_stage_error(stage, exc)
+                attempt_logs.append(f"[WARN] FTP {mode_label} 上传失败：{last_error}")
+                if ftp_client:
+                    try:
+                        ftp_client.close()
+                    except Exception:
+                        pass
+        return False, "\n".join(attempt_logs + [f"FTP 下发失败，PASV/PORT 模式均未成功：{last_error or '-'}"])
 
     if monitor:
         monitor.record("sylix-upload", "running", "正在通过 FTP 下发翼辉安装包", host=target_ip, port=ftp_port)
     ok, msg = await asyncio.to_thread(upload)
     if monitor:
-        monitor.record("sylix-upload", "success" if ok else "failed", "翼辉 FTP 下发完成", host=target_ip, port=ftp_port)
+        monitor.record(
+            "sylix-upload",
+            "success" if ok else "failed",
+            "翼辉 FTP 下发完成" if ok else "翼辉 FTP 下发失败",
+            host=target_ip,
+            port=ftp_port,
+            reason="" if ok else msg,
+        )
     log_parts.append(msg)
     if not ok:
         return False, "\n".join(log_parts), msg
@@ -5162,6 +5288,7 @@ async def simulate_burning_process(
         task_type = _get_task_type(task, config)
         is_burning_task = task_type == "board"
         is_hybrid_task = task_type == "hybrid"
+        os_type = str(config.get("os_type") or "").strip().lower()
         burner = db.query(Burner).filter(Burner.id == task.burner_id).first() if getattr(task, "burner_id", None) else None
         operator_user = db.query(User).filter(User.id == operator_user_id).first() if operator_user_id else None
 
@@ -5566,6 +5693,51 @@ async def simulate_burning_process(
                     else f"安装环境准备完成，开始下发安装包到 {install_dir or '/'}..."
                 )
             db.commit()
+
+            if task_type == "os" and os_type == "yinghui":
+                _ensure_task_not_terminated(db, task.id)
+                ftp_port = _safe_int(config.get("ftp_port") or getattr(task, "target_port", None), default=21)
+                ftp_username = _get_login_username(config)
+                ftp_password = "" if _safe_bool(config.get("login_passwordless")) else str(config.get("login_password") or "")
+                probe_dir = str(config.get("install_dir") or install_dir or "/apps").strip() or "/apps"
+                execution_monitor.record("sylix-precheck", "running", "正在验证翼辉 FTP 目标目录可写", host=task.target_ip or "", port=ftp_port, install_dir=probe_dir)
+                _set_task_result(f"正在验证翼辉 FTP 目标目录可写：{probe_dir}")
+                db.commit()
+                ftp_client = None
+                try:
+                    ftp_client = ftplib.FTP()
+                    ftp_client.connect(str(task.target_ip or "").strip(), ftp_port, timeout=8)
+                    ftp_client.login(ftp_username, ftp_password)
+                    remote_dir = _ftp_ensure_remote_dirs(ftp_client, probe_dir)
+                    probe_name = f".pcids_write_probe_{uuid.uuid4().hex[:8]}"
+                    ftp_client.storbinary(f"STOR {probe_name}", io.BytesIO(b"pcids-write-probe\n"))
+                    try:
+                        ftp_client.delete(probe_name)
+                    except Exception:
+                        pass
+                    execution_monitor.record("sylix-precheck", "success", "翼辉 FTP 目标目录写入验证通过", install_dir=remote_dir or probe_dir)
+                    _set_task_result(f"翼辉 FTP 目标目录写入验证通过：{remote_dir or probe_dir}")
+                    db.commit()
+                except Exception as exc:
+                    script_failure_reason = _format_sylix_ftp_stage_error("目标目录写入预检", exc)
+                    execution_monitor.record("sylix-precheck", "failed", "翼辉 FTP 目标目录写入验证失败", reason=script_failure_reason)
+                    script_execution_log = script_failure_reason
+                    _append_script_execution_log(task.attempt_count, script_execution_log)
+                    task.status = int(TaskStatus.FAILED)
+                    task.last_error = script_failure_reason
+                    task.result = _compose_execution_result("\n\n".join(script_execution_logs))
+                    db.commit()
+                    finalized = True
+                    return
+                finally:
+                    if ftp_client:
+                        try:
+                            ftp_client.quit()
+                        except Exception:
+                            try:
+                                ftp_client.close()
+                            except Exception:
+                                pass
 
             await asyncio.sleep(5)
             _ensure_task_not_terminated(db, task.id)

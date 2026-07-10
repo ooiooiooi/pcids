@@ -3866,6 +3866,31 @@ body {
   align-items: center;
 }
 
+.pcids-deploy-password.ant-input-affix-wrapper {
+  height: 32px;
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+  background: #fff;
+}
+
+.pcids-deploy-password.ant-input-affix-wrapper .ant-input,
+.pcids-deploy-password.ant-input-affix-wrapper .ant-input-suffix {
+  background: #fff;
+}
+
+.pcids-deploy-password.ant-input-affix-wrapper .ant-input {
+  height: 30px;
+  line-height: 30px;
+}
+
+.pcids-deploy-password.ant-input-affix-wrapper .ant-input:-webkit-autofill,
+.pcids-deploy-password.ant-input-affix-wrapper .ant-input:-webkit-autofill:hover,
+.pcids-deploy-password.ant-input-affix-wrapper .ant-input:-webkit-autofill:focus {
+  box-shadow: 0 0 0 1000px #fff inset;
+  -webkit-text-fill-color: inherit;
+}
+
 .product-board-form__preview {
   margin-top: 8px;
 }

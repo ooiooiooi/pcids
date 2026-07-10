@@ -1272,7 +1272,7 @@ const App: React.FC = () => {
               />
             </div>
           </Dropdown>
-          <Badge count={unreadCount} size="small" offset={[-2, 2]}>
+          <Badge dot={unreadCount > 0} offset={[-2, 2]}>
             <BellOutlined style={{ fontSize: 20, cursor: 'pointer', color: '#86909c' }} onClick={() => setIsMessageOpen(true)} />
           </Badge>
           <div style={{ width: 1, height: 16, background: '#e8e8e8', margin: '0 4px' }}></div>

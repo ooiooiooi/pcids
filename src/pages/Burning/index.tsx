@@ -381,15 +381,16 @@ const createInitialWizardData = (initialState?: any) => ({
   targetIp: '',
   targetPort: '',
   connectionProtocol: 'SSH',
-  deploymentMode: 'FTP+Telnet',
+  deploymentMode: 'FTP',
   harmonyDeviceId: '',
   ftpPort: '21',
-  telnetPort: '23',
   authType: 'password',
   loginUsername: 'root',
   loginPassword: '',
+  loginPasswordless: false,
   privateKeyPath: '',
-  installDir: '/opt/control-app',
+  installDir: '/apps',
+  bootAutostart: false,
   burnMode: SYLIXOS_HYBRID_DEFAULTS.burnMode,
   transferProtocol: SYLIXOS_HYBRID_DEFAULTS.transferProtocol,
   serverPort: SYLIXOS_HYBRID_DEFAULTS.serverPort,
@@ -900,7 +901,7 @@ const Burning: React.FC = () => {
   }
 
   const updateWizardField = (key: string, value: any) => {
-    if (['targetIp', 'targetPort', 'connectionProtocol', 'authType', 'loginUsername', 'loginPassword', 'privateKeyPath'].includes(key)) {
+    if (['targetIp', 'targetPort', 'connectionProtocol', 'authType', 'loginUsername', 'loginPassword', 'loginPasswordless', 'privateKeyPath'].includes(key)) {
       setOsConnectionResult(null)
     }
     if (['burnMode', 'transferProtocol', 'serverPort', 'serialPort', 'ftpLoginUser', 'ftpLoginPassword', 'ftpPasswordless', 'boardTargetAddress', 'localIp', 'targetPath', 'serialLoginUser', 'serialLoginPassword', 'serialPasswordless', 'baudRate'].includes(key)) {
@@ -1012,13 +1013,14 @@ const Burning: React.FC = () => {
         target_ip: String(wizardData.targetIp || '').trim(),
         target_port: Number(wizardData.targetPort || 22),
         ftp_port: Number(wizardData.ftpPort || 21),
-        telnet_port: Number(wizardData.telnetPort || 23),
-        deployment_mode: String(wizardData.deploymentMode || '').trim(),
+        deployment_mode: selectedOsType === 'yinghui' ? 'FTP' : String(wizardData.deploymentMode || '').trim(),
         harmony_device_id: String(wizardData.harmonyDeviceId || '').trim(),
         login_username: String(wizardData.loginUsername || '').trim(),
-        login_password: wizardData.authType === 'password' ? String(wizardData.loginPassword || '') : '',
+        login_passwordless: Boolean(wizardData.loginPasswordless),
+        login_password: wizardData.authType === 'password' && !wizardData.loginPasswordless ? String(wizardData.loginPassword || '') : '',
         auth_type: wizardData.authType,
         private_key_path: wizardData.authType === 'key' ? String(wizardData.privateKeyPath || '').trim() : '',
+        install_dir: String(wizardData.installDir || '').trim(),
       })
       const result = res?.data || null
       setOsConnectionResult(result)
@@ -1064,13 +1066,14 @@ const Burning: React.FC = () => {
         next.installDir = next.installDir || '/data/local/tmp'
         next.harmonyDeviceId = next.harmonyDeviceId || wizardHarmonyDevices[0]?.id || ''
       } else if (selectedOsType === 'yinghui') {
-        next.deploymentMode = next.deploymentMode || 'FTP+Telnet'
+        next.deploymentMode = 'FTP'
         next.ftpPort = String(next.ftpPort || '21')
-        next.telnetPort = String(next.telnetPort || '23')
         next.targetPort = String(next.ftpPort || '21')
         next.authType = 'password'
         next.loginUsername = next.loginUsername || 'root'
-        next.installDir = next.installDir || '/apps/helloworld/'
+        next.loginPasswordless = Boolean(next.loginPasswordless)
+        if (next.loginPasswordless) next.loginPassword = ''
+        next.installDir = next.installDir || '/apps'
       } else {
         next.connectionProtocol = 'SSH'
         next.targetPort = String(next.targetPort || '22')
@@ -1097,13 +1100,11 @@ const Burning: React.FC = () => {
     if (isHarmonyOs) {
       if (!String(wizardData.harmonyDeviceId || '').trim()) errors.harmonyDeviceId = '请选择鸿蒙设备'
     } else if (isSylixOs) {
-      if (!String(wizardData.deploymentMode || '').trim()) errors.deploymentMode = '请选择部署方式'
       if (!String(wizardData.targetIp || '').trim()) errors.targetIp = '请输入目标地址'
       else if (hasInvalidWhitespace(wizardData.targetIp)) errors.targetIp = '目标地址格式不正确，请勿包含空格'
       if (!isValidPort(wizardData.ftpPort)) errors.ftpPort = 'FTP端口需在1-65535之间'
-      if (wizardData.deploymentMode === 'FTP+Telnet' && !isValidPort(wizardData.telnetPort)) errors.telnetPort = 'Telnet端口需在1-65535之间'
       if (!String(wizardData.loginUsername || '').trim()) errors.loginUsername = '请输入登录用户'
-      if (!String(wizardData.loginPassword || '').trim()) errors.loginPassword = '请输入登录密码'
+      if (!wizardData.loginPasswordless && !String(wizardData.loginPassword || '').trim()) errors.loginPassword = '请输入登录密码，或勾选免密登录'
       if (!String(wizardData.installDir || '').trim()) errors.installDir = '请输入安装目录'
     } else {
       if (!String(wizardData.targetIp || '').trim()) errors.targetIp = '请输入目标地址'
@@ -1325,10 +1326,6 @@ const Burning: React.FC = () => {
       return validateCommonTaskOptions()
     }
     if (isSylixOs) {
-      if (!String(wizardData.deploymentMode || '').trim()) {
-        message.warning('请选择部署方式')
-        return false
-      }
       if (!String(wizardData.targetIp || '').trim()) {
         message.warning('请输入目标地址')
         return false
@@ -1341,16 +1338,12 @@ const Burning: React.FC = () => {
         message.warning('FTP端口需在1-65535之间')
         return false
       }
-      if (wizardData.deploymentMode === 'FTP+Telnet' && !isValidPort(wizardData.telnetPort)) {
-        message.warning('Telnet端口需在1-65535之间')
-        return false
-      }
       if (!String(wizardData.loginUsername || '').trim()) {
         message.warning('请输入登录用户')
         return false
       }
-      if (!String(wizardData.loginPassword || '').trim()) {
-        message.warning('请输入登录密码')
+      if (!wizardData.loginPasswordless && !String(wizardData.loginPassword || '').trim()) {
+        message.warning('请输入登录密码，或勾选免密登录')
         return false
       }
       if (!String(wizardData.installDir || '').trim()) {
@@ -1783,6 +1776,7 @@ const Burning: React.FC = () => {
           <div style={{ ...detailSubSectionTitleStyle, marginTop: 24 }}>安装参数</div>
           <div style={detailFieldGridStyle}>
             {renderParamBlockField('安装目录', taskConfig?.install_dir)}
+            {renderParamField('开机自启', Boolean(taskConfig?.boot_autostart) ? '已开启' : '未开启')}
             {renderParamField('可执行文件留存', Boolean(taskConfig?.keep_local ?? task?.keep_local) ? '已开启' : '未开启')}
             {renderParamField('版本一致性校验', Boolean(taskConfig?.version_check ?? task?.version_check) ? '已开启' : '未开启')}
             {renderParamField('失败重试次数', `${taskConfig?.retries ?? 1}`)}
@@ -2316,13 +2310,14 @@ const Burning: React.FC = () => {
         script_id: platform === 'board' || platform === 'hybrid' ? wizardData.scriptId : undefined,
         os_type: platform === 'os' ? osTypeMap[wizardData.osId] : undefined,
         connection_protocol: platform === 'os' ? wizardData.connectionProtocol : undefined,
-        deployment_mode: platform === 'os' && isSylixOs ? String(wizardData.deploymentMode || '').trim() : undefined,
+        deployment_mode: platform === 'os' && isSylixOs ? 'FTP' : undefined,
         harmony_device_id: platform === 'os' && isHarmonyOs ? String(wizardData.harmonyDeviceId || '').trim() : undefined,
         ftp_port: platform === 'os' && isSylixOs ? Number(wizardData.ftpPort || 21) || 21 : undefined,
-        telnet_port: platform === 'os' && isSylixOs && wizardData.deploymentMode === 'FTP+Telnet' ? Number(wizardData.telnetPort || 23) || 23 : undefined,
+        boot_autostart: platform === 'os' && isSylixOs ? Boolean(wizardData.bootAutostart) : undefined,
         auth_type: platform === 'os' ? wizardData.authType : undefined,
         login_username: platform === 'os' ? String(wizardData.loginUsername || '').trim() || undefined : undefined,
-        login_password: platform === 'os' && (wizardData.authType === 'password' || isSylixOs) ? String(wizardData.loginPassword || '') : undefined,
+        login_passwordless: platform === 'os' && isSylixOs ? Boolean(wizardData.loginPasswordless) : undefined,
+        login_password: platform === 'os' && (wizardData.authType === 'password' || isSylixOs) && !wizardData.loginPasswordless ? String(wizardData.loginPassword || '') : undefined,
         private_key_path: platform === 'os' && !isSylixOs && wizardData.authType === 'key' ? String(wizardData.privateKeyPath || '').trim() || undefined : undefined,
         install_dir: platform === 'os' ? String(wizardData.installDir || '').trim() : undefined,
         ide_name: platform === 'board' ? String(wizardData.ide || '').trim() || undefined : undefined,
@@ -3251,15 +3246,10 @@ const Burning: React.FC = () => {
                       <div style={fieldLabelStyle}>部署方式</div>
                       <Select
                         style={{ width: 220 }}
-                        status={osFieldStatus('deploymentMode')}
-                        value={wizardData.deploymentMode}
-                        onChange={(value) => updateWizardField('deploymentMode', value)}
-                        options={[
-                          { label: 'FTP+Telnet', value: 'FTP+Telnet' },
-                          { label: 'armory包管理工具', value: 'armory包管理工具' },
-                        ]}
+                        disabled
+                        value="FTP"
+                        options={[{ label: 'FTP', value: 'FTP' }]}
                       />
-                      {renderOsFieldError('deploymentMode')}
                     </div>
                     <div style={{ marginBottom: 24 }}>
                       <div style={sectionTitleStyle}>目标连接信息</div>
@@ -3277,26 +3267,45 @@ const Burning: React.FC = () => {
                       </Row>
                       <Row gutter={40} style={{ marginBottom: 16 }}>
                         <Col span={12}>
-                          <div style={fieldLabelStyle}>{wizardData.deploymentMode === 'FTP+Telnet' ? requiredLabel('Telnet端口') : 'Telnet端口'}</div>
-                          <Input status={osFieldStatus('telnetPort')} disabled={wizardData.deploymentMode !== 'FTP+Telnet'} value={wizardData.telnetPort} onChange={(e) => updateWizardField('telnetPort', e.target.value.replace(/[^\d]/g, ''))} />
-                          {renderOsFieldError('telnetPort')}
-                        </Col>
-                        <Col span={12}>
                           <div style={fieldLabelStyle}>{requiredLabel('登录用户')}</div>
                           <Input status={osFieldStatus('loginUsername')} value={wizardData.loginUsername} onChange={(e) => updateWizardField('loginUsername', e.target.value)} />
                           {renderOsFieldError('loginUsername')}
                         </Col>
+                        <Col span={12}>
+                          <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <span>{wizardData.loginPasswordless ? '登录密码' : requiredLabel('登录密码')}</span>
+                            <Checkbox
+                              checked={Boolean(wizardData.loginPasswordless)}
+                              onChange={(e) => {
+                                updateWizardField('loginPasswordless', e.target.checked)
+                                if (e.target.checked) updateWizardField('loginPassword', '')
+                              }}
+                            >
+                              免密登录
+                            </Checkbox>
+                          </div>
+                          <Input.Password
+                            className="pcids-deploy-password"
+                            status={osFieldStatus('loginPassword')}
+                            disabled={Boolean(wizardData.loginPasswordless)}
+                            placeholder={wizardData.loginPasswordless ? '将使用空密码登录' : '请输入登录密码'}
+                            value={wizardData.loginPassword}
+                            onChange={(e) => updateWizardField('loginPassword', e.target.value)}
+                          />
+                          {renderOsFieldError('loginPassword')}
+                        </Col>
                       </Row>
                       <Row gutter={40}>
                         <Col span={12}>
-                          <div style={fieldLabelStyle}>{requiredLabel('登录密码')}</div>
-                          <Input.Password status={osFieldStatus('loginPassword')} placeholder="请输入登录密码" value={wizardData.loginPassword} onChange={(e) => updateWizardField('loginPassword', e.target.value)} />
-                          {renderOsFieldError('loginPassword')}
+                          <div style={fieldLabelStyle}>{requiredLabel('安装目录')}</div>
+                          <Input status={osFieldStatus('installDir')} placeholder="/apps" value={wizardData.installDir} onChange={(e) => updateWizardField('installDir', e.target.value)} />
+                          {renderOsFieldError('installDir')}
                         </Col>
                         <Col span={12}>
-                          <div style={fieldLabelStyle}>{requiredLabel('安装目录')}</div>
-                          <Input status={osFieldStatus('installDir')} placeholder="/apps/helloworld/" value={wizardData.installDir} onChange={(e) => updateWizardField('installDir', e.target.value)} />
-                          {renderOsFieldError('installDir')}
+                          <div style={fieldLabelStyle}>启动选项</div>
+                          <Checkbox checked={Boolean(wizardData.bootAutostart)} onChange={(e) => updateWizardField('bootAutostart', e.target.checked)}>
+                            开机自启
+                          </Checkbox>
                         </Col>
                       </Row>
                     </div>
@@ -3346,6 +3355,7 @@ const Burning: React.FC = () => {
                             <>
                               <div style={fieldLabelStyle}>{requiredLabel('登录密码')}</div>
                               <Input.Password
+                                className="pcids-deploy-password"
                                 status={osFieldStatus('loginPassword')}
                                 placeholder="请输入登录密码"
                                 value={wizardData.loginPassword}
@@ -3381,14 +3391,6 @@ const Burning: React.FC = () => {
                   <Button type="primary" ghost loading={osConnectionTesting} onClick={handleOsConnectionTest}>
                     连接测试
                   </Button>
-                  {osConnectionResult ? (
-                    <span style={{ color: osConnectionResult.success ? '#19B67A' : '#F54B4B', fontWeight: 600 }}>
-                      {osConnectionResult.success ? '测试通过' : '测试失败'}
-                    </span>
-                  ) : null}
-                  {osConnectionResult?.message ? (
-                    <span style={{ color: '#86909C', fontSize: 12 }}>{osConnectionResult.message}</span>
-                  ) : null}
                 </div>
                 {renderOsFieldError('connectionTest')}
               </Col>
@@ -3463,7 +3465,6 @@ const Burning: React.FC = () => {
                       <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <span>串口</span>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                          {hybridConnectionPassed ? <Tag color="success" style={{ margin: 0 }}>测试通过</Tag> : null}
                           <ActionLinkButton loading={hybridConnectionTesting} onClick={handleHybridConnectionTest}>
                             {hybridConnectionPassed ? '重新测试' : '连接测试'}
                           </ActionLinkButton>
@@ -3495,7 +3496,7 @@ const Burning: React.FC = () => {
                         <span>{requiredLabel('串口登录密码')}</span>
                         <Checkbox checked={wizardData.serialPasswordless} onChange={(e) => updateWizardField('serialPasswordless', e.target.checked)}>免登录</Checkbox>
                       </div>
-                      <Input.Password value={wizardData.serialLoginPassword} disabled={wizardData.serialPasswordless} onChange={(e) => updateWizardField('serialLoginPassword', e.target.value)} />
+                      <Input.Password className="pcids-deploy-password" value={wizardData.serialLoginPassword} disabled={wizardData.serialPasswordless} onChange={(e) => updateWizardField('serialLoginPassword', e.target.value)} />
                     </Col>
                   </Row>
 

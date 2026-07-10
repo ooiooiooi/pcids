@@ -15,13 +15,16 @@ from backend.routers.tasks import (
     _classify_serial_console_state,
     _execute_hybrid_task,
     _execute_hybrid_tftp_via_serial,
+    _execute_os_task_via_sylix,
     _looks_like_existing_directory_listing,
     _interrupt_pmon_auto_boot,
     _validate_task_creation_payload,
     _probe_serial_port_access,
     _wait_for_stable_pmon_console,
-    test_hybrid_connection,
+    test_hybrid_connection as _test_hybrid_connection,
+    test_os_connection as _test_os_connection,
 )
+from backend.utils.task_execution import ExecutionMonitor
 
 
 class _FakeQuery:
@@ -81,7 +84,7 @@ class HybridTaskLogicTests(unittest.IsolatedAsyncioTestCase):
         with patch("backend.routers.tasks.socket.create_connection", return_value=_FakeSocket()), patch(
             "backend.routers.tasks.os.path.exists", return_value=True
         ):
-            response = await test_hybrid_connection(payload)
+            response = await _test_hybrid_connection(payload)
 
         self.assertFalse(response["data"]["success"])
         self.assertFalse(response["data"]["ftp_login_ok"])
@@ -202,6 +205,391 @@ class HybridTaskLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FTP", log)
         self.assertIn("serial ok", log)
         self.assertEqual(serial_exec.call_args.kwargs["remote_env"]["FIRMWARE_PATH"], "/opt/control-app/bspls2kpcm2k01.elf")
+
+    async def test_sylix_os_ftp_reset_reports_actionable_failure(self):
+        task = BurningTask(
+            id=17,
+            repository_id=1,
+            product_id=2,
+            task_type="os",
+            software_name="demo.elf",
+            target_ip="192.168.1.230",
+            target_port=21,
+        )
+        config = {
+            "deployment_mode": "FTP+Telnet",
+            "ftp_port": 21,
+            "login_username": "root",
+            "login_password": "secret",
+            "install_dir": "/opt/control-app",
+        }
+        monitor = ExecutionMonitor(task_id=task.id)
+
+        class ResettingFtp:
+            def connect(self, *_args, **_kwargs):
+                return None
+
+            def login(self, *_args, **_kwargs):
+                return None
+
+            def mkd(self, *_args, **_kwargs):
+                return None
+
+            def cwd(self, *_args, **_kwargs):
+                return None
+
+            def pwd(self):
+                return "/opt/control-app"
+
+            def set_pasv(self, *_args, **_kwargs):
+                return None
+
+            def storbinary(self, *_args, **_kwargs):
+                raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
+            def close(self):
+                return None
+
+        with patch("backend.routers.tasks.os.path.exists", return_value=True), patch(
+            "backend.routers.tasks.ftplib.FTP", return_value=ResettingFtp()
+        ):
+            ok, log, reason = await _execute_os_task_via_sylix(
+                task,
+                config,
+                __file__,
+                timeout_seconds=120,
+                monitor=monitor,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("FTP 控制连接被目标主机重置", reason)
+        self.assertIn("目标板 FTP 服务", log)
+        self.assertEqual(monitor.events[-1].status, "failed")
+        self.assertEqual(monitor.events[-1].message, "翼辉 FTP 下发失败")
+        self.assertIn("FTP 控制连接被目标主机重置", monitor.events[-1].details["reason"])
+
+    async def test_sylix_os_upload_retries_port_mode_when_pasv_upload_resets(self):
+        task = BurningTask(
+            id=18,
+            repository_id=1,
+            product_id=2,
+            task_type="os",
+            software_name="demo.elf",
+            target_ip="192.168.1.230",
+            target_port=21,
+        )
+        config = {
+            "deployment_mode": "FTP+Telnet",
+            "ftp_port": 21,
+            "login_username": "root",
+            "login_password": "secret",
+            "install_dir": "/opt/control-app",
+        }
+        pasv_modes = []
+
+        class FallbackFtp:
+            def __init__(self):
+                self.passive = True
+
+            def connect(self, *_args, **_kwargs):
+                return None
+
+            def login(self, *_args, **_kwargs):
+                return None
+
+            def mkd(self, *_args, **_kwargs):
+                return None
+
+            def cwd(self, *_args, **_kwargs):
+                return None
+
+            def pwd(self):
+                return "/opt/control-app"
+
+            def set_pasv(self, passive):
+                self.passive = passive
+                pasv_modes.append(passive)
+
+            def storbinary(self, *_args, **_kwargs):
+                if self.passive:
+                    raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+                return None
+
+            def quit(self):
+                return None
+
+            def close(self):
+                return None
+
+        with patch("backend.routers.tasks.os.path.exists", return_value=True), patch(
+            "backend.routers.tasks.ftplib.FTP", side_effect=lambda *args, **kwargs: FallbackFtp()
+        ):
+            ok, log, reason = await _execute_os_task_via_sylix(
+                task,
+                config,
+                __file__,
+                timeout_seconds=120,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        self.assertEqual(pasv_modes, [True, False])
+        self.assertIn("PASV 被动模式 上传失败", log)
+        self.assertIn("PORT 主动模式 上传成功", log)
+
+    async def test_sylix_os_upload_can_append_startup_autostart_entry(self):
+        task = BurningTask(
+            id=19,
+            repository_id=1,
+            product_id=2,
+            task_type="os",
+            software_name="demo.elf",
+            target_ip="192.168.1.230",
+            target_port=21,
+        )
+        config = {
+            "deployment_mode": "FTP",
+            "ftp_port": 21,
+            "login_username": "root",
+            "login_password": "secret",
+            "install_dir": "/apps",
+            "boot_autostart": True,
+        }
+
+        class StartupFtp:
+            def __init__(self):
+                self.uploaded_artifact = None
+                self.uploaded_startup = None
+
+            def connect(self, *_args, **_kwargs):
+                return None
+
+            def login(self, *_args, **_kwargs):
+                return None
+
+            def set_pasv(self, *_args, **_kwargs):
+                return None
+
+            def mkd(self, *_args, **_kwargs):
+                return None
+
+            def cwd(self, *_args, **_kwargs):
+                return None
+
+            def pwd(self):
+                return "/apps"
+
+            def storbinary(self, command, fileobj):
+                if command == "STOR startup.sh":
+                    self.uploaded_startup = fileobj.read().decode("utf-8")
+                else:
+                    self.uploaded_artifact = command
+                return None
+
+            def retrbinary(self, command, callback):
+                self.retr_command = command
+                callback(b"#!/bin/sh\n/apps/oldApp\n")
+
+            def voidcmd(self, *_args, **_kwargs):
+                return None
+
+            def quit(self):
+                return None
+
+            def close(self):
+                return None
+
+        ftp = StartupFtp()
+        monitor = ExecutionMonitor(task_id=task.id)
+        with patch("backend.routers.tasks.os.path.exists", return_value=True), patch(
+            "backend.routers.tasks.ftplib.FTP", return_value=ftp
+        ):
+            ok, log, reason = await _execute_os_task_via_sylix(
+                task,
+                config,
+                __file__,
+                timeout_seconds=120,
+                monitor=monitor,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        self.assertEqual(ftp.retr_command, "RETR /etc/startup.sh")
+        self.assertEqual(ftp.uploaded_artifact, "STOR test_hybrid_task_logic.py")
+        self.assertIn("/apps/test_hybrid_task_logic.py", ftp.uploaded_startup)
+        self.assertIn("已写入开机自启", log)
+        autostart_events = [event for event in monitor.events if event.stage == "sylix-autostart"]
+        self.assertEqual(len(autostart_events), 1)
+        self.assertEqual(autostart_events[0].message, "开机自启写入完成")
+        self.assertEqual(autostart_events[0].details["startup_file"], "/etc/startup.sh")
+        self.assertEqual(autostart_events[0].details["command"], "/apps/test_hybrid_task_logic.py")
+
+    async def test_sylix_os_connection_test_checks_ftp_username_and_password(self):
+        login_calls = []
+
+        class CredentialCheckingFtp:
+            def connect(self, host, port, timeout=0):
+                self.connected = (host, port, timeout)
+
+            def login(self, username, password):
+                login_calls.append((username, password))
+                if (username, password) != ("root", "secret"):
+                    raise RuntimeError("530 Login incorrect")
+
+            def mkd(self, *_args, **_kwargs):
+                return None
+
+            def cwd(self, *_args, **_kwargs):
+                return None
+
+            def pwd(self):
+                return "/opt/control-app"
+
+            def storbinary(self, *_args, **_kwargs):
+                return None
+
+            def delete(self, *_args, **_kwargs):
+                return None
+
+            def quit(self):
+                return None
+
+        payload = {
+            "os_type": "yinghui",
+            "target_ip": "192.168.1.230",
+            "ftp_port": 21,
+            "telnet_port": 23,
+            "deployment_mode": "FTP+Telnet",
+            "login_username": "root",
+            "login_password": "secret",
+        }
+
+        with patch("backend.routers.tasks.ftplib.FTP", return_value=CredentialCheckingFtp()), patch(
+            "backend.routers.tasks.socket.create_connection", return_value=_FakeSocket()
+        ):
+            response = await _test_os_connection(payload)
+
+        self.assertTrue(response["data"]["success"])
+        self.assertIn("FTP 登录及写入验证成功", response["data"]["message"])
+        self.assertEqual(login_calls, [("root", "secret")])
+
+    async def test_sylix_os_connection_test_rejects_wrong_ftp_password(self):
+        class CredentialCheckingFtp:
+            def connect(self, *_args, **_kwargs):
+                return None
+
+            def login(self, username, password):
+                if (username, password) != ("root", "secret"):
+                    raise RuntimeError("530 Login incorrect")
+
+            def close(self):
+                return None
+
+        payload = {
+            "os_type": "yinghui",
+            "target_ip": "192.168.1.230",
+            "ftp_port": 21,
+            "telnet_port": 23,
+            "deployment_mode": "FTP+Telnet",
+            "login_username": "root",
+            "login_password": "wrong",
+        }
+
+        with patch("backend.routers.tasks.ftplib.FTP", return_value=CredentialCheckingFtp()):
+            response = await _test_os_connection(payload)
+
+        self.assertFalse(response["data"]["success"])
+        self.assertIn("530 Login incorrect", response["data"]["message"])
+
+    async def test_sylix_os_connection_test_rejects_unwritable_install_dir(self):
+        class UnwritableFtp:
+            def connect(self, *_args, **_kwargs):
+                return None
+
+            def login(self, *_args, **_kwargs):
+                return None
+
+            def mkd(self, *_args, **_kwargs):
+                return None
+
+            def cwd(self, *_args, **_kwargs):
+                return None
+
+            def pwd(self):
+                return "/opt/control-app"
+
+            def storbinary(self, *_args, **_kwargs):
+                raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
+            def close(self):
+                return None
+
+        payload = {
+            "os_type": "yinghui",
+            "target_ip": "192.168.1.230",
+            "ftp_port": 21,
+            "telnet_port": 23,
+            "deployment_mode": "FTP+Telnet",
+            "login_username": "root",
+            "login_password": "secret",
+            "install_dir": "/opt/control-app",
+        }
+
+        with patch("backend.routers.tasks.ftplib.FTP", return_value=UnwritableFtp()):
+            response = await _test_os_connection(payload)
+
+        self.assertFalse(response["data"]["success"])
+        self.assertIn("登录或写入验证失败", response["data"]["message"])
+        self.assertIn("FTP 控制连接被目标主机重置", response["data"]["message"])
+
+    async def test_sylix_os_connection_test_supports_passwordless_ftp_login(self):
+        login_calls = []
+
+        class EmptyPasswordFtp:
+            def connect(self, *_args, **_kwargs):
+                return None
+
+            def login(self, username, password):
+                login_calls.append((username, password))
+                if (username, password) != ("root", ""):
+                    raise RuntimeError("expected empty password")
+
+            def mkd(self, *_args, **_kwargs):
+                return None
+
+            def cwd(self, *_args, **_kwargs):
+                return None
+
+            def pwd(self):
+                return "/opt/control-app"
+
+            def storbinary(self, *_args, **_kwargs):
+                return None
+
+            def delete(self, *_args, **_kwargs):
+                return None
+
+            def quit(self):
+                return None
+
+        payload = {
+            "os_type": "yinghui",
+            "target_ip": "192.168.1.230",
+            "ftp_port": 21,
+            "telnet_port": 23,
+            "deployment_mode": "FTP+Telnet",
+            "login_username": "root",
+            "login_passwordless": True,
+        }
+
+        with patch("backend.routers.tasks.ftplib.FTP", return_value=EmptyPasswordFtp()), patch(
+            "backend.routers.tasks.socket.create_connection", return_value=_FakeSocket()
+        ):
+            response = await _test_os_connection(payload)
+
+        self.assertTrue(response["data"]["success"])
+        self.assertIn("FTP 免密登录及写入验证成功", response["data"]["message"])
+        self.assertEqual(login_calls, [("root", "")])
 
     async def test_tftp_mode_stages_artifact_and_runs_pmon_serial_flow(self):
         task = BurningTask(
