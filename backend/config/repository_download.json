@@ -1,0 +1,17 @@
+{
+  "server_download_root": "",
+  "download_root": "",
+  "server_transport": "ssh",
+  "server_os": "windows",
+  "server_ip": "",
+  "server_ssh_port": 22,
+  "server_port": 8000,
+  "server_username": "",
+  "server_password": "",
+  "server_auth_type": "password",
+  "server_storage_root": "C:/pcids-artifacts",
+  "server_api_path": "/upload",
+  "server_delete_api_path": "/delete",
+  "codearts_iam_token_url": "https://iam.{region}.myhuaweicloud.com/v3/auth/tokens",
+  "codearts_base_url": "https://cloudartifacts-ext.{region}.myhuaweicloud.com"
+}

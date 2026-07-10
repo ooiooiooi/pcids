@@ -1,0 +1,123 @@
+{
+  "name": "pcids",
+  "version": "1.0.0",
+  "description": "程控安装部署系统 - Programmatic Control Installation & Deployment System",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build:backend": "node tools/build-backend.mjs",
+    "build": "npm run build:backend && tsc && vite build && npm run build:electron",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "test:business": "node tools/business-flow-test.mjs",
+    "test:ethernet": "python tools/run_ethernet_protocol_suite.py --start-backend --start-simulator",
+    "test:unit": "tsx --test tests/*.test.ts",
+    "test:backend": "node scripts/run-backend-tests.mjs",
+    "check:delivery": "node scripts/delivery-check.mjs",
+    "test:e2e:burning": "playwright test e2e/burning-flow.spec.ts",
+    "preview": "vite preview",
+    "package": "npm run build && electron-builder",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win nsis",
+    "package:linux": "npm run build && electron-builder --linux"
+  },
+  "keywords": [
+    "python",
+    "fastapi",
+    "sqlite",
+    "deployment",
+    "electron"
+  ],
+  "author": "Herman_",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "tsx": "^4.8.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.6"
+  },
+  "dependencies": {
+    "antd": "^5.23.0",
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.13",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.1",
+    "recharts": "^2.15.0",
+    "zustand": "^5.0.3"
+  },
+  "build": {
+    "appId": "com.pcids.app",
+    "productName": "程控安装部署系统",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "scripts/install-burner-drivers.ps1",
+        "to": "driver-install/install-burner-drivers.ps1"
+      },
+      {
+        "from": "tools/protocol_adapters",
+        "to": "tools/protocol_adapters",
+        "filter": [
+          "**/*",
+          "!**/*.c",
+          "!**/*.cc",
+          "!**/*.cpp",
+          "!**/*.h",
+          "!**/*.hpp",
+          "!**/*.o",
+          "!**/*.obj",
+          "!**/*.pdb",
+          "!**/*.tmp",
+          "!**/*.tmp.*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/app-icon.png"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/app-icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": true,
+      "allowElevation": true,
+      "include": "build/installer.nsh"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "assets/app-icon.png"
+    }
+  }
+}

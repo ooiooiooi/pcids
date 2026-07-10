@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+    <IP>4.21.24.3</IP>
+    <URL>rtsp://4.21.24.2:8554/mystream</URL>
+    <port>1234</port>
+    <suporport>5678</suporport>
+    <equipmentLng>1400000000</equipmentLng>
+    <equipmentLat>400000000</equipmentLat>
+    <equipmentHeight>100</equipmentHeight>
+    <WQZequipmentNum>0x82502020</WQZequipmentNum>
+    <SJequipmentNum>0x00002020</SJequipmentNum>
+    <ShaoSuoequipmentNum>0x20002020</ShaoSuoequipmentNum>
+    <Author>0</Author>
+</root>

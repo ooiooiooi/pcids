@@ -1,0 +1,345 @@
+
+============================================================
+FILE: 4FyJSe-ez.js
+============================================================
+
+--- Artboard: 主画板 (16 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: 6BDq9DJlYI.js
+============================================================
+
+--- Artboard: 主画板 (11 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 工作台 (49 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 消息通知 (0 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: 6rt6Ww6i_.js
+============================================================
+
+--- Artboard: 主画板 (17 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 新增产品 (2 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 产品详情 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: 890CrRDSF.js
+============================================================
+
+--- Artboard: 主画板 (15 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: 8lnPMQDrO.js
+============================================================
+
+--- Artboard: 主画板 (20 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 同步配置 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 详细信息 (27 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 项目管理 (2 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 详细内容 (11 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 项目成员 (9 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 权限设置 (10 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 邀请成员 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 权限变更 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 项目成员及权限 (3 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 项目成员 (9 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 权限设置 (10 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 新建项目 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+SKIP: JKlDFQPNu.js (empty)
+============================================================
+
+
+============================================================
+FILE: P68_iZJVC.js
+============================================================
+
+--- Artboard: 主画板 (17 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 新增用户 (2 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 用户编辑 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: SjAuaSm3B.js
+============================================================
+
+--- Artboard: 主画板 (13 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 协议测试 (5 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: CAN协议 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 以太网 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 串口 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: GPIO (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: CAN FD协议 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 执行记录 (5 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: _i2amO9RA.js
+============================================================
+
+--- Artboard: 主画板 (14 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 新增角色 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 内容 1 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: cqFZNFsaF.js
+============================================================
+
+--- Artboard: 主画板 (13 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 烧录记录 (4 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 安装记录 (5 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+SKIP: kWIDjD0mv.js (empty)
+============================================================
+
+
+============================================================
+FILE: kpMVjBmAg.js
+============================================================
+
+--- Artboard: 主画板 (15 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 新增脚本 (2 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 脚本编辑 (2 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 内容 1 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: lTJCcJGwC.js
+============================================================
+
+--- Artboard: 主画板 (13 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 异常场景 (31 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 执行记录 (5 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 断电模拟编辑 (8 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 存储不足编辑 (13 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 网络中断编辑 (10 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 权限缺失编辑 (25 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 执行详情 (2 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 选择执行目标 (3 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: meZr8FalO.js
+============================================================
+
+--- Artboard: 主画板 (16 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 新增烧录器 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: nMG3IEhFm.js
+============================================================
+
+--- Artboard: 主画板 (56 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 同步配置 (1 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: nkP4eEc0N.js
+============================================================
+
+--- Artboard: 主画板 (11 top-level components) ---
+
+  (no structured data found - text components only)
+
+
+============================================================
+FILE: wfBf9kfTk.js
+============================================================
+
+--- Artboard: 主画板 (15 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 烧录安装任务列表 (7 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 创建任务1 (19 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 创建任务2-板卡 (14 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 创建任务3-板卡 (26 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 创建任务2-操作系统 (29 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 详情 (25 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 一致性报告 (11 top-level components) ---
+
+  (no structured data found - text components only)
+
+--- Artboard: 强制覆盖弹窗 (7 top-level components) ---
+
+  (no structured data found - text components only)
+

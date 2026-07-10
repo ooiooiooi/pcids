@@ -1,0 +1,536 @@
+<Configuration>
+  <Agent>
+    <!--
+      Use the dynamic config file. Dynamic config file has configurations that
+      can be reloaded dynamically without restarting agent.
+
+      Default: No dynamic config file
+    -->
+    <!--<Use-Dynamic-Config-File>agent_d.xml</Use-Dynamic-Config-File>-->
+
+    <!--
+      Whether to accept IPv6 connection. Note that agent will always be able to
+      accept IPv4 connection.
+
+      The agent will be able to connect to other agent using IPv6 regardless of this configuration.
+
+      Default: 0 (Not accepting IPv6 connection)
+    -->
+    <Support-IPv6>0</Support-IPv6>
+
+    <!--
+      Specify one or more TCP ports that agent listens for client connections. E.g., by default,
+      a client can connect to local agent using 'localhost:1234'
+
+      More than one TCP ports separated by semicolons can be specified. If the port number is
+      omitted, the next port number will be used. E.g. "1234;;" means 3 ports i.e. 1234, 1235
+      and 1236.
+
+      Default: 1234
+    -->
+    <Listen>1234</Listen>
+
+    <!--
+      Period in second to recalculate statistics. 0 to disable statistics.
+      Default = 30 seconds
+    -->
+    <Statistics-Period>30</Statistics-Period>
+
+    <!--
+      Specify the network interface to use for communicating with other agents. This
+      interface will be used when using Broadcast or Multicast.
+
+      Multiple network interface can be specified separated by semicolons (;). Agent
+      assigns network interfaces to different connections in a round-robin fashion.
+
+      If IPv6 is enabled, the agent will try to use IPv4 adress if available. Otherwise,
+      IPv6 address is used. To force using IPv6, specify IPv6 address of the network interface.
+
+      Possible Value: First, interface name, interface's IP address
+      Default: First
+    -->
+    <Network-Interface>4.21.24.3</Network-Interface>
+
+    <!--
+      The group daemon service. This configuration can be specified more than once.
+      Default: None
+    -->
+    <Group-Daemon-Service>5888</Group-Daemon-Service>
+
+    <!--
+      The group daemon and system service priority.
+      Default: 7
+    -->
+    <Group-Daemon-Service-Priority>7</Group-Daemon-Service-Priority>
+
+    <!--
+      Wait time for group suspect acknowledgement before retry (in ms)
+      Default: 10000 ms
+    -->
+    <Group-Suspect-Timeout>10000</Group-Suspect-Timeout>
+
+    <!--
+      Number of retry for group suspect message
+      Default: 10
+    -->
+    <Group-Suspect-Retry>10</Group-Suspect-Retry>
+
+    <!--
+      Specifying how to discover other agents' nodes
+    -->
+    <Discovery>
+      <!--
+        Method possible values: Broadcast, Multicast, Rendezvous, None and Disabled
+        If Multicast is used, Multicast-Address must be used
+
+        For IPv6, boardcast will mean multicast to "ff02::1", which mean all nodes in local network segment.
+        However, multicast mode is recommeded for IPv6.
+      -->
+      <Method>Rendezvous</Method>
+
+      <!--
+        Specify the UDP port that the agent will use to discover other agents. If listen port
+        specifies more than one port, this paramter will be ignored and the UDP ping port will
+        be the same as the TCP listen port.
+
+        Default: 1234
+      -->
+      <Ping-Listen>1234</Ping-Listen>
+
+      <!--
+        The period to send HELLO messages in seconds
+      -->
+      <Period>30</Period>
+
+      <!--
+        If the method is multicast, you have to specify the multicast address
+        to send the HELLO messages.
+      -->
+      <!--
+      <Multicast-Address>224.192.1.1</Multicast-Address>
+      -->
+
+      <!--
+        If the method is rendezvous, you have to specify at least one rendezvous agent.
+        A rendezvous agent will serve as the proxy to forward hello messages to all other
+        known agents. If the port is not given, it will use ping port specified above.
+
+        If listen port specifies more than one port, the port specified will be ignored
+        and will use corresponding assigned port.
+
+        You can specify more rendezvous agents for fault tolerance and load balancing.
+        When the agent starts up, it will send hello messages to all rendezvous agents.
+        Afterwards it will just send hello message to a random one.
+
+        onError attribute possible values are: Ignore, Fail(default). If host name
+        resolution fails, specify whether or not to abort or ignore.
+      -->
+      
+        <!--Rendezvous-Agent>192.168.1.119:1234</Rendezvous-Agent-->
+	<Rendezvous-Agent>4.21.3.30</Rendezvous-Agent>
+	<Rendezvous-Agent>4.21.2.30</Rendezvous-Agent>
+	<Rendezvous-Agent>4.21.1.30</Rendezvous-Agent>
+	<Rendezvous-Agent>4.21.1.31</Rendezvous-Agent>
+	<Rendezvous-Agent>4.21.100.30</Rendezvous-Agent>
+	<Rendezvous-Agent>4.21.24.200</Rendezvous-Agent>
+
+      
+	
+      <!--
+        Specify if this agent is one of the rendezvous agents.
+
+        Possible Value: true, false, auto (default)
+      -->
+      <Is-Rendezvous-Agent>false</Is-Rendezvous-Agent>
+
+      <!--
+        Optionally, you can specify the addresses of other agents here. The agent
+        will send UDP messages to connect them. Useful when the agents are in
+        different LAN. You can specify multiple of these. Every agent must have
+        the same sets of additional agents. If the port is not given, it will use
+        ping port specified above.
+
+        If listen port specifies more than one port, the port specified will be ignored
+        and will use corresponding assigned port.
+
+        The Rendezvous method neither requires nor supports Static-Agents.
+
+        onError attribute possible values are: Ignore, Fail(default). If host name
+        resolution fails, specify whether or not to abort or ignore.
+      -->
+      <!--
+      <Static-Agent onError="Ignore">192.168.1.20:1234</Static-Agent>
+      <Static-Agent onError="Ignore">192.168.1.21:1234</Static-Agent>
+       -->
+	<!--Static-Agent onError="Ignore">4.21.1.30</Static-Agent>
+	<Static-Agent onError="Ignore">4.21.2.30</Static-Agent>
+	<Static-Agent onError="Ignore">4.21.100.30</Static-Agent>
+	<Static-Agent onError="Ignore">4.21.200.30</Static-Agent-->
+    </Discovery>
+
+    <!--
+      Active fault detector periodically ping other agents for liveness. It is capable
+      of quickly detect other agent down when the host or network is down.
+    -->
+    <Active-Fault-Detection>
+
+      <!--
+        Whether or not to enable this (Default = true)
+      -->
+      <Enabled>true</Enabled>
+
+      <!--
+        Period between pinging (in seconds)
+      -->
+      <Ping-Period>4</Ping-Period>
+
+      <!--
+        The timeout period to consider the other agent is down. (in seconds)
+      -->
+      <Timeout-Period>20</Timeout-Period>
+
+      <!--
+        Number of tries before declaring the agent dead
+        Default = 1
+      -->
+      <Num-Retries>3</Num-Retries>
+
+      <!--
+        (Advanced) Whether to enable send suspect.
+        Default: true
+      -->
+      <Enable-Send-Suspect>true</Enable-Send-Suspect>
+
+      <!--
+        (Advanced) Whether to enable suspect verification. The agent will send ping the suspected agent. If it does not
+        received the reply within the timeout period. It will disconnect the suspected agent. Note. It will send the
+        ping message only once.
+        default: false
+      -->
+      <Enable-Suspect-Verify>false</Enable-Suspect-Verify>
+
+      <!--
+        (Advanced) Detect network partition. If network partition, it will disconnect all peers.
+        Default: false
+      -->
+      <Detect-Partition>false</Detect-Partition>
+
+      <!--
+        (Advanced) The timeout period to consider that the partition exist.
+       Default: 120
+      -->
+      <Detect-Partition-Timeout>120</Detect-Partition-Timeout>
+
+    </Active-Fault-Detection>
+
+    <!--
+      Specify parameters for making connection to other agents.
+    -->
+    <Default-Connection>
+      <!--
+        The method to send messges. Valid values: Multicast, TCP
+        If Multicast is used. You have to specify Mutlicast Address.
+      -->
+      <Method>TCP</Method>
+
+      <!--
+        The multicast address is sent the messages to if Method is set Multicast.
+      -->
+      <!--
+      <Multicast-Address>224.192.1.1</Multicast-Address>
+      -->
+
+      <!--
+        The additional buffer size in bytes (beyond socket buffer) that can be used per connection
+        before the agent stalls the incoming connection. If agent keeps stalling and unstalling
+        connection, you may increase this parameter to avoid excessive stalling and unstalling. This
+        setting take effects on all TCP connections.
+        Default: 0
+        Note: Setting this value too high will result in high memory usage when the agent
+        is under heavy load.
+      -->
+      <TCP-Spill-Buffer-Size>0</TCP-Spill-Buffer-Size>
+
+      <!--
+        Additional buffer size for groupd channel
+        Default: 20000000
+      -->
+      <TCP-Spill-Buffer-Size-Groupd>20000000</TCP-Spill-Buffer-Size-Groupd>
+
+      <!--
+        The client inactivity timeout. The client connection will be closed if the client fails to
+        drain a single byte from the socket within the timeout. -1 to disable.
+        Default: 60
+      -->
+      <Client-Inactivity-Timeout>300</Client-Inactivity-Timeout>
+
+      <!--
+        The agent inactivity timeout. The agent peer connection will be closed if the agent peer fails to
+        drain a single byte from the socket within the timeout. -1 to disable.
+        Default: 60
+      -->
+      <Agent-Inactivity-Timeout>300</Agent-Inactivity-Timeout>
+
+      <!--
+        In Multicast mode, you can specify the rate (in bytes/sec) which the agent may send
+        messages to other agents for a service. Possible value: rate (in bytes/sec), Dynamic, None.
+        Default: None
+      -->
+      <Multicast-Sending-Rate>100000</Multicast-Sending-Rate>
+
+      <!--
+        In Multicast mode, you can specify the rate (in bytes/sec) that the network
+        interface is capable of. E.g. A good value for Fast Ethernet is around 11MB/s.
+        Setting this value too high will cause too much packet loss causing sub-optimal
+        performance
+        Default: 11534336
+      -->
+      <Multicast-Max-Sending-Rate>11534336</Multicast-Max-Sending-Rate>
+
+      <!--
+        In Dynamic Multicast mode, the congestion control parameters can be tuned here.
+
+        The first part controls how the agent adjusts the rate up to discover available bandwidth.
+        The adjustment can be linear or exponential. The default is Linear/536 which means increase
+        the rate by 536 bytes per RTT every RTT.
+
+        The second part controls how the agent adjusts the rate down when the packet loss is detected.
+        The adjustment can be linear or exponential. The default is Expo/0.5 which means that the agent
+        will half the sending rate when there is a loss event.
+
+        The third part specifies how long in RTT to stop sending packets after a loss event. This allows
+        the receivers to catch up with the data holds up in its queue.
+
+        The forth part specifies how long in RTT the loss event is. After the initial loss, subsequent loss
+        with in this time will not be treated as a new loss event.
+
+        Default: Linear/536;Expo/0.5;2;4
+      -->
+      <Congestion-Control-Tuning>Linear/536;Expo/0.5;2;4</Congestion-Control-Tuning>
+
+      <!--
+        In TCP mode, if the connect operation fails, how many times to retry before
+        failing. Note that if remote agent still sends HELLO message, it will try
+        to connect again.
+        Default = 3
+      -->
+      <Connect-Retry-Count>3</Connect-Retry-Count>
+
+      <!--
+        In TCP mode, if the connect operation fails, how long in seconds to sleep before
+        retry.
+        Default = 20
+      -->
+      <Connect-Fail-Sleep>20</Connect-Fail-Sleep>
+
+    </Default-Connection>
+
+    <!--
+      Default group comm service configuration. The configuration may be override by
+      individual group comm service by programming.
+    -->
+    <Default-Group-Comm-Svc-Config>
+      <!--
+        The timeout for join operation (in ms)
+      -->
+      <Join-Timeout>60000</Join-Timeout>
+
+      <!--
+        The period to check/send heartbeat (in ms)
+      -->
+      <Heartbeat-Period>5000</Heartbeat-Period>
+
+      <!--
+        How long before we consider the member dead if the member does not respond to the heartbeat (in ms)
+      -->
+      <Alive-Timeout>30000</Alive-Timeout>
+
+      <!--
+        The period to send stable messages (in ms)
+      -->
+      <Stable-Msg-Resp-Period>60000</Stable-Msg-Resp-Period>
+
+      <!--
+        The period to clean up stable messages (in ms)
+      -->
+      <Cleanup-Msg-Period>60000</Cleanup-Msg-Period>
+
+      <!--
+        The timeout before printing out diagnostic message during flush algorithm (in ms)
+      -->
+      <Diag-Timeout>30000</Diag-Timeout>
+
+      <!--
+        The period to ping group daemon (in ms)
+      -->
+      <Groupd-Ping-Period>20000</Groupd-Ping-Period>
+
+      <!--
+        The timeout for group daemon's reply (in ms)
+      -->
+      <Groupd-Ping-Timeout>60000</Groupd-Ping-Timeout>
+
+      <!--
+        How many times of bad ping before leaving the group
+      -->
+      <Max-Bad-Ping-Count>4</Max-Bad-Ping-Count>
+    </Default-Group-Comm-Svc-Config>
+
+    <!--
+      Whether to enable message routing.
+      Default: false
+    -->
+    <Enable-Message-Routing>false</Enable-Message-Routing>
+
+    <!--
+      Message routing
+      Route messages to other agents on a different network. The routing rule
+      is specified statically.
+    -->
+    <Message-Routing>
+
+      <!--
+        The network id
+        Different network must have a different network id.
+      -->
+      <Network-Id>1</Network-Id>
+
+      <!--
+        The hop count
+        When the message is passed between different networks, hop count is reduced by one. When
+        the hop count reaches zero, the message is discarded. In case the network is misconfigured,
+        the hop count prevents the message to stay in the network forever.
+        Default: 64
+      -->
+      <Hop-Count>64</Hop-Count>
+
+      <!--
+        The routing entry
+      -->
+      <Routing-Entry>
+        <!--
+          The entry id. The entry id can be matched in the counterpart agent. Must be unique within an agent.
+        -->
+        <Entry-Id>A-B:5678</Entry-Id>
+
+        <!--
+          The service number
+        -->
+        <Service>5678</Service>
+
+        <!--
+          The agent address.
+        -->
+        <Agent-Address>172.17.246.128</Agent-Address>
+
+        <!--
+          The sending network id. The sending network id of the message must match this sending network id for
+          the message to be forwarded. 0 represents the current network. This element can be specified more than once.
+          Default: 0
+        -->
+        <Sending-Network>0</Sending-Network>
+
+        <!--
+          The subject patterns that will be sent to remote routing agent. This element can be specified more than once.
+        -->
+        <Outgoing-Subject-Pattern>TEST.&gt;</Outgoing-Subject-Pattern>
+
+        <!--
+          The hint that will be used if incoming-intersect-mode is not specified in the remote routing agent E.g.
+          whent the routing entry is not specified in the remote agent. See Incoming-Intersec-Mode below.
+        -->
+        <Outgoing-Intersect-Mode-Hint>Intersect-All</Outgoing-Intersect-Mode-Hint>
+
+        <!--
+          The subject patterns that will be received from the remote agent. This element can be specified more than once.
+        -->
+        <Incoming-Subject-Pattern>TEST.&gt;</Incoming-Subject-Pattern>
+
+        <!--
+          The intersect mode can be one of Intersect-None, Intersect-All or Intersect-Id.
+            - Intersect-None. The agent will subscribe to the remote routing agent everything specfied in Incoming-Subject-Pattern. Some
+              messages may be discarded after sending to the agent if there is no listeners for it.
+            - Intersect-All. Intersect the subject patterns specified in Incoming-Subject-Pattern and all the subscriptions within the network.
+              This will make sure that no unnecessary message is sent from the remote routing agent. The intersection may cause a lot of
+              subscriptions to be sent to remote routing agents.
+            - Intersect-Id. Only intersect id i.e. subject starting with _ID, _MID or _RID wit the subject patterns specfied in Incoming-Subject-Pattern.
+              This will avoid receiving id message intended for remote network.
+        -->
+        <Incoming-Intersect-Mode>Intersect-None</Incoming-Intersect-Mode>
+
+        <!--
+          Whether to enable fault-tolerance support.
+          Default: false
+        -->
+        <Enable-Fault-Tolerance>false</Enable-Fault-Tolerance>
+
+        <!--
+          Fault Tolerance support
+          You may specify two or more agents in a fault tolerance group. Bitsflow will try to have one agent
+          actively routing messages. When the active agent crashes, another agent will become active.
+
+          Note: The FT is not perfect. There will be times when the message may be sent twice or not at all
+          when there is a transition. The application must be able to handle this.
+        -->
+        <Fault-Tolerance>
+
+          <!--
+            The group name
+          -->
+          <Group-Name>TEST</Group-Name>
+
+          <!--
+            The rank
+            The higher rank agent will become active before lower rank agent.
+          -->
+          <Rank>100</Rank>
+
+          <!--
+            The period to send a heartbeat message (in ms.)
+            Default: 1000
+          -->
+          <Heartbeat-Period>1000</Heartbeat-Period>
+
+          <!--
+            The period to consider agent dies when the heartbeat is missing (in ms.) This number should be 3x-5x of
+            heartbeat period.
+            Default: 3000
+          -->
+          <Activation-Period>3000</Activation-Period>
+
+          <!--
+            Prepare period
+          -->
+          <Prepare-Period>0</Prepare-Period>
+        </Fault-Tolerance>
+      </Routing-Entry>
+      <Routing-Entry>
+        <Entry-Id>A-B:5888</Entry-Id>
+        <Service>5888</Service>
+        <Agent-Address>172.17.246.128</Agent-Address>
+        <Sending-Network>0</Sending-Network>
+        <Outgoing-Subject-Pattern>_GR.UPDATE.&gt;</Outgoing-Subject-Pattern>
+        <Incoming-Subject-Pattern>TEST.&gt;</Incoming-Subject-Pattern>
+        <Enable-Fault-Tolerance>false</Enable-Fault-Tolerance>
+        <Fault-Tolerance>
+          <Group-Name>TEST</Group-Name>
+          <Rank>100</Rank>
+          <Heartbeat-Period>1000</Heartbeat-Period>
+          <Activation-Period>3000</Activation-Period>
+          <Prepare-Period>0</Prepare-Period>
+        </Fault-Tolerance>
+      </Routing-Entry>
+
+    </Message-Routing>
+
+    <!--
+      Service Definition
+      The service defined here will be started automatically at start up.
+    -->
+    <Service Name="5678">
+      <Name>5678</Name>
+      <Priority>5</Priority>
+    </Service>
+
+  </Agent>
+</Configuration>

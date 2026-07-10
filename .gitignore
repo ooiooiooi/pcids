@@ -1,0 +1,101 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+!/build/
+/build/*
+!/build/installer.nsh
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database
+*.db
+*.db-journal
+*-wal
+*-shm
+
+# Logs
+*.log
+*.log.*
+logs/
+
+# Environment
+.env
+.env.local
+.env.production
+backend/config/agent.json
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+
+# Build
+dist-electron/
+out/
+release/
+release-test*/
+.package-*.pid
+.rebuild-*.pid
+.package-smoke/
+
+# Test
+coverage/
+.pytest_cache/
+.tmp/
+tmp/
+.dbg/
+/test_*.py
+/ssh_out*.txt
+
+# Python backend specific
+backend/app_data.db*
+.alembic/
+.pip-cache/
+.python_packages/
+
+# Runtime data
+uploads/
+.local-data/
+.runtime/
+.trae/
+
+# Generated exports
+frontend_source*.docx
+tools/

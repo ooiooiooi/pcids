@@ -1,0 +1,6 @@
+# config format as follow:
+# user:authtype:authpassword:privtype:privpassword
+# authtype: 0-noauth; 1-md5; 2-sha
+# privtype: 0-nopriv; 1-des; 2-aes
+# example: user:1:authpass:2:privpass
+sylixos:1:sylixos_snmp:1:sylixos_snmp
