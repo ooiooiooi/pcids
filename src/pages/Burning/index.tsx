@@ -399,6 +399,8 @@ const createInitialWizardData = (initialState?: any) => ({
   serialLoginUser: SYLIXOS_HYBRID_DEFAULTS.serialLoginUser,
   serialLoginPassword: '',
   serialPasswordless: SYLIXOS_HYBRID_DEFAULTS.serialPasswordless,
+  systemUsername: 'root',
+  systemPassword: 'root',
   ftpLoginUser: SYLIXOS_HYBRID_DEFAULTS.ftpLoginUser,
   ftpLoginPassword: SYLIXOS_HYBRID_DEFAULTS.ftpLoginPassword,
   ftpPasswordless: SYLIXOS_HYBRID_DEFAULTS.ftpPasswordless,
@@ -2352,6 +2354,8 @@ const Burning: React.FC = () => {
         serial_login_user: platform === 'hybrid' ? String(wizardData.serialLoginUser || '').trim() || undefined : undefined,
         serial_login_password: platform === 'hybrid' && !wizardData.serialPasswordless ? String(wizardData.serialLoginPassword || '') : undefined,
         serial_passwordless: platform === 'hybrid' ? Boolean(wizardData.serialPasswordless) : undefined,
+        system_username: platform === 'hybrid' ? String(wizardData.systemUsername || '').trim() || undefined : undefined,
+        system_password: platform === 'hybrid' ? String(wizardData.systemPassword || '') || undefined : undefined,
         ftp_login_user: platform === 'hybrid' ? String(wizardData.ftpLoginUser || '').trim() || undefined : undefined,
         ftp_login_password: platform === 'hybrid' && !wizardData.ftpPasswordless ? String(wizardData.ftpLoginPassword || '') : undefined,
         ftp_passwordless: platform === 'hybrid' ? Boolean(wizardData.ftpPasswordless) : undefined,
@@ -3513,6 +3517,36 @@ const Burning: React.FC = () => {
                         onChange={(value) => updateWizardField('localIp', value)}
                         options={Array.from(new Set([String(wizardData.localIp || '').trim(), ...wizardLocalIps].filter(Boolean))).map((item) => ({ label: item, value: item }))}
                         placeholder="请选择本地IP"
+                      />
+                    </Col>
+                  </Row>
+
+                  <Row gutter={16} style={{ marginBottom: 16 }}>
+                    <Col span={12}>
+                      <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>系统登录用户名</span>
+                        <Tooltip title="新建用户为普通用户；填写 root 时仅更新 root 密码，不改变其权限。">
+                          <QuestionCircleOutlined style={{ color: '#86909C', fontSize: 14, cursor: 'help' }} />
+                        </Tooltip>
+                      </div>
+                      <Input
+                        className="pcids-system-account-input"
+                        name="sylixos-system-account-username"
+                        autoComplete="new-password"
+                        value={wizardData.systemUsername}
+                        maxLength={32}
+                        onChange={(e) => updateWizardField('systemUsername', e.target.value)}
+                      />
+                    </Col>
+                    <Col span={12}>
+                      <div style={fieldLabelStyle}>系统登录密码</div>
+                      <Input.Password
+                        className="pcids-system-account-input"
+                        name="sylixos-system-account-password"
+                        autoComplete="new-password"
+                        value={wizardData.systemPassword}
+                        maxLength={128}
+                        onChange={(e) => updateWizardField('systemPassword', e.target.value)}
                       />
                     </Col>
                   </Row>

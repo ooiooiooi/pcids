@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 异常注入路由
 """

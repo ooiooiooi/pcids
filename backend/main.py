@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 FastAPI 应用入口
 """

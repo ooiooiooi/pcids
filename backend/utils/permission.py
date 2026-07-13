@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 权限验证依赖与角色权限归一化工具
 """

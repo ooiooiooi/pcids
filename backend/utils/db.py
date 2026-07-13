@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 数据库配置和连接管理
 """

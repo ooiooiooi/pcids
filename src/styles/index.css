@@ -3874,14 +3874,41 @@ body {
   background: #fff;
 }
 
-.pcids-deploy-password.ant-input-affix-wrapper .ant-input,
-.pcids-deploy-password.ant-input-affix-wrapper .ant-input-suffix {
+.pcids-deploy-password.ant-input-affix-wrapper:not(.ant-input-affix-wrapper-disabled) .ant-input,
+.pcids-deploy-password.ant-input-affix-wrapper:not(.ant-input-affix-wrapper-disabled) .ant-input-suffix {
   background: #fff;
 }
 
 .pcids-deploy-password.ant-input-affix-wrapper .ant-input {
   height: 30px;
   line-height: 30px;
+}
+
+/* Keep disabled password inputs visually continuous; overriding the inner input
+   to white leaves a bright block beside the visibility icon. */
+.pcids-deploy-password.ant-input-affix-wrapper.ant-input-affix-wrapper-disabled .ant-input,
+.pcids-deploy-password.ant-input-affix-wrapper.ant-input-affix-wrapper-disabled .ant-input-suffix {
+  background: transparent;
+}
+
+/* System-account settings sit directly on the form surface, without a fill. */
+.pcids-system-account-input.ant-input,
+.pcids-system-account-input.ant-input-affix-wrapper,
+.pcids-system-account-input.ant-input-affix-wrapper .ant-input,
+.pcids-system-account-input.ant-input-affix-wrapper .ant-input-suffix {
+  background: transparent !important;
+}
+
+/* Do not show Chrome's credential-manager autofill tint in system account fields. */
+.pcids-system-account-input.ant-input:-webkit-autofill,
+.pcids-system-account-input.ant-input:-webkit-autofill:hover,
+.pcids-system-account-input.ant-input:-webkit-autofill:focus,
+.pcids-system-account-input.ant-input-affix-wrapper .ant-input:-webkit-autofill,
+.pcids-system-account-input.ant-input-affix-wrapper .ant-input:-webkit-autofill:hover,
+.pcids-system-account-input.ant-input-affix-wrapper .ant-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #fff inset;
+  -webkit-text-fill-color: var(--text-primary);
+  caret-color: var(--text-primary);
 }
 
 .pcids-deploy-password.ant-input-affix-wrapper .ant-input:-webkit-autofill,

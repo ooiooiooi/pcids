@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 脚本管理路由
 """

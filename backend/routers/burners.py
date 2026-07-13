@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 设备管理路由
 """

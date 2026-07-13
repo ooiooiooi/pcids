@@ -11,6 +11,7 @@ import {
   Input,
   Modal,
   Row,
+  Segmented,
   Select,
   Space,
   Spin,
@@ -46,6 +47,7 @@ import EllipsisText from '../../components/EllipsisText'
 type AnyNode = DataNode & Record<string, any>
 type InstallSource = 'local' | 'server' | 'codearts'
 type DownloadTarget = 'local' | 'server'
+type CodeartsRepositoryMode = 'release' | 'private'
 
 function normalizeServerLocationValue(value?: string | null, serverPath?: string | null) {
   const text = String(value || '').trim()
@@ -284,6 +286,16 @@ function findChecksumValue(value: any, algorithm: 'md5' | 'sha256'): string {
 
 const CODEARTS_FORM_DRAFT_KEY = 'pcids.repository.codeartsFormDraft'
 const CODEARTS_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsFormSecretDraft'
+const CODEARTS_PRIVATE_FORM_DRAFT_KEY = 'pcids.repository.codeartsPrivateFormDraft'
+const CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsPrivateFormSecretDraft'
+const CODEARTS_PRIVATE_TEST_DEFAULTS = {
+  domain_name: 'CWGY',
+  username: 'cwgy-57373',
+  password: String((import.meta as any).env?.VITE_CODEARTS_PRIVATE_TEST_PASSWORD || ''),
+  region: 'cn-cq-1',
+  project_id: 'cf8f1be184bd4eb484b79139484b673a',
+  repo_id_0: 'cn-cq-1_bf7bbb8002b04002bd78a65557e7b7e4_generic_0',
+}
 
 const Repository: React.FC = () => {
   const navigate = useNavigate()
@@ -302,11 +314,12 @@ const Repository: React.FC = () => {
   const [codeartsCfg, setCodeartsCfg] = useState<any>({})
   const [codeartsConnected, setCodeartsConnected] = useState(false)
   const [codeartsConnectionDetail, setCodeartsConnectionDetail] = useState('')
-  const [projectOptions, setProjectOptions] = useState<Array<{ label: string; value: string }>>([])
+  const [projectOptions, setProjectOptions] = useState<Array<{ label: string; value: string; repositoryMode: CodeartsRepositoryMode }>>([])
   const [currentProjectKey, setCurrentProjectKey] = useState<string>('')
   const initialProjectContextRef = useRef(getRepositoryProjectContext())
 
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
+  const [configurationModeOverride, setConfigurationModeOverride] = useState<CodeartsRepositoryMode | null>(null)
   const [isMemberPermissionOpen, setIsMemberPermissionOpen] = useState(false)
   const [createProjectSubmitting, setCreateProjectSubmitting] = useState(false)
   const [createProjectError, setCreateProjectError] = useState('')
@@ -411,6 +424,7 @@ const Repository: React.FC = () => {
           available_locations: it.available_locations ?? [],
           remote_downloadable: it.remote_downloadable ?? null,
           source_type: it.source_type ?? null,
+          repository_mode: it.repository_mode ?? it.repo_detail?.repository_mode ?? null,
         }
         if (key.startsWith('proj_')) next.node_type = 'project'
         else if (key.startsWith('repo_sync_')) next.node_type = 'repository'
@@ -443,6 +457,12 @@ const Repository: React.FC = () => {
   }, [filteredTreeData, expandedKeys, selectedKeys, treeLoading])
 
   const isCodeartsConnected = codeartsConnected
+  const repositoryMode: CodeartsRepositoryMode = codeartsCfg?.repository_mode === 'private' ? 'private' : 'release'
+  const configurationMode: CodeartsRepositoryMode = configurationModeOverride || repositoryMode
+  const visibleProjectOptions = useMemo(
+    () => projectOptions.filter((project) => project.repositoryMode === repositoryMode),
+    [projectOptions, repositoryMode],
+  )
   const canSyncRepository = hasPermission('repository:sync')
   const canManageProjectPermissions = hasPermission('repository:perm_change')
   const canDeleteRepository = hasPermission('repository:delete')
@@ -510,15 +530,17 @@ const Repository: React.FC = () => {
   }
 
   const loadCodeartsFormDraft = () => {
+    const draftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
+    const secretDraftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
     let draft: Record<string, any> = {}
     let secretDraft: Record<string, any> = {}
     try {
-      draft = JSON.parse(window.localStorage.getItem(CODEARTS_FORM_DRAFT_KEY) || '{}')
+      draft = JSON.parse(window.localStorage.getItem(draftKey) || '{}')
     } catch {
       draft = {}
     }
     try {
-      secretDraft = JSON.parse(window.sessionStorage.getItem(CODEARTS_FORM_SECRET_DRAFT_KEY) || '{}')
+      secretDraft = JSON.parse(window.sessionStorage.getItem(secretDraftKey) || '{}')
     } catch {
       secretDraft = {}
     }
@@ -526,6 +548,8 @@ const Repository: React.FC = () => {
   }
 
   const persistCodeartsFormDraft = (values: Record<string, any>) => {
+    const draftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
+    const secretDraftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
     const plainDraft = {
       domain_name: String(values.domain_name || '').trim(),
       username: String(values.username || '').trim(),
@@ -536,8 +560,8 @@ const Repository: React.FC = () => {
     const secretDraft = {
       password: String(values.password || ''),
     }
-    window.localStorage.setItem(CODEARTS_FORM_DRAFT_KEY, JSON.stringify(plainDraft))
-    window.sessionStorage.setItem(CODEARTS_FORM_SECRET_DRAFT_KEY, JSON.stringify(secretDraft))
+    window.localStorage.setItem(draftKey, JSON.stringify(plainDraft))
+    window.sessionStorage.setItem(secretDraftKey, JSON.stringify(secretDraft))
   }
 
   useEffect(() => {
@@ -550,33 +574,45 @@ const Repository: React.FC = () => {
 
   useEffect(() => {
     if (!isCreateProjectOpen) return
-    const repoId0 = Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 0 ? String(codeartsCfg.repo_ids[0]) : ''
+    const repoId0 = configurationMode === 'private'
+      ? String(codeartsCfg?.private_repo_id || '')
+      : Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 0 ? String(codeartsCfg.repo_ids[0]) : ''
     const inferredRegion = inferRegionFromRepoId(repoId0)
-    const values: any = {
-      domain_name: codeartsCfg?.domain_name || '',
-      username: codeartsCfg?.username || '',
-      password: '',
-      region: codeartsCfg?.region || inferredRegion || '',
-      project_id: codeartsCfg?.project_id || '',
-      repo_id_0: repoId0,
-    }
+    const values: any = configurationMode === 'private'
+      ? { ...CODEARTS_PRIVATE_TEST_DEFAULTS, repository_mode: configurationMode }
+      : {
+          repository_mode: configurationMode,
+          domain_name: codeartsCfg?.domain_name || '',
+          username: codeartsCfg?.username || '',
+          password: '',
+          region: codeartsCfg?.region || inferredRegion || '',
+          project_id: codeartsCfg?.project_id || '',
+          repo_id_0: repoId0,
+        }
     const draftValues = loadCodeartsFormDraft()
-    const mergedValues = {
-      ...values,
-      ...draftValues,
-      region: String(draftValues.region || values.region || inferRegionFromRepoId(draftValues.repo_id_0 || values.repo_id_0) || '').trim(),
-    }
+    const mergedValues = configurationMode === 'private'
+      ? values
+      : {
+          ...values,
+          ...draftValues,
+          repository_mode: configurationMode,
+          region: String(draftValues.region || values.region || inferRegionFromRepoId(draftValues.repo_id_0 || values.repo_id_0) || '').trim(),
+        }
     if (isCreateProjectOpen) createProjectForm.setFieldsValue(mergedValues)
-  }, [isCreateProjectOpen, codeartsCfg, createProjectForm])
+  }, [isCreateProjectOpen, codeartsCfg, createProjectForm, configurationMode])
 
   useEffect(() => {
     if (!treeInitialized) return
 
-    const projects: Array<{ label: string; value: string }> = []
+    const projects: Array<{ label: string; value: string; repositoryMode: CodeartsRepositoryMode }> = []
     const walk = (items: AnyNode[]) => {
       for (const n of items) {
         if (String(n.key).startsWith('proj_')) {
-          projects.push({ label: String(n.title), value: String(n.key) })
+          projects.push({
+            label: String(n.title),
+            value: String(n.key),
+            repositoryMode: n.repository_mode === 'private' ? 'private' : 'release',
+          })
         }
         if (Array.isArray(n.children) && n.children.length > 0) walk(n.children as AnyNode[])
       }
@@ -811,6 +847,20 @@ const Repository: React.FC = () => {
     }
   }
 
+  const handleRepositoryModeChange = async (value: string | number) => {
+    const nextMode: CodeartsRepositoryMode = value === 'private' ? 'private' : 'release'
+    if (nextMode === repositoryMode) return
+    const targetProject = projectOptions.find((project) => project.repositoryMode === nextMode)
+    if (!targetProject) {
+      setCreateProjectError(nextMode === 'private' ? '首次使用私有库，请配置仓库 ID' : '')
+      setConfigurationModeOverride(nextMode)
+      setIsCreateProjectOpen(true)
+      return
+    }
+    handleProjectChange(targetProject.value)
+    message.success(`已切换到${nextMode === 'private' ? '私有库' : '发布库'}项目，需要更新数据时请点击同步CodeArts`)
+  }
+
   const handleDownloadArtifact = async (target: DownloadTarget, node: AnyNode, jumpAfterDownload = false) => {
     if (!node?.project_id || !node?.download_uri) return
     const messageKey = `repository-download-${node.repo_id || node.key}-${target}`
@@ -1010,6 +1060,7 @@ const Repository: React.FC = () => {
   const handleMoreMenuClick = async ({ key }: { key: string }) => {
     if (key === 'create-project') {
       await refreshCodeartsConfig()
+      setConfigurationModeOverride(null)
       setCreateProjectError('')
       setIsCreateProjectOpen(true)
     }
@@ -1088,12 +1139,13 @@ const Repository: React.FC = () => {
           const inferredRegion = inferRegionFromRepoId(repoIds[0])
           const payload: any = {
             enabled: true,
+            repository_mode: configurationMode,
             domain_name: String(values.domain_name || '').trim(),
             username: String(values.username || '').trim(),
             password: String(values.password || '').trim() || undefined, // undefined if empty to avoid overriding with empty string
             region: String(values.region || inferredRegion || '').trim(),
             project_id: String(values.project_id || '').trim(),
-            repo_ids: repoIds,
+            ...(configurationMode === 'private' ? { private_repo_id: repoIds[0] || '' } : { repo_ids: repoIds }),
           }
           persistCodeartsFormDraft(values)
           await repositoryApi.setCodeartsConfig(payload)
@@ -1108,6 +1160,7 @@ const Repository: React.FC = () => {
             message.success(successText)
             setCreateProjectError('')
             setIsCreateProjectOpen(false)
+            setConfigurationModeOverride(null)
             createProjectForm.resetFields()
             const newProjectKey = `proj_${payload.project_id}`
             await refreshTree()
@@ -1134,9 +1187,14 @@ const Repository: React.FC = () => {
           onClose={() => setCreateProjectError('')}
         />
       ) : null}
-      <Form.Item name="repo_id_0" hidden>
-        <Input name="repo_id_0" autoComplete="off" />
+      <Form.Item name="repository_mode" hidden>
+        <Input name="repository_mode" autoComplete="off" />
       </Form.Item>
+      {configurationMode === 'release' ? (
+        <Form.Item name="repo_id_0" hidden>
+          <Input name="repo_id_0" autoComplete="off" />
+        </Form.Item>
+      ) : null}
       <div
         style={{
           marginBottom: 18,
@@ -1159,7 +1217,12 @@ const Repository: React.FC = () => {
           prefix={<UserOutlined style={{ color: '#c9cdd4' }} />}
         />
       </RepoFormField>
-      <RepoFormField label="IAM密码" name="password" form={createProjectForm} rules={[{ required: true, message: '请输入IAM密码' }]}>
+      <RepoFormField
+        label="IAM密码"
+        name="password"
+        form={createProjectForm}
+        rules={[{ required: true, message: '请输入IAM密码' }]}
+      >
         <Input.Password
           name="password"
           autoComplete="current-password"
@@ -1176,6 +1239,11 @@ const Repository: React.FC = () => {
       <RepoFormField label="项目ID" name="project_id" form={createProjectForm} rules={[{ required: true, message: '请输入项目ID' }]}>
         <Input name="project_id" autoComplete="off" placeholder="请输入项目ID" />
       </RepoFormField>
+      {configurationMode === 'private' ? (
+        <RepoFormField label="仓库ID" name="repo_id_0" form={createProjectForm} rules={[{ required: true, message: '请输入仓库ID' }]}>
+          <Input name="repo_id_0" autoComplete="off" placeholder="请输入仓库ID" />
+        </RepoFormField>
+      ) : null}
     </Form>
   )
 
@@ -1694,6 +1762,15 @@ const Repository: React.FC = () => {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <Segmented
+            value={repositoryMode}
+            disabled={!canSyncRepository || syncingCodearts}
+            onChange={handleRepositoryModeChange}
+            options={[
+              { label: '发布库', value: 'release' },
+              { label: '私有库', value: 'private' },
+            ]}
+          />
           <Permission code="repository:sync">
             <ActionLinkButton icon={<ReloadOutlined />} loading={syncingCodearts} onClick={handleSyncCurrentProject}>
               同步CodeArts
@@ -1702,7 +1779,7 @@ const Repository: React.FC = () => {
           <Select
             value={currentProjectKey || undefined}
             style={{ width: 200 }}
-            options={projectOptions}
+            options={visibleProjectOptions}
             placeholder="选择项目"
             showSearch
             allowClear={false}
@@ -1961,6 +2038,7 @@ const Repository: React.FC = () => {
           if (createProjectSubmitting) return
           setCreateProjectError('')
           setIsCreateProjectOpen(false)
+          setConfigurationModeOverride(null)
           createProjectForm.resetFields()
         }}
       >

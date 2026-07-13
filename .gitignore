@@ -98,4 +98,7 @@ uploads/
 
 # Generated exports
 frontend_source*.docx
-tools/
+.tools/
+release-win7-private/
+tools/*
+!tools/build-backend.mjs

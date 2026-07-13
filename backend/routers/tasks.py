@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 烧录任务路由
 """
@@ -66,7 +68,9 @@ from backend.routers.repositories import (
     _remove_repository_server_artifact,
     _retrieve_repository_artifact_via_ssh,
     _require_project_permission,
+    _resolve_codearts_download_auth,
     _safe_json_loads,
+    _safe_format_path,
     repository_to_dict,
     _transfer_repository_artifact_via_ssh,
 )
@@ -1114,6 +1118,21 @@ def _resolve_artifact_storage_mode(
     return "local"
 
 
+def _build_task_codearts_download_auth(db: Session, repo: Repository, current_user: User) -> dict:
+    project_key = str(getattr(repo, "project_key", "") or "")
+    repo_detail = _safe_json_loads(getattr(repo, "repo_detail_json", None))
+    repository_mode = str(repo_detail.get("repository_mode") or "").strip() or None
+    cfg, token = _build_codearts_download_context(
+        current_user,
+        db,
+        project_key,
+        repository_mode=repository_mode,
+    )
+    region = str(cfg.get("region") or "").strip()
+    base_url = _safe_format_path(str(cfg.get("base_url") or "").rstrip("/"), region=region)
+    return _resolve_codearts_download_auth(cfg, base_url, token)
+
+
 def _download_repository_artifact_to_local_storage(db: Session, repo: Repository, current_user: User) -> Repository:
     repo_detail = repository_to_dict(repo)
     file_detail = repo_detail.get("file_detail") if isinstance(repo_detail.get("file_detail"), dict) else {}
@@ -1127,7 +1146,7 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
     if not download_uri:
         raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
 
-    _, token = _build_codearts_download_context(current_user, db, str(getattr(repo, "project_key", "") or ""))
+    download_auth = _build_task_codearts_download_auth(db, repo, current_user)
     download_root = _get_repository_download_root()
     file_path = build_encrypted_artifact_path(download_root, _guess_download_filename(download_uri, getattr(repo, "name", None)))
 
@@ -1136,7 +1155,9 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
             download_uri=download_uri,
             destination_path=file_path,
             original_name=getattr(repo, "name", None),
-            token=token,
+            token=download_auth["token"],
+            username=download_auth["username"],
+            password=download_auth["password"],
             timeout_seconds=300,
         )
     except (ArtifactEncryptionError, ArtifactKeyValidationError, ArtifactPermissionDeniedError) as exc:
@@ -1191,7 +1212,7 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
     if not download_uri:
         raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
 
-    _, token = _build_codearts_download_context(current_user, db, str(getattr(repo, "project_key", "") or ""))
+    download_auth = _build_task_codearts_download_auth(db, repo, current_user)
     download_root = _get_repository_download_root()
     filename = _guess_download_filename(download_uri, getattr(repo, "name", None))
     file_path = build_encrypted_artifact_path(download_root, filename)
@@ -1201,7 +1222,9 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
             download_uri=download_uri,
             destination_path=file_path,
             original_name=getattr(repo, "name", None),
-            token=token,
+            token=download_auth["token"],
+            username=download_auth["username"],
+            password=download_auth["password"],
             timeout_seconds=300,
         )
     except (ArtifactEncryptionError, ArtifactKeyValidationError, ArtifactPermissionDeniedError) as exc:
@@ -4202,6 +4225,94 @@ def _stage_hdd0_with_selected_artifact(hdd0_source: str, local_artifact_path: st
     return str(staged_hdd0), temp_dir
 
 
+_MD5_CRYPT_B64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _md5_crypt(password: str, salt: str) -> str:
+    """Create the $1$ (MD5-crypt) hashes used by the bundled SylixOS image."""
+    salt = salt[:8]
+    password_bytes = password.encode("utf-8")
+    magic = b"$1$"
+    salt_bytes = salt.encode("ascii")
+    digest = hashlib.md5(password_bytes + magic + salt_bytes)
+    alternate = hashlib.md5(password_bytes + salt_bytes + password_bytes).digest()
+    for index in range(len(password_bytes)):
+        digest.update(alternate[index % 16:index % 16 + 1])
+    length = len(password_bytes)
+    while length:
+        digest.update(b"\x00" if length & 1 else password_bytes[:1])
+        length >>= 1
+    result = digest.digest()
+    for index in range(1000):
+        round_digest = hashlib.md5()
+        round_digest.update(password_bytes if index & 1 else result)
+        if index % 3:
+            round_digest.update(salt_bytes)
+        if index % 7:
+            round_digest.update(password_bytes)
+        round_digest.update(result if index & 1 else password_bytes)
+        result = round_digest.digest()
+
+    def encode(value: int, count: int) -> str:
+        chars = []
+        for _ in range(count):
+            chars.append(_MD5_CRYPT_B64[value & 0x3F])
+            value >>= 6
+        return "".join(chars)
+
+    encoded = "".join((
+        encode((result[0] << 16) | (result[6] << 8) | result[12], 4),
+        encode((result[1] << 16) | (result[7] << 8) | result[13], 4),
+        encode((result[2] << 16) | (result[8] << 8) | result[14], 4),
+        encode((result[3] << 16) | (result[9] << 8) | result[15], 4),
+        encode((result[4] << 16) | (result[10] << 8) | result[5], 4),
+        encode(result[11], 2),
+    ))
+    return f"$1${salt}${encoded}"
+
+
+def _stage_hdd1_with_system_account(hdd1_source: str, username: str, password: str) -> tuple[str, Optional[tempfile.TemporaryDirectory]]:
+    if not username and not password:
+        return hdd1_source, None
+    if not username or not password:
+        raise ValueError("系统用户名和密码必须同时填写")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,31}", username):
+        raise ValueError("系统用户名仅支持字母、数字、下划线和连字符，且须以字母或下划线开头")
+    if len(password) < 8:
+        raise ValueError("系统密码至少需要 8 位")
+
+    source = Path(hdd1_source).expanduser().resolve(strict=False)
+    if not source.is_dir():
+        raise ValueError(f"hdd1 目录不存在：{hdd1_source}")
+    temp_dir = tempfile.TemporaryDirectory(prefix="pcids_sylixos_hdd1_")
+    staged = Path(temp_dir.name) / "hdd1"
+    shutil.copytree(source, staged)
+    passwd_file, shadow_file = staged / "etc" / "passwd", staged / "etc" / "shadow"
+    if not passwd_file.is_file() or not shadow_file.is_file():
+        temp_dir.cleanup()
+        raise ValueError("hdd1 中缺少 etc/passwd 或 etc/shadow，无法设置系统账户")
+
+    passwd_lines = passwd_file.read_text(encoding="utf-8").splitlines()
+    shadow_lines = shadow_file.read_text(encoding="utf-8").splitlines()
+    existing = next((line.split(":") for line in passwd_lines if line.split(":", 1)[0] == username), None)
+    if existing:
+        uid, gid, home, shell = existing[2], existing[3], existing[5] or f"/home/{username}", existing[6] or "/bin/sh"
+    else:
+        ids = [int(parts[2]) for line in passwd_lines if len((parts := line.split(":"))) > 3 and parts[2].isdigit()]
+        uid = gid = str(max([999, *ids]) + 1)
+        home, shell = f"/home/{username}", "/bin/sh"
+        passwd_lines.append(f"{username}:x:{uid}:{gid}:{username}:{home}:{shell}")
+    account_hash = _md5_crypt(password, os.urandom(6).hex()[:8])
+    shadow_entry = f"{username}:{account_hash}:0:0:99999:7:::"
+    if any(line.split(":", 1)[0] == username for line in shadow_lines):
+        shadow_lines = [shadow_entry if line.split(":", 1)[0] == username else line for line in shadow_lines]
+    else:
+        shadow_lines.append(shadow_entry)
+    passwd_file.write_text("\n".join(passwd_lines) + "\n", encoding="utf-8")
+    shadow_file.write_text("\n".join(shadow_lines) + "\n", encoding="utf-8")
+    return str(staged), temp_dir
+
+
 def _upload_sylixos_partition_files_via_ftp(config: dict, target_ip: str, target_port: int, artifact_name: str, local_artifact_path: str) -> list[str]:
     hdd0_source = str(config.get("hdd0_source_path") or "").strip() or _resolve_sylixos_asset_path("hdd0")
     hdd1_source = str(config.get("hdd1_source_path") or "").strip() or _resolve_sylixos_asset_path("hdd1")
@@ -4213,8 +4324,14 @@ def _upload_sylixos_partition_files_via_ftp(config: dict, target_ip: str, target
     hdd1_remote = str(config.get("hdd1_remote_path") or "/media/hdd1").strip() or "/media/hdd1"
     logs: list[str] = []
     staged_hdd0_temp: Optional[tempfile.TemporaryDirectory] = None
+    staged_hdd1_temp: Optional[tempfile.TemporaryDirectory] = None
     try:
         hdd0_upload_source, staged_hdd0_temp = _stage_hdd0_with_selected_artifact(hdd0_source, local_artifact_path, artifact_name)
+        hdd1_upload_source, staged_hdd1_temp = _stage_hdd1_with_system_account(
+            hdd1_source,
+            str(config.get("system_username") or "").strip(),
+            str(config.get("system_password") or ""),
+        )
         last_error = ""
         for passive in (True, False):
             ftp_client = ftplib.FTP(timeout=20)
@@ -4250,6 +4367,8 @@ def _upload_sylixos_partition_files_via_ftp(config: dict, target_ip: str, target
     finally:
         if staged_hdd0_temp:
             staged_hdd0_temp.cleanup()
+        if staged_hdd1_temp:
+            staged_hdd1_temp.cleanup()
     return logs
 
 
@@ -6410,6 +6529,7 @@ def _redact_task_config_json(config_json: Optional[str]) -> Optional[str]:
         "login_password",
         "serial_login_password",
         "ftp_login_password",
+        "system_password",
         "password",
         "private_key",
         "private_key_content",

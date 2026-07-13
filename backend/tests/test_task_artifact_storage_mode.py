@@ -3,9 +3,11 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, MagicMock, patch
 
 from backend.routers.tasks import (
+    _build_task_codearts_download_auth,
+    _download_repository_artifact_to_local_storage,
     _ensure_repository_local_file_available_for_runtime,
     _refresh_repository_artifact_after_key_failure,
     _resolve_artifact_storage_mode,
@@ -13,6 +15,82 @@ from backend.routers.tasks import (
 
 
 class TaskArtifactStorageModeTests(unittest.TestCase):
+    def test_task_download_uses_mode_saved_on_repository(self):
+        repo = SimpleNamespace(
+            project_key="proj_private",
+            repo_detail_json=json.dumps({"repository_mode": "private"}),
+        )
+        config = {"repository_mode": "private", "region": "cn-cq-1", "base_url": "https://codearts.example.com"}
+        with patch(
+            "backend.routers.tasks._build_codearts_download_context",
+            return_value=(config, "private-token"),
+        ) as context_mock, patch(
+            "backend.routers.tasks._resolve_codearts_download_auth",
+            return_value={"token": None, "username": "repo-user", "password": "repo-password", "mode": "basic"},
+        ) as auth_mock:
+            result = _build_task_codearts_download_auth(MagicMock(), repo, SimpleNamespace(id=1))
+
+        self.assertEqual(result["mode"], "basic")
+        context_mock.assert_called_once_with(
+            ANY,
+            ANY,
+            "proj_private",
+            repository_mode="private",
+        )
+        auth_mock.assert_called_once_with(config, "https://codearts.example.com", "private-token")
+
+    def test_private_codearts_runtime_download_uses_basic_auth(self):
+        repo = SimpleNamespace(
+            id=21,
+            project_key="proj_private",
+            name="firmware.bin",
+            download_uri="https://devrepo.example.com/artgalaxy/repo/firmware.bin",
+            file_detail_json="{}",
+            file_url=None,
+            md5=None,
+            sha256=None,
+            size=None,
+        )
+        stored_artifact = SimpleNamespace(
+            md5="md5-value",
+            sha256="sha256-value",
+            plaintext_size=128,
+            to_storage_metadata=lambda: {"encrypted": True},
+        )
+        db = MagicMock()
+
+        with patch(
+            "backend.routers.tasks.repository_to_dict",
+            return_value={"download_uri": repo.download_uri, "file_detail": {}},
+        ), patch(
+            "backend.routers.tasks._build_task_codearts_download_auth",
+            return_value={"token": None, "username": "repo-user", "password": "repo-password", "mode": "basic"},
+        ), patch(
+            "backend.routers.tasks._get_repository_download_root",
+            return_value=r"D:\cache",
+        ), patch(
+            "backend.routers.tasks.build_encrypted_artifact_path",
+            return_value=r"D:\cache\firmware.bin.pcenc",
+        ), patch(
+            "backend.routers.tasks._encrypt_remote_artifact_to_storage",
+            return_value=stored_artifact,
+        ) as encrypt_mock, patch(
+            "backend.routers.tasks._get_repository_location_state",
+            return_value={"server_exists": False, "server_path": None, "server_target": None},
+        ), patch("backend.routers.tasks._apply_repository_location_state"):
+            result = _download_repository_artifact_to_local_storage(db, repo, SimpleNamespace(id=1))
+
+        self.assertIs(result, repo)
+        encrypt_mock.assert_called_once_with(
+            download_uri=repo.download_uri,
+            destination_path=r"D:\cache\firmware.bin.pcenc",
+            original_name="firmware.bin",
+            token=None,
+            username="repo-user",
+            password="repo-password",
+            timeout_seconds=300,
+        )
+
     def test_codearts_uses_local_storage_for_local_burner(self):
         self.assertEqual(_resolve_artifact_storage_mode("codearts", "local", None), "local")
 

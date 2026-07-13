@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 仪表盘/工作台路由
 """
