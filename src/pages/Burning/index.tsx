@@ -82,6 +82,29 @@ const decodeMojibakeString = (raw?: any): string => {
   return String(raw)
 }
 
+const getBurningRequestErrorMessage = (error: any, fallback: string): string => {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  if (Array.isArray(detail)) {
+    const validationMessages = detail
+      .map((item: any) => {
+        const field = Array.isArray(item?.loc)
+          ? item.loc.filter((part: any) => part !== 'body').join('.')
+          : ''
+        const text = String(item?.msg || '').trim()
+        return text ? (field ? `${field}：${text}` : text) : ''
+      })
+      .filter(Boolean)
+    if (validationMessages.length) return validationMessages.join('；')
+  }
+  const responseMessage = String(error?.response?.data?.message || '').trim()
+  if (responseMessage) return responseMessage
+  if (!error?.response && String(error?.message || '').trim()) {
+    return `${fallback}：${String(error.message).trim()}。请确认后端服务和网络连接正常。`
+  }
+  return fallback
+}
+
 const detailSubSectionTitleStyle = {
   fontSize: 14,
   fontWeight: 600,
@@ -1403,7 +1426,7 @@ const Burning: React.FC = () => {
 
   const validateHybridConfig = () => {
     const hybridMode = String(wizardData.burnMode || '').trim()
-    const isFtpHybridMode = hybridMode.toUpperCase().startsWith('FTP+')
+    const requiresPartitionFtpAuth = selectedScript?.name === SYLIXOS_HYBRID_SCRIPT_NAME
     if (!wizardData.boardId) {
       message.warning('请选择板卡')
       return false
@@ -1432,16 +1455,16 @@ const Burning: React.FC = () => {
       message.warning('请输入串口登录密码')
       return false
     }
-    if (isFtpHybridMode && !String(wizardData.ftpLoginUser || '').trim()) {
-      message.warning('请输入FTP登录用户')
+    if (requiresPartitionFtpAuth && !String(wizardData.ftpLoginUser || '').trim()) {
+      message.warning('请输入板卡当前FTP登录用户')
       return false
     }
-    if (isFtpHybridMode && wizardData.ftpPasswordless) {
+    if (requiresPartitionFtpAuth && wizardData.ftpPasswordless) {
       message.warning('FTP 协议不支持免登录，请填写 FTP 登录密码')
       return false
     }
-    if (isFtpHybridMode && !wizardData.ftpPasswordless && !String(wizardData.ftpLoginPassword || '').trim()) {
-      message.warning('请输入FTP登录密码')
+    if (requiresPartitionFtpAuth && !wizardData.ftpPasswordless && !String(wizardData.ftpLoginPassword || '').trim()) {
+      message.warning('请输入板卡当前FTP登录密码')
       return false
     }
     if (!String(wizardData.boardTargetAddress || '').trim()) {
@@ -2432,7 +2455,7 @@ const Burning: React.FC = () => {
       setIsWizardOpen(false)
       await fetchTasks(true)
     } catch (e: any) {
-      const errorText = e?.response?.data?.detail || '创建失败'
+      const errorText = getBurningRequestErrorMessage(e, '创建失败，请检查上方必填项和设备配置')
       message.error(errorText)
     } finally {
       setWizardSubmitLoading(false)
@@ -2446,7 +2469,7 @@ const Burning: React.FC = () => {
       message.success('删除成功')
       fetchTasks()
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '删除失败')
+      message.error(getBurningRequestErrorMessage(e, '删除失败'))
     } finally {
       setDeletingTaskId(null)
     }
@@ -2538,7 +2561,7 @@ const Burning: React.FC = () => {
       message.open({
         key: messageKey,
         type: 'error',
-        content: e?.response?.data?.detail || '任务启动失败，请检查任务配置后重试',
+        content: getBurningRequestErrorMessage(e, '任务启动失败，请检查任务配置、设备连接和执行工具后重试'),
         duration: 5,
       })
     }
@@ -3524,8 +3547,36 @@ const Burning: React.FC = () => {
                   <Row gutter={16} style={{ marginBottom: 16 }}>
                     <Col span={12}>
                       <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span>系统登录用户名</span>
-                        <Tooltip title="新建用户为普通用户；填写 root 时仅更新 root 密码，不改变其权限。">
+                        <span>{requiredLabel('当前FTP登录用户')}</span>
+                        <Tooltip title="用于连接板卡当前正在运行的 FTP 服务，只负责上传 hdd0/hdd1，不会修改系统账户。首次烧录通常为 root。">
+                          <QuestionCircleOutlined style={{ color: '#86909C', fontSize: 14, cursor: 'help' }} />
+                        </Tooltip>
+                      </div>
+                      <Input
+                        value={wizardData.ftpLoginUser}
+                        onChange={(e) => updateWizardField('ftpLoginUser', e.target.value)}
+                      />
+                    </Col>
+                    <Col span={12}>
+                      <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>{requiredLabel('当前FTP登录密码')}</span>
+                        <Tooltip title="填写板卡当前已经生效的密码。重复烧录时，应填写上一次烧录后设置并已生效的密码。">
+                          <QuestionCircleOutlined style={{ color: '#86909C', fontSize: 14, cursor: 'help' }} />
+                        </Tooltip>
+                      </div>
+                      <Input.Password
+                        className="pcids-deploy-password"
+                        value={wizardData.ftpLoginPassword}
+                        onChange={(e) => updateWizardField('ftpLoginPassword', e.target.value)}
+                      />
+                    </Col>
+                  </Row>
+
+                  <Row gutter={16} style={{ marginBottom: 16 }}>
+                    <Col span={12}>
+                      <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>新增用户名</span>
+                        <Tooltip title="写入 hdd1 的目标系统账户。新建用户为普通用户；填写 root 时仅更新 root 密码，不改变其权限。">
                           <QuestionCircleOutlined style={{ color: '#86909C', fontSize: 14, cursor: 'help' }} />
                         </Tooltip>
                       </div>
@@ -3539,7 +3590,12 @@ const Burning: React.FC = () => {
                       />
                     </Col>
                     <Col span={12}>
-                      <div style={fieldLabelStyle}>系统登录密码</div>
+                      <div style={{ ...fieldLabelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>新增密码</span>
+                        <Tooltip title="写入 hdd1/etc/shadow，任务完成后重启并从 hdd1 启动才会生效。">
+                          <QuestionCircleOutlined style={{ color: '#86909C', fontSize: 14, cursor: 'help' }} />
+                        </Tooltip>
+                      </div>
                       <Input.Password
                         className="pcids-system-account-input"
                         name="sylixos-system-account-password"
@@ -3898,6 +3954,15 @@ const Burning: React.FC = () => {
                         />
                       </div>
 
+                      {detailTask.last_error ? (
+                        <Fragment>
+                          <div style={{ color: '#86909C' }}>失败原因</div>
+                          <div style={{ ...detailFieldValueStyle, color: '#F53F3F', fontWeight: 500 }}>
+                            {decodeMojibakeString(detailTask.last_error)}
+                          </div>
+                        </Fragment>
+                      ) : null}
+
                       <div style={{ color: '#86909C' }}>执行人</div>
                       <div style={detailFieldValueStyle}>{detailTask.executor || '-'}</div>
 
@@ -3953,11 +4018,13 @@ const Burning: React.FC = () => {
                       {detailTask.result ? (
                         detailTask.result.split('\n').map((line: string, i: number) => {
                           const { time, tag, content } = parseTaskLogLine(line)
-                          const isError = tag.includes('ERROR') || line.includes('失败')
-                          const isSuccess = tag.includes('SUCCESS') || tag.includes('DONE') || line.includes('成功')
+                          const normalizedTag = tag.toLowerCase()
+                          const isError = ['error', 'failed', 'timeout'].some((value) => normalizedTag.includes(value)) || line.includes('失败') || line.includes('异常')
+                          const isWarning = normalizedTag.includes('warning') || normalizedTag.includes('warn') || line.includes('警告')
+                          const isSuccess = normalizedTag.includes('success') || normalizedTag.includes('done') || line.includes('成功')
 
                           return (
-                            <div key={i} style={{ display: 'grid', gridTemplateColumns: time ? '54px minmax(0, auto) minmax(0, 1fr)' : tag ? 'minmax(0, auto) minmax(0, 1fr)' : 'minmax(0, 1fr)', columnGap: 8, color: isError ? '#F53F3F' : isSuccess ? '#00B42A' : '#4E5969' }}>
+                            <div key={i} style={{ display: 'grid', gridTemplateColumns: time ? '54px minmax(0, auto) minmax(0, 1fr)' : tag ? 'minmax(0, auto) minmax(0, 1fr)' : 'minmax(0, 1fr)', columnGap: 8, color: isError ? '#F53F3F' : isWarning ? '#D46B08' : isSuccess ? '#00B42A' : '#4E5969' }}>
                               {time ? <span style={{ color: '#86909C', flexShrink: 0 }}>{time}</span> : null}
                               {tag ? <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>[{tag}]</span> : null}
                               <span style={{ minWidth: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content}</span>

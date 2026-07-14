@@ -139,7 +139,7 @@ class TaskBurnerAutoBindingTests(unittest.TestCase):
         self.assertIsNone(issue)
         self.assertEqual(post_mock.call_args.kwargs["timeout_seconds"], 6)
 
-    def test_terminating_task_does_not_keep_burner_occupied(self):
+    def test_terminating_task_keeps_burner_reserved_until_cleanup_finishes(self):
         burner = SimpleNamespace(
             id=2,
             name="Remote J-LINK",
@@ -160,8 +160,7 @@ class TaskBurnerAutoBindingTests(unittest.TestCase):
 
         self.assertIsNone(issue)
         filter_args = db.query.return_value.filter.call_args.args
-        self.assertTrue(any("tasks.status = :status_1" in str(arg) for arg in filter_args))
-        self.assertFalse(any("IN" in str(arg).upper() and "status" in str(arg).lower() for arg in filter_args))
+        self.assertTrue(any("IN" in str(arg).upper() and "status" in str(arg).lower() for arg in filter_args))
 
     def test_create_task_resolves_missing_burner_id_from_config(self):
         xds510plus = SimpleNamespace(

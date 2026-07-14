@@ -56,8 +56,10 @@ from backend.routers.repositories import (
     _build_repository_server_saved_path,
     _build_codearts_download_context,
     _compute_hashes as _compute_repository_hashes,
+    _encrypt_codearts_web_download,
     _encrypt_remote_artifact_to_storage,
     _get_repository_download_config,
+    _get_project_codearts_config,
     _get_repository_download_root,
     _get_repository_location_state,
     _get_repository_server_storage_root,
@@ -273,9 +275,11 @@ async def _run_subprocess_command(
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
+        executable = str(cmd[0] if cmd else "").strip() or "未知命令"
+        reason = f"命令启动失败：未找到可执行程序 {executable}。请检查工具是否已安装，以及任务中的工具路径配置。"
         if monitor:
-            monitor.record(stage_name, "failed", "命令启动失败", reason=str(exc))
-        return False, "", "", str(exc)
+            monitor.record(stage_name, "failed", "命令启动失败", reason=reason)
+        return False, "", str(exc), reason
 
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
@@ -397,13 +401,34 @@ def _task_display_time(value: Optional[datetime]) -> Optional[datetime]:
 
 def _script_output_failure_reason(stdout: str, stderr: str) -> str:
     output = "\n".join(part for part in [stdout, stderr] if part)
+    reasons: list[str] = []
     for line in output.splitlines():
         normalized = line.strip()
         if normalized.startswith("[ERROR]"):
-            return normalized.removeprefix("[ERROR]").strip() or "脚本输出明确错误"
-        if "__PCIDS_" in normalized and "_ERROR__" in normalized:
-            return normalized.split(":", 1)[-1].strip() or "脚本输出明确错误"
-    return ""
+            reason = normalized.removeprefix("[ERROR]").strip() or "脚本输出明确错误"
+        elif "__PCIDS_" in normalized and "_ERROR__" in normalized:
+            reason = normalized.split(":", 1)[-1].strip() or "脚本输出明确错误"
+        else:
+            continue
+        if reason not in reasons:
+            reasons.append(reason)
+        if len(reasons) >= 4:
+            break
+    return "；".join(reasons)
+
+
+def _command_failure_reason(stdout: str, stderr: str, fallback: str) -> str:
+    explicit_reason = _script_output_failure_reason(stdout, stderr)
+    if explicit_reason:
+        return explicit_reason
+    for output in (stderr, stdout):
+        lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+        if lines:
+            detail = lines[-1]
+            if len(detail) > 300:
+                detail = detail[:297] + "..."
+            return f"{fallback}：{detail}"
+    return fallback
 
 
 def _build_local_script_execution_log(script_name: str, stdout: str, stderr: str, exit_code: Optional[int] = None) -> str:
@@ -526,7 +551,7 @@ def _get_burner_runtime_issue(
         db.query(BurningTask)
         .filter(
             BurningTask.burner_id == burner.id,
-            BurningTask.status == int(TaskStatus.RUNNING),
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
             BurningTask.id != current_task_id,
         )
         .first()
@@ -866,6 +891,19 @@ def _finalize_task_as_terminated(task: BurningTask) -> None:
         task.result = f"{previous_result}\n{summary}"
 
 
+def _finalize_task_after_unhandled_exception(task: BurningTask, exc: BaseException) -> None:
+    if _is_task_terminated_status(getattr(task, "status", None)):
+        _finalize_task_as_terminated(task)
+        return
+    detail = str(exc).strip() or exc.__class__.__name__
+    previous_result = str(getattr(task, "result", None) or "").strip()
+    notice = f"[ERROR] 任务执行发生未处理异常：{detail}"
+    task.status = int(TaskStatus.FAILED)
+    task.finished_at = datetime.utcnow()
+    task.last_error = f"任务执行异常：{detail}"
+    task.result = "\n".join(part for part in [previous_result, notice] if part)
+
+
 async def _taskkill_process_tree(pid: int) -> bool:
     if pid <= 0 or os.name != "nt":
         return False
@@ -1036,7 +1074,7 @@ def _claim_task_execution_start(db: Session, task: BurningTask, is_burning_task:
                       FROM tasks t2
                       WHERE t2.burner_id = :burner_id
                         AND t2.id != :task_id
-                        AND t2.status = 1
+                        AND t2.status IN (1, 4)
                   )
                 """
             ),
@@ -1146,20 +1184,16 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
     if not download_uri:
         raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
 
-    download_auth = _build_task_codearts_download_auth(db, repo, current_user)
     download_root = _get_repository_download_root()
     file_path = build_encrypted_artifact_path(download_root, _guess_download_filename(download_uri, getattr(repo, "name", None)))
 
     try:
-        stored_artifact = _encrypt_remote_artifact_to_storage(
-            download_uri=download_uri,
-            destination_path=file_path,
-            original_name=getattr(repo, "name", None),
-            token=download_auth["token"],
-            username=download_auth["username"],
-            password=download_auth["password"],
-            timeout_seconds=300,
-        )
+        if str(repo_detail.get("private_source") or "").lower() == "web":
+            web_cfg = _get_project_codearts_config(db, str(getattr(repo, "project_key", "") or ""), current_user)
+            stored_artifact, _ = _encrypt_codearts_web_download(cfg=web_cfg, download_uri=download_uri, destination_path=file_path, original_name=getattr(repo, "name", None) or "artifact.bin")
+        else:
+            download_auth = _build_task_codearts_download_auth(db, repo, current_user)
+            stored_artifact = _encrypt_remote_artifact_to_storage(download_uri=download_uri, destination_path=file_path, original_name=getattr(repo, "name", None), token=download_auth["token"], username=download_auth["username"], password=download_auth["password"], timeout_seconds=300)
     except (ArtifactEncryptionError, ArtifactKeyValidationError, ArtifactPermissionDeniedError) as exc:
         if os.path.exists(file_path):
             try:
@@ -2384,12 +2418,19 @@ def _validate_task_creation_payload(
             raise HTTPException(status_code=400, detail="请输入串口登录用户")
         if not _safe_bool(config.get("serial_passwordless")) and not str(config.get("serial_login_password") or ""):
             raise HTTPException(status_code=400, detail="请输入串口登录密码")
-        if transfer_protocol.upper().startswith("FTP+") and not str(config.get("ftp_login_user") or "").strip():
-            raise HTTPException(status_code=400, detail="请输入FTP登录用户")
-        if transfer_protocol.upper().startswith("FTP+") and _safe_bool(config.get("ftp_passwordless")):
-            raise HTTPException(status_code=400, detail="FTP 协议不支持免登录，请填写 FTP 登录密码")
-        if transfer_protocol.upper().startswith("FTP+") and not _safe_bool(config.get("ftp_passwordless")) and not str(config.get("ftp_login_password") or ""):
-            raise HTTPException(status_code=400, detail="请输入FTP登录密码")
+        try:
+            _validate_sylixos_system_account_values(
+                str(config.get("system_username") or "").strip(),
+                str(config.get("system_password") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not str(config.get("ftp_login_user") or "").strip():
+            raise HTTPException(status_code=400, detail="请输入当前FTP登录用户，用于上传 hdd0/hdd1")
+        if _safe_bool(config.get("ftp_passwordless")):
+            raise HTTPException(status_code=400, detail="FTP 协议不支持免登录，请填写当前 FTP 登录密码")
+        if not str(config.get("ftp_login_password") or ""):
+            raise HTTPException(status_code=400, detail="请输入当前FTP登录密码，用于上传 hdd0/hdd1")
         configured_board_address = str(
             config.get("configured_board_address") or config.get("board_target_address") or ""
         ).strip()
@@ -4271,15 +4312,36 @@ def _md5_crypt(password: str, salt: str) -> str:
     return f"$1${salt}${encoded}"
 
 
-def _stage_hdd1_with_system_account(hdd1_source: str, username: str, password: str) -> tuple[str, Optional[tempfile.TemporaryDirectory]]:
+def _validate_sylixos_system_account_values(username: str, password: str) -> None:
     if not username and not password:
-        return hdd1_source, None
+        return
     if not username or not password:
         raise ValueError("系统用户名和密码必须同时填写")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,31}", username):
         raise ValueError("系统用户名仅支持字母、数字、下划线和连字符，且须以字母或下划线开头")
-    if len(password) < 8:
-        raise ValueError("系统密码至少需要 8 位")
+    if any(character in password for character in (":", "\r", "\n", "\x00")):
+        raise ValueError("系统密码不能包含冒号、换行或空字符")
+    if len(password) > 128:
+        raise ValueError("系统密码不能超过 128 位")
+
+
+def _validate_sylixos_partition_upload_config(config: dict) -> None:
+    username = str(config.get("system_username") or "").strip()
+    password = str(config.get("system_password") or "")
+    _validate_sylixos_system_account_values(username, password)
+
+    hdd1_source = str(config.get("hdd1_source_path") or "").strip() or _resolve_sylixos_asset_path("hdd1")
+    hdd1_path = Path(hdd1_source).expanduser().resolve(strict=False)
+    if not hdd1_path.is_dir():
+        raise ValueError(f"hdd1 目录不存在：{hdd1_source}")
+    if username and (not (hdd1_path / "etc" / "passwd").is_file() or not (hdd1_path / "etc" / "shadow").is_file()):
+        raise ValueError("hdd1 中缺少 etc/passwd 或 etc/shadow，无法设置系统账户")
+
+
+def _stage_hdd1_with_system_account(hdd1_source: str, username: str, password: str) -> tuple[str, Optional[tempfile.TemporaryDirectory]]:
+    _validate_sylixos_system_account_values(username, password)
+    if not username:
+        return hdd1_source, None
 
     source = Path(hdd1_source).expanduser().resolve(strict=False)
     if not source.is_dir():
@@ -4319,6 +4381,7 @@ def _upload_sylixos_partition_files_via_ftp(config: dict, target_ip: str, target
 
     ftp_username = str(config.get("ftp_login_user") or "root").strip() or "root"
     ftp_password = str(config.get("ftp_login_password") or "root")
+    system_username = str(config.get("system_username") or "").strip()
     ftp_port = _safe_int(config.get("ftp_port") or config.get("sylixos_ftp_port"), default=21)
     hdd0_remote = str(config.get("hdd0_remote_path") or "/media/hdd0").strip() or "/media/hdd0"
     hdd1_remote = str(config.get("hdd1_remote_path") or "/media/hdd1").strip() or "/media/hdd1"
@@ -4334,36 +4397,52 @@ def _upload_sylixos_partition_files_via_ftp(config: dict, target_ip: str, target
         )
         last_error = ""
         for passive in (True, False):
-            ftp_client = ftplib.FTP(timeout=20)
-            mode_label = "PASV 被动模式" if passive else "PORT 主动模式"
-            attempt_logs = [f"[INFO] FTP 上传开始：{target_ip}:{ftp_port or target_port or 21}，模式：{mode_label}"]
-            try:
-                ftp_client.connect(target_ip, ftp_port or target_port or 21, timeout=20)
-                attempt_logs.append("[INFO] FTP 连接成功")
-                ftp_client.login(ftp_username, ftp_password)
-                attempt_logs.append(f"[INFO] FTP 登录成功：user={ftp_username}")
-                ftp_client.set_pasv(passive)
-                if hdd0_upload_source:
-                    count = _ftp_upload_tree(ftp_client, hdd0_upload_source, hdd0_remote)
-                    attempt_logs.append(f"hdd0 文件上传完成：{count} 个文件 -> {hdd0_remote}，制品文件名：{artifact_name}")
-                if hdd1_source:
-                    count = _ftp_upload_tree(ftp_client, hdd1_source, hdd1_remote)
-                    attempt_logs.append(f"hdd1 文件上传完成：{count} 个文件 -> {hdd1_remote}")
-                logs.extend(attempt_logs)
-                return logs
-            except Exception as exc:
-                last_error = str(exc)
-                attempt_logs.append(f"[WARN] FTP {mode_label} 上传失败：{last_error}")
-                logs.extend(attempt_logs)
-            finally:
+                ftp_client = ftplib.FTP(timeout=20)
+                mode_label = "PASV 被动模式" if passive else "PORT 主动模式"
+                attempt_logs = [
+                    f"[INFO] FTP 上传开始：{target_ip}:{ftp_port or target_port or 21}，"
+                    f"模式：{mode_label}，认证：当前 FTP 账户 user={ftp_username}"
+                ]
                 try:
-                    ftp_client.quit()
-                except Exception:
+                    ftp_client.connect(target_ip, ftp_port or target_port or 21, timeout=20)
+                    attempt_logs.append("[INFO] FTP 连接成功")
+                    ftp_client.login(ftp_username, ftp_password)
+                    attempt_logs.append(f"[INFO] FTP 登录成功：当前 FTP 账户 user={ftp_username}")
+                    ftp_client.set_pasv(passive)
+                    if hdd0_upload_source:
+                        count = _ftp_upload_tree(ftp_client, hdd0_upload_source, hdd0_remote)
+                        attempt_logs.append(f"hdd0 文件上传完成：{count} 个文件 -> {hdd0_remote}，制品文件名：{artifact_name}")
+                    if hdd1_upload_source:
+                        count = _ftp_upload_tree(ftp_client, hdd1_upload_source, hdd1_remote)
+                        account_label = system_username or "保持备份账户"
+                        attempt_logs.append(
+                            f"hdd1 文件上传完成：{count} 个文件 -> {hdd1_remote}，系统账户：{account_label}"
+                        )
+                    logs.extend(attempt_logs)
+                    if system_username:
+                        logs.append(
+                            "[INFO] 系统账户密码已写入 hdd1/etc/shadow；当前救援系统不会立即切换密码，"
+                            "请在任务完成后重启板卡并从 hdd1 正常启动，再使用新密码登录。"
+                        )
+                    return logs
+                except Exception as exc:
+                    last_error = str(exc)
+                    attempt_logs.append(
+                        f"[WARN] FTP {mode_label} 使用当前 FTP 账户 user={ftp_username} 登录或上传失败：{last_error}"
+                    )
+                    logs.extend(attempt_logs)
+                finally:
                     try:
-                        ftp_client.close()
+                        ftp_client.quit()
                     except Exception:
-                        pass
-        raise RuntimeError(f"FTP 上传失败，PASV/PORT 模式均未成功：{last_error or '-'}")
+                        try:
+                            ftp_client.close()
+                        except Exception:
+                            pass
+        raise RuntimeError(
+            f"FTP 上传失败，已使用当前 FTP 账户({ftp_username})尝试 PASV/PORT 模式：{last_error or '-'}。"
+            "请填写板卡当前正在生效的 FTP 密码；烧录后系统新密码仅在重启进入 hdd1 后生效。"
+        )
     finally:
         if staged_hdd0_temp:
             staged_hdd0_temp.cleanup()
@@ -4458,6 +4537,12 @@ async def _execute_hybrid_task(
         local_ip = str(config.get("local_ip") or "").strip()
         if not local_ip:
             return False, "\n".join(log_parts), "TFTP 模式缺少本地 IP"
+        try:
+            _validate_sylixos_partition_upload_config(config)
+        except ValueError as exc:
+            if monitor:
+                monitor.record("hybrid-config", "failed", "SylixOS 分区上传配置校验失败", reason=str(exc))
+            return False, "\n".join(log_parts), str(exc)
         tftp_server: Optional[_EmbeddedTftpServer] = None
 
         def _append_tftp_server_events() -> None:
@@ -4801,7 +4886,7 @@ async def _execute_script_content_locally(
                 ensure_ascii=False,
             ),
         )
-        return False, log_text, "脚本执行失败"
+        return False, log_text, _command_failure_reason(stdout, stderr, failure_reason or "脚本执行失败")
     finally:
         try:
             if temp_script_path and os.path.exists(temp_script_path):
@@ -4866,6 +4951,8 @@ async def _execute_script_via_agent(
     success = bool(resp.get("data", {}).get("success"))
     log_text = str(resp.get("data", {}).get("log") or "")
     failure_reason = str(resp.get("data", {}).get("failure_reason") or "")
+    if not success and not failure_reason:
+        failure_reason = _script_output_failure_reason(log_text, "") or "下位机 Agent 执行失败，但未返回具体原因，请检查 Agent 日志"
     logger.info(
         "task.script.agent_done | %s",
         json.dumps(
@@ -5673,7 +5760,10 @@ async def simulate_burning_process(
             db.commit()
             return ok
 
+        artifact_hash_error = ""
+
         async def compute_and_check():
+            nonlocal artifact_hash_error
             _ensure_task_not_terminated(db, task.id)
             if used_file_path:
                 try:
@@ -5693,10 +5783,17 @@ async def simulate_burning_process(
                         md5=md5v,
                         sha256=sha256v,
                     )
-                except Exception:
+                except Exception as exc:
                     task.current_md5 = None
                     task.current_sha256 = None
-                    execution_monitor.record("artifact", "warning", "ARTIFACT HASH CALCULATION FAILED")
+                    artifact_hash_error = str(exc).strip() or exc.__class__.__name__
+                    execution_monitor.record(
+                        "artifact",
+                        "error",
+                        "制品校验值计算失败",
+                        file=used_file_path,
+                        reason=artifact_hash_error,
+                    )
             else:
                 execution_monitor.record("artifact", "warning", "ARTIFACT HASH SKIPPED: no runtime file path")
 
@@ -5873,6 +5970,8 @@ async def simulate_burning_process(
 
             # Base success on consistency and integrity logic first
             is_success = True
+            if artifact_hash_error and (task.integrity or task.version_check):
+                is_success = False
             if not is_consistency_execution_allowed(task.consistency_passed, task.override_confirmed):
                 is_success = False
             if task.integrity_passed == 0:
@@ -5883,7 +5982,15 @@ async def simulate_burning_process(
             script_execution_log = ""
             script_failure_reason = ""
 
-            if task.integrity_passed == 0:
+            if artifact_hash_error and (task.integrity or task.version_check):
+                script_execution_success = False
+                script_failure_reason = "制品校验值计算失败"
+                script_execution_log = (
+                    f"无法读取制品并计算 MD5/SHA256：{artifact_hash_error}。"
+                    "请检查文件是否存在、是否被其他程序占用，以及当前服务账户是否有读取权限。\n"
+                    f"制品路径：{used_file_path or '-'}"
+                )
+            elif task.integrity_passed == 0:
                 script_execution_success = False
                 script_failure_reason = "完整性校验失败"
                 script_execution_log = "执行前完整性校验失败：本地制品 MD5/SHA256 与任务期望值不一致，已停止执行烧录脚本。"
@@ -5932,7 +6039,7 @@ async def simulate_burning_process(
                             db.commit()
                 except Exception as e:
                     script_execution_success = False
-                    script_failure_reason = "混合协同执行异常"
+                    script_failure_reason = f"混合协同执行异常：{str(e).strip() or e.__class__.__name__}"
                     script_execution_log = f"混合协同执行异常: {str(e)}"
                     logger.exception(
                         "task.process.hybrid_install_exception | %s",
@@ -5951,7 +6058,7 @@ async def simulate_burning_process(
                     )
                 except Exception as e:
                     script_execution_success = False
-                    script_failure_reason = "远程安装执行异常"
+                    script_failure_reason = f"远程安装执行异常：{str(e).strip() or e.__class__.__name__}"
                     script_execution_log = f"远程安装执行异常: {str(e)}"
                     logger.exception(
                         "task.process.remote_install_exception | %s",
@@ -5994,10 +6101,15 @@ async def simulate_burning_process(
                                     artifact_path=used_file_path,
                                     monitor=execution_monitor,
                                 )
-                            except Exception:
+                            except Exception as exc:
                                 script_execution_success = False
-                                script_failure_reason = "下位机 Agent 不可达"
-                                script_execution_log = "无法连接下位机 Agent，请检查下位机网络和 Agent 服务状态后重试。"
+                                detail = str(exc).strip() or exc.__class__.__name__
+                                script_failure_reason = f"下位机 Agent 请求失败：{detail}"
+                                script_execution_log = (
+                                    f"无法通过下位机 Agent 执行任务：{detail}\n"
+                                    f"Agent 地址：{agent_runtime_url}\n"
+                                    "请检查下位机网络、Agent 服务状态和服务端授权配置后重试。"
+                                )
                                 logger.exception(
                                     "task.process.agent_execute_failed | %s",
                                     json.dumps({"task_id": task.id, "agent_url": agent_runtime_url}, ensure_ascii=False),
@@ -6049,7 +6161,7 @@ async def simulate_burning_process(
                     except RuntimeError as e:
                         if str(e) not in {"burner_recheck_failed", "script_timeout"}:
                             script_execution_success = False
-                            script_failure_reason = "脚本执行异常"
+                            script_failure_reason = f"脚本执行异常：{str(e).strip() or e.__class__.__name__}"
                             script_execution_log = _build_task_exception_log(
                                 f"脚本执行异常: {str(e)}",
                                 existing_log=script_execution_log,
@@ -6063,7 +6175,7 @@ async def simulate_burning_process(
                             )
                     except Exception as e:
                         script_execution_success = False
-                        script_failure_reason = "脚本执行异常"
+                        script_failure_reason = f"脚本执行异常：{str(e).strip() or e.__class__.__name__}"
                         script_execution_log = _build_task_exception_log(
                             f"脚本执行异常: {str(e)}",
                             existing_log=script_execution_log,
@@ -6117,7 +6229,26 @@ async def simulate_burning_process(
                 finalized = True
                 return
 
-            if not is_consistency_execution_allowed(task.consistency_passed, task.override_confirmed):
+            if artifact_hash_error and (task.integrity or task.version_check):
+                attempt_failure_reason = "制品校验值计算失败"
+            elif not is_consistency_execution_allowed(task.consistency_passed, task.override_confirmed):
+                attempt_failure_reason = "版本一致性比对失败"
+            elif task.integrity_passed == 0:
+                attempt_failure_reason = "完整性校验失败"
+            else:
+                attempt_failure_reason = script_failure_reason or task.last_error or "未返回具体原因"
+            execution_monitor.record(
+                "attempt",
+                "failed",
+                "本次执行失败",
+                attempt=task.attempt_count,
+                reason=attempt_failure_reason,
+            )
+
+            if artifact_hash_error and (task.integrity or task.version_check):
+                task.last_error = "制品校验值计算失败"
+                task.result = _compose_execution_result("\n\n".join(script_execution_logs) or script_execution_log)
+            elif not is_consistency_execution_allowed(task.consistency_passed, task.override_confirmed):
                 task.last_error = "版本一致性比对失败"
                 task.result = _compose_execution_result("版本一致性比对失败：当前可执行文件与历史标准版本不一致。", "\n\n".join(script_execution_logs))
             elif task.integrity_passed == 0:
@@ -6129,7 +6260,11 @@ async def simulate_burning_process(
             else:
                 task.last_error = "烧录写入失败" if is_burning_task else "安装执行失败"
                 task.result = _compose_execution_result(
-                    "数据写入失败：校验和错误 (Checksum mismatch)。" if is_burning_task else "安装执行失败：请检查目标主机安装日志。",
+                    (
+                        "烧录执行失败，但执行器未返回具体原因。请保存并检查完整执行日志、烧录器连接和目标板状态。"
+                        if is_burning_task
+                        else "安装执行失败，但执行器未返回具体原因。请保存并检查完整执行日志、目标主机连接和安装目录权限。"
+                    ),
                     "\n\n".join(script_execution_logs),
                 )
             db.commit()
@@ -6147,6 +6282,13 @@ async def simulate_burning_process(
             )
 
             if attempt < retries:
+                execution_monitor.record(
+                    "retry",
+                    "warning",
+                    "准备重试任务",
+                    next_attempt=task.attempt_count + 1,
+                    reason=task.last_error or "未返回具体原因",
+                )
                 await rollback_step()
 
         _ensure_task_not_terminated(db, task.id)
@@ -6166,7 +6308,21 @@ async def simulate_burning_process(
         elif str(exc) == "task_stale":
             logger.info("task.process.stale_exit | %s", json.dumps({"task_id": task_id}, ensure_ascii=False))
         else:
-            raise
+            logger.exception("task.process.unhandled_runtime_error | task_id=%s", task_id)
+            if task:
+                db.rollback()
+                db.refresh(task)
+                _finalize_task_after_unhandled_exception(task, exc)
+                db.commit()
+                finalized = True
+    except Exception as exc:
+        logger.exception("task.process.unhandled_exception | task_id=%s", task_id)
+        if task:
+            db.rollback()
+            db.refresh(task)
+            _finalize_task_after_unhandled_exception(task, exc)
+            db.commit()
+            finalized = True
     finally:
         if task and finalized:
             if not _is_task_active_status(task.status) and not getattr(task, "finished_at", None):
@@ -7192,7 +7348,13 @@ async def update_task(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    for key, value in task_data.model_dump(exclude_unset=True).items():
+    updates = task_data.model_dump(exclude_unset=True)
+    if {"status", "result"} & set(updates):
+        raise HTTPException(status_code=400, detail="任务状态和执行结果由系统执行流程维护，不能手动修改")
+    if _is_task_active_status(task.status):
+        raise HTTPException(status_code=400, detail="执行中或终止中的任务不能修改")
+
+    for key, value in updates.items():
         setattr(task, key, value)
 
     db.commit()
@@ -7215,6 +7377,8 @@ async def delete_task(
     task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    if _is_task_active_status(task.status):
+        raise HTTPException(status_code=400, detail="执行中或终止中的任务不能删除，请先终止任务并等待状态收口")
 
     db.delete(task)
     db.commit()

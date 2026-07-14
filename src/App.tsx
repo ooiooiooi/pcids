@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom'
-import React, { useState, useEffect, useMemo, useRef } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { Layout, Menu, Badge, Drawer, Modal, Tabs, Form, Input, Button, Upload, message, List, Spin, Dropdown, ConfigProvider } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -14,9 +14,8 @@ import {
 } from '@ant-design/icons'
 import { usePermission } from './hooks'
 import { permissionApi } from './services/permission'
-import { authApi, dashboardApi, messageApi, repositoryApi } from './services/api'
+import { authApi, dashboardApi, messageApi } from './services/api'
 import { formatDateTime, getDateTimeSortValue } from './utils/dateTime'
-import { getRepositoryProjectContext, REPOSITORY_PROJECT_CONTEXT_EVENT } from './utils/repositoryProjectContext'
 import { UserAvatar } from './components/UserIdentity'
 import EllipsisText from './components/EllipsisText'
 import Workbench from './pages/Workbench'
@@ -62,7 +61,6 @@ type MessageCenterItem = {
 const APP_BOOTSTRAP_CACHE_KEY = 'pcids.appBootstrap'
 const MESSAGE_CENTER_PAGE_SIZE = 20
 const MESSAGE_CENTER_READ_CACHE_KEY = 'pcids.messageCenterReadCache'
-const CODEARTS_WATCHER_POLL_MS = 8000
 
 const readMessageCenterReadCache = (): string[] => {
   try {
@@ -490,11 +488,6 @@ const App: React.FC = () => {
   const { menus, hasPermission, setPermissions, setMenus, clearPermissions } = usePermission()
   const [userInfo, setUserInfo] = useState<any>({})
   const [isInitializing, setIsInitializing] = useState(true)
-  const codeartsWatchedProjectKeyRef = useRef('')
-  const codeartsConnectionStateRef = useRef<boolean | null>(null)
-  const watchedAutoSyncJobIdsRef = useRef<Set<number>>(new Set())
-  const autoSyncJobStatusRef = useRef<Map<number, string>>(new Map())
-  const shownAutoSyncToastJobIdsRef = useRef<Set<number>>(new Set())
   
   // Profile Modal State
   const [isProfileOpen, setIsProfileOpen] = useState(false)
@@ -796,112 +789,6 @@ const App: React.FC = () => {
     window.addEventListener('hashchange', syncActivePath)
     return () => window.removeEventListener('hashchange', syncActivePath)
   }, [])
-
-  useEffect(() => {
-    if (isInitializing || location.pathname === '/login') {
-      return
-    }
-
-    let disposed = false
-    let polling = false
-
-    const resetProjectWatcherState = (projectKey: string) => {
-      codeartsWatchedProjectKeyRef.current = projectKey
-      codeartsConnectionStateRef.current = null
-      watchedAutoSyncJobIdsRef.current.clear()
-      autoSyncJobStatusRef.current.clear()
-    }
-
-    const watchCodeartsAutoSync = async () => {
-      if (disposed || polling) return
-      const token = localStorage.getItem('token')
-      if (!token) return
-
-      const context = getRepositoryProjectContext()
-      const projectKey = String(context.projectKey || '').trim()
-      if (projectKey !== codeartsWatchedProjectKeyRef.current) {
-        resetProjectWatcherState(projectKey)
-      }
-      if (!projectKey || !projectKey.startsWith('proj_')) {
-        return
-      }
-
-      polling = true
-      try {
-        const [statusRes, autoSyncStatusRes]: any[] = await Promise.all([
-          repositoryApi.getCodeartsStatus({ project_key: projectKey }).catch(() => null),
-          repositoryApi.getCodeartsAutoSyncStatus({ project_key: projectKey }).catch(() => null),
-        ])
-        if (disposed) return
-
-        const connected = Boolean(statusRes?.code === 0 && statusRes?.data?.connected)
-        const previousConnected = codeartsConnectionStateRef.current
-        codeartsConnectionStateRef.current = connected
-
-        const latestJob = autoSyncStatusRes?.code === 0 ? autoSyncStatusRes?.data?.job : null
-        const watchedJobIds = watchedAutoSyncJobIdsRef.current
-        const jobStatusMap = autoSyncJobStatusRef.current
-        const shownToastJobIds = shownAutoSyncToastJobIdsRef.current
-
-        if (latestJob?.id) {
-          const jobId = Number(latestJob.id)
-          const nextStatus = String(latestJob.status || '').trim()
-          if (Number.isFinite(jobId) && watchedJobIds.has(jobId)) {
-            const previousStatus = jobStatusMap.get(jobId)
-            jobStatusMap.set(jobId, nextStatus)
-            const isTerminal = nextStatus === 'success' || nextStatus === 'failed'
-            if (isTerminal && previousStatus !== nextStatus) {
-              if (
-                nextStatus === 'success'
-                && Number(latestJob.total_synced_count || 0) > 0
-                && !shownToastJobIds.has(jobId)
-              ) {
-                shownToastJobIds.add(jobId)
-                message.success(`数据同步完成，共同步${Number(latestJob.total_synced_count || 0)}条数据`)
-              }
-              watchedJobIds.delete(jobId)
-            }
-          }
-        }
-
-        if (!connected || previousConnected === true) {
-          return
-        }
-
-        const triggerRes: any = await repositoryApi.triggerCodeartsAutoSync({
-          project_key: projectKey,
-          trigger_source: 'auto_connection',
-        }).catch(() => null)
-        if (disposed || triggerRes?.code !== 0) return
-
-        const jobId = Number(triggerRes?.data?.job?.id || 0)
-        if (Number.isFinite(jobId) && jobId > 0) {
-          watchedJobIds.add(jobId)
-          jobStatusMap.set(jobId, String(triggerRes?.data?.job?.status || '').trim())
-        }
-      } finally {
-        polling = false
-      }
-    }
-
-    const handleRepositoryProjectChange = () => {
-      const nextProjectKey = String(getRepositoryProjectContext().projectKey || '').trim()
-      resetProjectWatcherState(nextProjectKey)
-      void watchCodeartsAutoSync()
-    }
-
-    window.addEventListener(REPOSITORY_PROJECT_CONTEXT_EVENT, handleRepositoryProjectChange as EventListener)
-    void watchCodeartsAutoSync()
-    const timer = window.setInterval(() => {
-      void watchCodeartsAutoSync()
-    }, CODEARTS_WATCHER_POLL_MS)
-
-    return () => {
-      disposed = true
-      window.clearInterval(timer)
-      window.removeEventListener(REPOSITORY_PROJECT_CONTEXT_EVENT, handleRepositoryProjectChange as EventListener)
-    }
-  }, [isInitializing, location.pathname])
 
   // Handle default route and access control based on menuItems
   useEffect(() => {

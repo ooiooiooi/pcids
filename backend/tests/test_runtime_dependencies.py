@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.utils.runtime_dependencies import (
+    COMMON_TOOL_SEARCH_PATHS,
     build_burner_tool_readiness,
     build_runtime_dependency_report,
     configure_bundled_tools,
@@ -39,8 +40,8 @@ class RuntimeDependenciesTest(unittest.TestCase):
                 configure_bundled_tools.cache_clear()
                 configured = configure_bundled_tools()
 
-                self.assertEqual(configured["STM32_PROGRAMMER_CLI"], str(bundled.resolve()))
-                self.assertEqual(os.environ["STM32_PROGRAMMER_CLI"], str(bundled.resolve()))
+                self.assertEqual(configured["STM32_PROGRAMMER_CLI"], str(external.resolve()))
+                self.assertEqual(os.environ["STM32_PROGRAMMER_CLI"], str(external.resolve()))
 
     def test_bundled_hdc_tool_is_discovered(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -143,10 +144,12 @@ class RuntimeDependenciesTest(unittest.TestCase):
             bundled_root = root / "burners"
             openfpgaloader = bundled_root / "AL321" / "openFPGALoader" / "openFPGALoader.exe"
             driver_tool = bundled_root / "AL321" / "drivers" / "AL321_WinUSB_Driver_Tool.exe"
+            switch_script = bundled_root / "AL321" / "drivers" / "switch-al321-driver.ps1"
             openfpgaloader.parent.mkdir(parents=True)
             driver_tool.parent.mkdir(parents=True)
             openfpgaloader.touch()
             driver_tool.touch()
+            switch_script.touch()
 
             with patch.dict(
                 os.environ,
@@ -178,7 +181,9 @@ class RuntimeDependenciesTest(unittest.TestCase):
             program_flash.parent.mkdir(parents=True)
             program_flash.touch()
 
-            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root)}, clear=False):
+            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root)}, clear=False), patch.dict(
+                COMMON_TOOL_SEARCH_PATHS, {"PROGRAM_FLASH_EXE": []}, clear=False
+            ):
                 configure_bundled_tools.cache_clear()
                 configured = configure_bundled_tools()
 
@@ -194,7 +199,9 @@ class RuntimeDependenciesTest(unittest.TestCase):
             xsdb.touch()
             hw_server.touch()
 
-            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root)}, clear=False):
+            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root)}, clear=False), patch.dict(
+                COMMON_TOOL_SEARCH_PATHS, {"XSDB_EXE": [], "HW_SERVER_EXE": []}, clear=False
+            ):
                 configure_bundled_tools.cache_clear()
                 configured = configure_bundled_tools()
 
@@ -214,7 +221,9 @@ class RuntimeDependenciesTest(unittest.TestCase):
             driver_script.touch()
             driver_inf.write_text("USB\\VID_0547&PID_1020", encoding="utf-8")
 
-            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root)}, clear=False):
+            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root), "UNIFLASH_CLI": ""}, clear=False), patch.dict(
+                COMMON_TOOL_SEARCH_PATHS, {"UNIFLASH_CLI": []}, clear=False
+            ):
                 configure_bundled_tools.cache_clear()
                 build_runtime_dependency_report.cache_clear()
                 configured = configure_bundled_tools()
@@ -340,6 +349,30 @@ class RuntimeDependenciesTest(unittest.TestCase):
             self.assertIn("-Mode", args)
             self.assertIn("recover-pending", args)
             self.assertIn(str(script_path), args)
+
+    def test_al321_missing_driver_switch_script_is_reported_before_execution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundled_root = Path(temp_dir) / "burners"
+            tool_path = bundled_root / "AL321" / "openFPGALoader.exe"
+            tool_path.parent.mkdir(parents=True)
+            tool_path.touch()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root),
+                    "AL321_AUTO_DRIVER_SWITCH": "1",
+                    "AL321_DRIVER_SWITCH_SCRIPT": "",
+                },
+                clear=False,
+            ):
+                configure_bundled_tools.cache_clear()
+                readiness = build_burner_tool_readiness()
+
+            al321 = next(item for item in readiness if item["burner"] == "AL321")
+            self.assertEqual(al321["status"], "warn")
+            self.assertIn("switch-al321-driver.ps1", al321["message"])
+            self.assertTrue(al321["support_issues"])
 
     def test_pending_al321_driver_state_failed_recovery_is_reported(self):
         with tempfile.TemporaryDirectory() as temp_dir:

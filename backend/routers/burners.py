@@ -26,7 +26,7 @@ from backend.utils.db import get_db, ensure_schema
 from backend.utils.datetime_utils import database_time_to_local
 from backend.models.user import User
 from backend.models.burner import Burner
-from backend.models.task import BurningTask
+from backend.models.task import BurningTask, TaskStatus
 from backend.schemas import BurnerCreate, BurnerUpdate, Response, PaginatedResponse
 from backend.routers.auth import get_current_user
 from backend.routers.repositories import _get_repository_server_transport_config
@@ -1766,7 +1766,10 @@ def _refresh_registered_burner_statuses(
         int(item[0])
         for item in (
             db.query(BurningTask.burner_id)
-            .filter(BurningTask.status == 1, BurningTask.burner_id.isnot(None))
+            .filter(
+                BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
+                BurningTask.burner_id.isnot(None),
+            )
             .all()
         )
         if item[0] is not None
@@ -2165,7 +2168,10 @@ async def get_burners(
     occupied_burner_ids = {
         burner_id
         for (burner_id,) in db.query(BurningTask.burner_id)
-        .filter(BurningTask.status == 1, BurningTask.burner_id.isnot(None))
+        .filter(
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
+            BurningTask.burner_id.isnot(None),
+        )
         .all()
         if burner_id is not None
     }
@@ -2426,7 +2432,10 @@ async def delete_burner(
 
     running_task_count = (
         db.query(BurningTask.id)
-        .filter(BurningTask.burner_id == burner_id, BurningTask.status == 1)
+        .filter(
+            BurningTask.burner_id == burner_id,
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
+        )
         .count()
     )
     if running_task_count > 0:

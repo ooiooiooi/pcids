@@ -18,9 +18,10 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
         self.assertIn('State = "pending_restore"', self.content)
         self.assertIn("Save-State $state", self.content)
 
-    def test_already_active_amd_driver_is_treated_as_success_with_winusb_restore_state(self):
+    def test_already_active_amd_driver_is_treated_as_success_without_forcing_ftdi_back_to_winusb(self):
         self.assertIn('$current.Service -eq "FTDIBUS"', self.content)
         self.assertIn('$current.PublishedInfPath -eq $resolvedAmdInfPath', self.content)
+        self.assertIn('AL321 already uses the required FTDI/AMD driver; no driver switch or WinUSB restore is needed.', self.content)
         self.assertIn('OriginalService = "WinUSB"', self.content)
         self.assertIn('State = "amd_active"', self.content)
         self.assertIn("AL321 driver already uses AMD/Digilent driver", self.content)
@@ -56,6 +57,12 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
         self.assertIn("function Assert-OnlyTargetCompatibleDevicePresent", self.content)
         self.assertIn('throw "Automatic AL321 driver switching requires exactly one present $HardwareId device; found $($devices.Count)."', self.content)
         self.assertIn("Assert-OnlyTargetCompatibleDevicePresent $HardwareId $InstanceId | Out-Null", self.content)
+
+    def test_shared_ftdi_driver_switch_requires_a_stable_serial_and_never_restores_generic_winusb(self):
+        self.assertIn("function Test-IsStableUsbSerial", self.content)
+        self.assertIn("BURNER_SN must be a stable hardware serial", self.content)
+        self.assertIn("Refusing to restore a generic WinUSB binding for shared FTDI VID_0403&PID_6014", self.content)
+        self.assertIn("Refusing to switch a shared FTDI VID_0403&PID_6014 device currently bound to WinUSB", self.content)
 
     def test_amd_inf_resolution_scans_d_vitis_tool_and_cable_driver_locations(self):
         self.assertIn('"D:\\vitis\\Vitis\\*"', self.content)

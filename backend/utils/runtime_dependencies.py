@@ -305,11 +305,6 @@ def configure_bundled_tools() -> dict[str, str]:
     if not root or not root.exists():
         root = None
     for env_name, patterns in TOOL_EXECUTABLES.items():
-        executable = _find_bundled_executable(root, patterns) if root else None
-        if executable:
-            os.environ[env_name] = str(executable)
-            configured[env_name] = str(executable)
-            continue
         existing = str(os.environ.get(env_name) or "").strip()
         if existing and Path(existing).is_file():
             configured[env_name] = existing
@@ -319,7 +314,18 @@ def configure_bundled_tools() -> dict[str, str]:
             os.environ[env_name] = str(executable)
             configured[env_name] = str(executable)
             continue
+        executable = _find_bundled_executable(root, patterns) if root else None
+        if executable:
+            os.environ[env_name] = str(executable)
+            configured[env_name] = str(executable)
+            continue
     return configured
+
+
+def refresh_bundled_tools() -> dict[str, str]:
+    """Re-scan bundled tools that may have been copied in after service startup."""
+    configure_bundled_tools.cache_clear()
+    return configure_bundled_tools()
 
 
 def _resolve_configured_tool_path(env_names: list[str]) -> tuple[str, str]:
@@ -386,6 +392,17 @@ def build_burner_tool_readiness() -> list[dict[str, object]]:
         else:
             status = "warn"
             message = f'{item["burner"]} 尚未准备好可执行工具'
+        support_issues: list[str] = []
+        if str(item["burner"]) == "AL321" and str(os.environ.get("AL321_AUTO_DRIVER_SWITCH") or "1").strip() != "0":
+            switch_script = str(os.environ.get("AL321_DRIVER_SWITCH_SCRIPT") or "").strip()
+            if not switch_script or not Path(switch_script).is_file():
+                support_issues.append(
+                    "缺少 switch-al321-driver.ps1，Vitis Flash 自动驱动切换不可用；"
+                    "请补齐脚本，或确认当前驱动可被 hw_server 直接识别后设置 AL321_AUTO_DRIVER_SWITCH=0"
+                )
+        if support_issues:
+            status = "warn"
+            message = f'{message}；{"；".join(support_issues)}'
         results.append(
             {
                 "burner": item["burner"],
@@ -403,6 +420,7 @@ def build_burner_tool_readiness() -> list[dict[str, object]]:
                 "bundled_dir_items": top_level_items,
                 "driver_artifacts": driver_artifacts,
                 "driver_ready": bool(driver_artifacts),
+                "support_issues": support_issues,
             }
         )
     return results

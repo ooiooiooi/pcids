@@ -17,6 +17,7 @@ import posixpath
 import re
 import shlex
 import socket
+import subprocess
 import tempfile
 import time
 import urllib.parse
@@ -31,7 +32,7 @@ from backend.models.user import User
 from backend.models import Repository, RepositorySyncChange, RepositorySyncJob, RepositorySyncState
 from backend.models.log import Record
 from backend.models.repository import RepositoryProjectMember, RepositoryProjectSetting
-from backend.models.task import BurningTask
+from backend.models.task import BurningTask, TaskStatus
 from backend.schemas import RepositoryCreate, RepositoryUpdate, Response
 from backend.routers.auth import get_current_user
 from backend.utils.permission import require_permission
@@ -66,6 +67,7 @@ _DEFAULT_CODEARTS_FILE_INFO_PATHS = [
 ]
 _CODEARTS_REPOSITORY_MODE_RELEASE = "release"
 _CODEARTS_REPOSITORY_MODE_PRIVATE = "private"
+_CODEARTS_PRIVATE_SOURCE_WEB = "web"
 
 def _sanitize_log_data(value):
     if isinstance(value, dict):
@@ -1497,6 +1499,8 @@ def _merge_codearts_config(existing: dict, payload: dict) -> dict:
         "region",
         "tenant_id",
         "project_id",
+        "private_source",
+        "devops_url",
     ]:
         if k in payload:
             merged[k] = payload.get(k)
@@ -1509,6 +1513,119 @@ def _merge_codearts_config(existing: dict, payload: dict) -> dict:
         if isinstance(repo_ids, list):
             merged["repo_ids"] = [str(x).strip() for x in repo_ids if str(x).strip()]
     return merged
+
+
+def _is_codearts_web_private_config(cfg: dict) -> bool:
+    return (
+        _normalize_codearts_repository_mode(cfg.get("repository_mode")) == _CODEARTS_REPOSITORY_MODE_PRIVATE
+        and str(cfg.get("private_source") or "").strip().lower() == _CODEARTS_PRIVATE_SOURCE_WEB
+    )
+
+
+def _sanitize_codearts_web_diagnostics(value):
+    """Persist replay diagnostics without ever retaining browser credential values."""
+    forbidden = {"cookie", "set-cookie", "cftk", "authorization", "password", "x-auth-token", "token"}
+    if isinstance(value, dict):
+        return {
+            str(key): ("***" if str(key).lower() in forbidden else _sanitize_codearts_web_diagnostics(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_codearts_web_diagnostics(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_codearts_web_diagnostics(item) for item in value]
+    return value
+
+
+def _codearts_web_runtime_script() -> tuple[Path, Path, Path]:
+    # Keep the proven browser implementation as a standalone runtime asset.  It owns
+    # the persistent Chrome profile and never exposes cookies to the backend.
+    configured = str(os.environ.get("PCIDS_CODEARTS_WEB_RUNTIME") or "").strip()
+    root = Path(__file__).resolve().parents[2]
+    runtime = Path(configured) if configured else root / "tools" / "codearts_release_debugger" / "browser_runtime"
+    script = runtime / "codearts_web_session.js"
+    node = runtime / "node_modules" / "node" / "bin" / ("node.exe" if os.name == "nt" else "node")
+    if not script.is_file() or not node.is_file():
+        raise RuntimeError(f"CodeArts 页面会话运行组件不完整：{runtime}")
+    return node, script, runtime
+
+
+def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
+    project_id = str(cfg.get("project_id") or "").strip()
+    devops_url = str(cfg.get("devops_url") or "https://devops.{region}.cqcloud.cwgy.com").strip().rstrip("/")
+    devops_url = devops_url.replace("{region}", str(cfg.get("region") or "cn-cq-1").strip() or "cn-cq-1")
+    if not re.match(r"^https?://", devops_url, re.I):
+        devops_url = "https://" + devops_url
+    repository_url = f"{devops_url}/cloudartifact/project/{urllib.parse.quote(project_id, safe='')}/private/repoView/detail"
+    with tempfile.TemporaryDirectory(prefix="pcids_codearts_web_") as temp_dir:
+        config_path, result_path = Path(temp_dir) / "config.json", Path(temp_dir) / "result.json"
+        config_path.write_text(json.dumps({
+            "domain": str(cfg.get("domain_name") or ""), "username": str(cfg.get("username") or ""),
+            "password": str(cfg.get("password") or ""), "projectId": project_id,
+            "repositoryUrl": repository_url, "repositoryPrefix": f"{devops_url}/cloudartifact/project/{project_id}/",
+            "apiUrl": f"{devops_url}/cloudartifact/v1/files/list", "payload": {"pageNo": 1, "pageSize": 50},
+        }, ensure_ascii=False), encoding="utf-8")
+        node, script, runtime = _codearts_web_runtime_script()
+        child_env = dict(os.environ)
+        child_env["NODE_PATH"] = str(runtime / "node_modules")
+        completed = subprocess.run(
+            [str(node), str(script), str(config_path), str(result_path)],
+            cwd=str(script.parent), env=child_env, capture_output=True, text=True, timeout=1800,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        raw = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
+    if completed.returncode or raw.get("error"):
+        raise RuntimeError(raw.get("error") or completed.stderr[-2000:] or "CodeArts 页面会话同步失败")
+    response = raw.get("response") or {}
+    body = response.get("body") or {}
+    if not response.get("ok"):
+        raise RuntimeError(f"CodeArts 页面会话失效（HTTP {response.get('status')}）：{((body.get('error') or {}).get('message') or '')}")
+    entries = ((body.get("result") or {}).get("data") or [])
+    files, folders = [], []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or (item.get("_list") or {}).get("type") or "").lower()
+        if item_type in {"folder", "directory", "dir"}:
+            folders.append(item)
+            continue
+        detail = dict(item.get("_detail") or item)
+        listing = dict(item.get("_list") or {})
+        name = str(detail.get("name") or listing.get("name") or "artifact.bin").strip()
+        display_path = str(detail.get("repoFilePath") or detail.get("path") or listing.get("repoFilePath") or name).strip()
+        if not display_path.startswith("/"):
+            display_path = "/" + display_path
+        download_uri = str(detail.get("downloadUrlWithId") or detail.get("downloadUrl") or "").strip()
+        detail.update({"download_url": detail.get("downloadUrl"), "download_url_with_id": detail.get("downloadUrlWithId"), "repo_file_path": display_path})
+        files.append({"project_id": project_id, "project_name": str(cfg.get("project_name") or project_id), "remote_repo_id": "web-private",
+            "name": name, "display_path": display_path, "display_size": detail.get("size"), "download_uri": download_uri,
+            "repo_detail": {"name": str(cfg.get("project_name") or project_id), "project_name": str(cfg.get("project_name") or project_id), "repository_mode": "private", "private_source": "web", "web_url": repository_url},
+            "file_detail": detail})
+    # Empty folders are retained as metadata; the common tree builder receives the
+    # same normalized files, while folder paths below are materialized by the sync.
+    return files, _sanitize_codearts_web_diagnostics({
+        "summary": raw.get("summary") or {},
+        "request_records": raw.get("requestRecords") or [],
+        "folders": folders,
+    })
+
+
+def _encrypt_codearts_web_download(*, cfg: dict, download_uri: str, destination_path: str, original_name: str):
+    """Use the browser session for authenticated webpage downloads, then reuse storage encryption."""
+    with tempfile.TemporaryDirectory(prefix="pcids_codearts_web_download_") as temp_dir:
+        raw_path, config_path, result_path = Path(temp_dir) / "download.bin", Path(temp_dir) / "config.json", Path(temp_dir) / "result.json"
+        project_id = str(cfg.get("project_id") or "").strip()
+        base = str(cfg.get("devops_url") or "https://devops.{region}.cqcloud.cwgy.com").strip().rstrip("/")
+        base = base.replace("{region}", str(cfg.get("region") or "cn-cq-1").strip() or "cn-cq-1")
+        config_path.write_text(json.dumps({"domain": cfg.get("domain_name") or "", "username": cfg.get("username") or "", "password": cfg.get("password") or "", "projectId": project_id, "repositoryUrl": f"{base}/cloudartifact/project/{urllib.parse.quote(project_id, safe='')}/private/repoView/detail", "repositoryPrefix": f"{base}/cloudartifact/project/{project_id}/", "payload": {"pageNo": 1, "pageSize": 50}, "downloadUrl": download_uri, "downloadOutputPath": str(raw_path)}, ensure_ascii=False), encoding="utf-8")
+        node, script, runtime = _codearts_web_runtime_script(); env = dict(os.environ); env["NODE_PATH"] = str(runtime / "node_modules")
+        result = subprocess.run([str(node), str(script), str(config_path), str(result_path)], cwd=str(script.parent), env=env, capture_output=True, text=True, timeout=1800, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        report = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
+        if result.returncode or report.get("error") or not raw_path.is_file():
+            raise RuntimeError(report.get("error") or result.stderr[-2000:] or "页面会话下载失败")
+        with raw_path.open("rb") as source:
+            stored = store_encrypted_artifact(source, destination_path, original_name=original_name)
+    return stored, _sanitize_codearts_web_diagnostics(report.get("requestRecords") or [])
 
 
 def _get_project_codearts_sync_config(
@@ -1731,6 +1848,8 @@ def _build_codearts_download_context(
     if repository_mode is not None:
         raw_cfg = {**raw_cfg, "repository_mode": effective_repository_mode}
     cfg = _build_effective_codearts_config(raw_cfg)
+    if _is_codearts_web_private_config(cfg):
+        return cfg, ""
     enabled = bool(cfg.get("enabled"))
     domain_name = str(cfg.get("domain_name") or "").strip()
     username = str(cfg.get("username") or "").strip()
@@ -2638,7 +2757,7 @@ def _list_running_tasks_for_project(db: Session, project_key: str) -> list[dict]
         .join(Repository, Repository.id == BurningTask.repository_id)
         .filter(
             Repository.project_key == project_key,
-            BurningTask.status == 1,
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
         )
         .all()
     )
@@ -3140,6 +3259,9 @@ async def get_codearts_status(
     current_user: User = Depends(get_current_user),
 ):
     try:
+        stored_cfg = _get_project_codearts_config(db, project_key, current_user)
+        if _is_codearts_web_private_config(stored_cfg):
+            return {"code": 0, "message": "success", "data": {"connected": bool(stored_cfg.get("devops_url")), "detail": "页面接口将在手动同步时验证会话"}}
         cfg, token = _build_codearts_download_context(current_user, db, project_key)
         region = str(cfg.get("region") or "").strip()
         base_url = str(cfg.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
@@ -3353,11 +3475,13 @@ async def set_codearts_config(
     existing = _get_project_codearts_config_raw(db, project_key, current_user)
     merged = _merge_codearts_config(existing, payload)
     effective = _build_effective_codearts_config(merged)
+    is_web_private = _is_codearts_web_private_config(effective)
     configured_region = str(effective.get("region") or "").strip()
-    if not configured_region:
+    if not configured_region and not is_web_private:
         raise HTTPException(status_code=400, detail="CodeArts 区域未配置")
-    _validate_codearts_region(configured_region)
-    if _normalize_codearts_repository_mode(effective.get("repository_mode")) == _CODEARTS_REPOSITORY_MODE_PRIVATE:
+    if configured_region and not is_web_private:
+        _validate_codearts_region(configured_region)
+    if _normalize_codearts_repository_mode(effective.get("repository_mode")) == _CODEARTS_REPOSITORY_MODE_PRIVATE and not is_web_private:
         private_repository_url = str(effective.get("private_repository_url") or "").strip()
         private_repo_id = str(effective.get("private_repo_id") or "").strip()
         if not private_repo_id:
@@ -3424,6 +3548,7 @@ async def sync_codearts_project(
     repo_ids = [str(x).strip() for x in (merged.get("repo_ids") or []) if str(x).strip()]
     private_repo_id = str(merged.get("private_repo_id") or "").strip()
     repository_mode = _normalize_codearts_repository_mode(merged.get("repository_mode"))
+    is_web_private = _is_codearts_web_private_config(merged)
     active_repo_ids = [private_repo_id] if repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE and private_repo_id else repo_ids
     private_repository_url = str(merged.get("private_repository_url") or "").strip()
     full_refresh = bool(payload.get("full_refresh"))
@@ -3434,13 +3559,16 @@ async def sync_codearts_project(
         raise HTTPException(status_code=400, detail="IAM认证信息(账号名/用户名/密码)未配置完整")
     if not project_id:
         raise HTTPException(status_code=400, detail="项目ID未配置完整")
-    if repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
+    if repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE and not is_web_private:
         if not private_repo_id:
             raise HTTPException(status_code=400, detail="私有库仓库 ID 未配置完整")
-    _validate_codearts_region(region)
+    if not is_web_private:
+        _validate_codearts_region(region)
 
     try:
-        if repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
+        if is_web_private:
+            token = ""
+        elif repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
             token, token_tenant_id = _get_private_iam_token_context(
                 domain_name,
                 username,
@@ -3476,7 +3604,19 @@ async def sync_codearts_project(
     private_repository_url = private_repository_url.replace("{region}", region)
 
     try:
-        if repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
+        if is_web_private:
+            codearts_files, web_sync_meta = _list_codearts_web_private_files(merged)
+            _log_event(
+                "repository.codearts_web_sync.diagnostics",
+                **_current_user_log_context(current_user),
+                project_key=f"proj_{project_id}",
+                request_count=len(web_sync_meta.get("request_records") or []),
+                summary=web_sync_meta.get("summary") or {},
+            )
+            for web_file in codearts_files:
+                web_file.setdefault("repo_detail", {})["web_sync"] = web_sync_meta
+            project_info = {"project_id": project_id, "repo_name": "web-private", "name": str(merged.get("project_name") or project_id), "repository_mode": "private", "private_source": "web", "web_sync": web_sync_meta}
+        elif repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
             repo_id = private_repo_id
             codearts_files = _list_codearts_private_repository_files(
                 base_url=base_url,
@@ -3692,12 +3832,8 @@ async def sync_codearts_project(
         filename = str(item.get("name") or "artifact.bin").strip() or "artifact.bin"
         remote_repo_id = str(item.get("remote_repo_id") or "").strip() or None
         repo_detail = dict(item.get("repo_detail") or {})
-        file_detail = _enrich_codearts_file_detail(
-            base_url,
-            token,
-            project_id,
-            item,
-            current_user=current_user,
+        file_detail = dict(item.get("file_detail") or {}) if is_web_private else _enrich_codearts_file_detail(
+            base_url, token, project_id, item, current_user=current_user,
         )
         resolved_version = _extract_repository_version(item, file_detail, repo_detail)
         project_stat = project_stats.get(project_id)
@@ -4140,15 +4276,10 @@ async def download_codearts_artifact_to_server(
         stored_artifact = None
         for candidate_uri in download_candidates:
             try:
-                stored_artifact = _encrypt_remote_artifact_to_storage(
-                    download_uri=candidate_uri,
-                    destination_path=file_path,
-                    original_name=filename,
-                    token=download_auth["token"],
-                    username=download_auth["username"],
-                    password=download_auth["password"],
-                    timeout_seconds=300,
-                )
+                if _is_codearts_web_private_config(codearts_cfg):
+                    stored_artifact, _ = _encrypt_codearts_web_download(cfg=codearts_cfg, download_uri=candidate_uri, destination_path=file_path, original_name=filename)
+                else:
+                    stored_artifact = _encrypt_remote_artifact_to_storage(download_uri=candidate_uri, destination_path=file_path, original_name=filename, token=download_auth["token"], username=download_auth["username"], password=download_auth["password"], timeout_seconds=300)
                 download_uri = candidate_uri
                 break
             except Exception as candidate_error:

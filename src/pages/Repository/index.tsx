@@ -47,7 +47,7 @@ import EllipsisText from '../../components/EllipsisText'
 type AnyNode = DataNode & Record<string, any>
 type InstallSource = 'local' | 'server' | 'codearts'
 type DownloadTarget = 'local' | 'server'
-type CodeartsRepositoryMode = 'release' | 'private'
+type CodeartsRepositoryMode = 'release' | 'private' | 'web'
 
 function normalizeServerLocationValue(value?: string | null, serverPath?: string | null) {
   const text = String(value || '').trim()
@@ -457,7 +457,9 @@ const Repository: React.FC = () => {
   }, [filteredTreeData, expandedKeys, selectedKeys, treeLoading])
 
   const isCodeartsConnected = codeartsConnected
-  const repositoryMode: CodeartsRepositoryMode = codeartsCfg?.repository_mode === 'private' ? 'private' : 'release'
+  const repositoryMode: CodeartsRepositoryMode = codeartsCfg?.repository_mode === 'private'
+    ? (codeartsCfg?.private_source === 'web' ? 'web' : 'private')
+    : 'release'
   const configurationMode: CodeartsRepositoryMode = configurationModeOverride || repositoryMode
   const visibleProjectOptions = useMemo(
     () => projectOptions.filter((project) => project.repositoryMode === repositoryMode),
@@ -556,6 +558,7 @@ const Repository: React.FC = () => {
       region: String(values.region || '').trim(),
       project_id: String(values.project_id || '').trim(),
       repo_id_0: String(values.repo_id_0 || '').trim(),
+      devops_url: String(values.devops_url || '').trim(),
     }
     const secretDraft = {
       password: String(values.password || ''),
@@ -578,8 +581,8 @@ const Repository: React.FC = () => {
       ? String(codeartsCfg?.private_repo_id || '')
       : Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 0 ? String(codeartsCfg.repo_ids[0]) : ''
     const inferredRegion = inferRegionFromRepoId(repoId0)
-    const values: any = configurationMode === 'private'
-      ? { ...CODEARTS_PRIVATE_TEST_DEFAULTS, repository_mode: configurationMode }
+    const values: any = configurationMode === 'web'
+      ? { ...CODEARTS_PRIVATE_TEST_DEFAULTS, repository_mode: configurationMode, devops_url: codeartsCfg?.devops_url || '' }
       : {
           repository_mode: configurationMode,
           domain_name: codeartsCfg?.domain_name || '',
@@ -590,8 +593,8 @@ const Repository: React.FC = () => {
           repo_id_0: repoId0,
         }
     const draftValues = loadCodeartsFormDraft()
-    const mergedValues = configurationMode === 'private'
-      ? values
+    const mergedValues = configurationMode === 'web'
+      ? { ...values, ...draftValues, repository_mode: configurationMode }
       : {
           ...values,
           ...draftValues,
@@ -848,7 +851,7 @@ const Repository: React.FC = () => {
   }
 
   const handleRepositoryModeChange = async (value: string | number) => {
-    const nextMode: CodeartsRepositoryMode = value === 'private' ? 'private' : 'release'
+    const nextMode: CodeartsRepositoryMode = value === 'web' ? 'web' : (value === 'private' ? 'private' : 'release')
     if (nextMode === repositoryMode) return
     const targetProject = projectOptions.find((project) => project.repositoryMode === nextMode)
     if (!targetProject) {
@@ -1139,20 +1142,21 @@ const Repository: React.FC = () => {
           const inferredRegion = inferRegionFromRepoId(repoIds[0])
           const payload: any = {
             enabled: true,
-            repository_mode: configurationMode,
+            repository_mode: configurationMode === 'web' ? 'private' : configurationMode,
             domain_name: String(values.domain_name || '').trim(),
             username: String(values.username || '').trim(),
             password: String(values.password || '').trim() || undefined, // undefined if empty to avoid overriding with empty string
             region: String(values.region || inferredRegion || '').trim(),
             project_id: String(values.project_id || '').trim(),
-            ...(configurationMode === 'private' ? { private_repo_id: repoIds[0] || '' } : { repo_ids: repoIds }),
+            ...(configurationMode === 'web'
+              ? { private_source: 'web', devops_url: String(values.devops_url || '').trim() }
+              : configurationMode === 'private' ? { private_repo_id: repoIds[0] || '' } : { repo_ids: repoIds }),
           }
           persistCodeartsFormDraft(values)
           await repositoryApi.setCodeartsConfig(payload)
-          const res: any = await repositoryApi.syncCodeartsProject({
-            project_id: payload.project_id,
-            full_refresh: true,
-          })
+          // Configuration never starts a browser/session sync.  The explicit toolbar
+          // action is the only path that may synchronize a CodeArts page repository.
+          const res: any = { code: 0, data: { synced_count: 0, skipped_count: 0 } }
           if (res?.code === 0) {
             const syncedCount = Number(res?.data?.synced_count || 0)
             const skippedCount = Number(res?.data?.skipped_count || 0)
@@ -1242,6 +1246,11 @@ const Repository: React.FC = () => {
       {configurationMode === 'private' ? (
         <RepoFormField label="仓库ID" name="repo_id_0" form={createProjectForm} rules={[{ required: true, message: '请输入仓库ID' }]}>
           <Input name="repo_id_0" autoComplete="off" placeholder="请输入仓库ID" />
+        </RepoFormField>
+      ) : null}
+      {false && configurationMode === 'web' ? (
+        <RepoFormField label="DevOps 域名" name="devops_url" form={createProjectForm} rules={[{ required: true, message: '请输入 DevOps 域名' }]}>
+          <Input name="devops_url" autoComplete="url" placeholder="例如：https://codearts.example.com" />
         </RepoFormField>
       ) : null}
     </Form>
@@ -1769,6 +1778,7 @@ const Repository: React.FC = () => {
             options={[
               { label: '发布库', value: 'release' },
               { label: '私有库', value: 'private' },
+              { label: 'Web 页面库', value: 'web' },
             ]}
           />
           <Permission code="repository:sync">

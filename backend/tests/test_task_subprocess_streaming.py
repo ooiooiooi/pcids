@@ -76,6 +76,29 @@ class TaskSubprocessStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("batch-out", stdout)
         self.assertIn("batch-err", stderr)
 
+    async def test_non_zero_script_uses_last_stderr_line_as_failure_reason(self):
+        success, _log_text, failure_reason = await _execute_script_content_locally(
+            "import sys\nprint('device permission denied', file=sys.stderr)\nsys.exit(7)\n",
+            "python",
+            {},
+            10,
+            "permission-error.py",
+        )
+
+        self.assertFalse(success)
+        self.assertIn("device permission denied", failure_reason)
+        self.assertIn("退出码 7", failure_reason)
+
+    async def test_missing_executable_reports_tool_and_configuration_hint(self):
+        ok, _stdout, _stderr, reason = await _run_subprocess_command(
+            ["pcids-command-that-does-not-exist"],
+            timeout_seconds=1,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("pcids-command-that-does-not-exist", reason)
+        self.assertIn("工具路径配置", reason)
+
     def test_exception_log_keeps_existing_output_and_traceback(self):
         try:
             raise ValueError("boom")

@@ -14,7 +14,7 @@ import re
 from backend.utils.db import get_db
 from backend.models.permission import Menu
 from backend.models.user import User
-from backend.models.task import BurningTask
+from backend.models.task import BurningTask, TaskStatus
 from backend.models.repository import Repository
 from backend.models.burner import Burner
 from backend.models.message import Message
@@ -318,7 +318,10 @@ async def get_dashboard_stats(
     occupied_burner_ids = {
         burner_id
         for (burner_id,) in db.query(BurningTask.burner_id)
-        .filter(BurningTask.status == 1, BurningTask.burner_id.isnot(None))
+        .filter(
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
+            BurningTask.burner_id.isnot(None),
+        )
         .all()
         if burner_id is not None
     }

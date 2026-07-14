@@ -3,6 +3,7 @@ import unittest
 from backend.utils.burner_automation import (
     SYSTEM_SCRIPT_BINDINGS,
     SYSTEM_SCRIPT_CATALOG,
+    _stream_command_helper_source,
     _xds510plus_usb_preflight_source,
     build_system_script_content,
 )
@@ -27,7 +28,11 @@ class SystemScriptParameterContractTests(unittest.TestCase):
                 self.assertIn("WRITE_SPEED_KHZ", content)
                 self.assertIn("ERASE_MODE", content)
                 self.assertIn("COMPLETION_ACTION", content)
-                self.assertTrue("exit /b !ERRORLEVEL!" in content or "exit /b !PCIDS_STREAM_EXIT!" in content)
+                self.assertTrue(
+                    "exit /b !ERRORLEVEL!" in content
+                    or "exit /b !PCIDS_STREAM_EXIT!" in content
+                    or "exit /b !GOWIN_EXIT!" in content
+                )
 
     def test_vendor_templates_use_streaming_helper(self):
         for script_name, burner_name in [
@@ -44,6 +49,29 @@ class SystemScriptParameterContractTests(unittest.TestCase):
                 self.assertIn("PCIDS_STREAM_TIMEOUT_SECONDS", content)
                 self.assertIn('powershell -NoProfile -ExecutionPolicy Bypass -File "%PCIDS_STREAM_HELPER%"', content)
                 self.assertNotIn('cmd /d /s /c "!PCIDS_CMD!"', content)
+
+    def test_gowin_script_passes_real_programmer_cli_arguments(self):
+        content = build_system_script_content("gowin_usb_cable_fpga_flash", "Gowin USB Cable")
+        self.assertIn('"%GOWIN_PROGRAMMER_CLI%" --scan --cable-index !GOWIN_CABLE_INDEX!', content)
+        self.assertIn('for /F "tokens=2" %%A in (\'findstr /C:"Name:" "!GOWIN_SCAN_LOG!"\')', content)
+        self.assertIn('--device "!GOWIN_DEVICE!"', content)
+        self.assertIn('--operation_index !GOWIN_OPERATION!', content)
+        self.assertIn('--fsFile "%FIRMWARE_PATH%"', content)
+        self.assertIn('--cable "Gowin USB Cable(FT2CH)"', content)
+        self.assertIn('--cable-index !GOWIN_CABLE_INDEX!', content)
+        self.assertIn('if "%GOWIN_CABLE_INDEX%"=="" set "GOWIN_CABLE_INDEX=1"', content)
+        self.assertIn('--frequency "!GOWIN_FREQUENCY!"', content)
+        self.assertIn('if /I "%EXECUTION_OPERATION%"=="Flash固化" set "GOWIN_OPERATION=8"', content)
+        direct_gowin_section = content.split("rem Gowin cable name contains parentheses.", 1)[1]
+        self.assertNotIn('set "PCIDS_STREAM_CMD=!PCIDS_CMD!"', direct_gowin_section)
+        self.assertIn('if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"', content)
+        self.assertIn('findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!" >nul', content)
+        self.assertIn('set "GOWIN_OPERATION=6"', content)
+
+    def test_stream_helper_is_written_as_utf8_with_bom_for_windows_powershell(self):
+        content = build_system_script_content("gowin_usb_cable_fpga_flash", "Gowin USB Cable")
+        self.assertIn("77u/", content)
+        self.assertIn("ReadToEndAsync", _stream_command_helper_source())
 
     def test_xds510plus_runs_usb_driver_preflight_before_vendor_command(self):
         content = build_system_script_content("xds510plus_dsp_flash", "XDS510plus")

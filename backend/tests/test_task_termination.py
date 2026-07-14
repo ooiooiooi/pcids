@@ -8,10 +8,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.models import Base, OperationLog, Record, User
+from backend.models import Base, Burner, OperationLog, Record, User
 from backend.models.task import BurningTask, TaskStatus
 from backend.routers.auth import get_current_user
-from backend.routers.tasks import recover_interrupted_tasks, router as tasks_router
+from backend.routers.tasks import (
+    _finalize_task_after_unhandled_exception,
+    _get_burner_runtime_issue,
+    recover_interrupted_tasks,
+    router as tasks_router,
+)
 from backend.utils.db import get_db
 
 
@@ -44,7 +49,7 @@ class TaskTerminationTests(unittest.TestCase):
         self.db.add(self.user)
         self.db.commit()
         self.db.refresh(self.user)
-        self.permissions: set[str] = {"burning:terminate"}
+        self.permissions: set[str] = {"burning:add", "burning:delete", "burning:terminate"}
 
         app = FastAPI()
         app.include_router(tasks_router, prefix="/tasks")
@@ -150,6 +155,47 @@ class TaskTerminationTests(unittest.TestCase):
         self.assertEqual(records[0].result, "终止")
         log_data = json.loads(records[0].log_data or "{}")
         self.assertEqual(log_data.get("execution_result"), "终止")
+
+    def test_terminating_task_keeps_burner_occupied(self):
+        burner = Burner(name="test-burner", type="ST-LINK", is_enabled=1, status=0)
+        self.db.add(burner)
+        self.db.commit()
+        task = self._create_task(TaskStatus.TERMINATING)
+        task.burner_id = burner.id
+        self.db.commit()
+
+        issue = _get_burner_runtime_issue(self.db, burner, current_task_id=99999)
+
+        self.assertIsNotNone(issue)
+        self.assertIn("正在被其他任务占用", issue or "")
+
+    def test_active_task_cannot_be_deleted(self):
+        for status in (TaskStatus.RUNNING, TaskStatus.TERMINATING):
+            task = self._create_task(status)
+            response = self.client.delete(f"/tasks/{task.id}")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("不能删除", response.json()["detail"])
+
+    def test_task_status_cannot_be_changed_through_generic_update(self):
+        task = self._create_task(TaskStatus.PENDING)
+
+        response = self.client.put(f"/tasks/{task.id}", json={"status": int(TaskStatus.SUCCESS)})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("不能手动修改", response.json()["detail"])
+        refreshed = self.SessionLocal().query(BurningTask).filter(BurningTask.id == task.id).first()
+        self.assertEqual(refreshed.status, int(TaskStatus.PENDING))
+
+    def test_unhandled_exception_is_finalized_as_failed(self):
+        task = self._create_task(TaskStatus.RUNNING)
+        task.result = "正在执行"
+
+        _finalize_task_after_unhandled_exception(task, RuntimeError("unexpected failure"))
+
+        self.assertEqual(task.status, int(TaskStatus.FAILED))
+        self.assertIsNotNone(task.finished_at)
+        self.assertIn("unexpected failure", task.last_error or "")
+        self.assertIn("未处理异常", task.result or "")
 
 
 if __name__ == "__main__":

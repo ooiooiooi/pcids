@@ -369,6 +369,9 @@ function startPythonBackend(port: number) {
     PCIDS_PUBLIC_BASE_URL: backendBaseUrl,
     PCIDS_ALLOWED_ORIGINS: 'http://127.0.0.1:5173,http://localhost:5173,null',
     PCIDS_BUNDLED_TOOLS_DIR: resolveBundledToolsDir(),
+    PCIDS_CODEARTS_WEB_RUNTIME: app.isPackaged
+      ? path.join(process.resourcesPath, 'tools', 'codearts_browser_runtime')
+      : path.join(__dirname, '../../tools/codearts_release_debugger/browser_runtime'),
     PCIDS_NODE_BIN: process.execPath,
     PCIDS_RUNTIME_ROOT: runtimeRoot,
     PCIDS_LOG_DIR: path.join(runtimeRoot, 'logs'),

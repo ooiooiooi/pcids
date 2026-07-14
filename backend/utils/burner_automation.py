@@ -658,32 +658,11 @@ def _stream_command_helper_source() -> str:
 
         $proc = New-Object System.Diagnostics.Process
         $proc.StartInfo = $psi
-        $proc.EnableRaisingEvents = $true
-
-        $stdoutDone = New-Object System.Threading.ManualResetEvent($false)
-        $stderrDone = New-Object System.Threading.ManualResetEvent($false)
-        $stdoutEvent = $null
-        $stderrEvent = $null
 
         try {
-            $stdoutEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -MessageData $stdoutDone -Action {
-                if ($EventArgs.Data -ne $null) {
-                    [Console]::Out.WriteLine([string]$EventArgs.Data)
-                } else {
-                    $Event.MessageData.Set() | Out-Null
-                }
-            }
-            $stderrEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -MessageData $stderrDone -Action {
-                if ($EventArgs.Data -ne $null) {
-                    [Console]::Error.WriteLine([string]$EventArgs.Data)
-                } else {
-                    $Event.MessageData.Set() | Out-Null
-                }
-            }
-
             $null = $proc.Start()
-            $proc.BeginOutputReadLine()
-            $proc.BeginErrorReadLine()
+            $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+            $stderrTask = $proc.StandardError.ReadToEndAsync()
 
             $timedOut = $false
             if ($timeoutSeconds -gt 0) {
@@ -703,26 +682,18 @@ def _stream_command_helper_source() -> str:
             }
 
             $proc.WaitForExit()
-            $stdoutDone.WaitOne(2000) | Out-Null
-            $stderrDone.WaitOne(2000) | Out-Null
+            $stdout = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+                [Console]::Out.Write($stdout)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+                [Console]::Error.Write($stderr)
+            }
             exit $proc.ExitCode
         } finally {
-            if ($stdoutEvent) {
-                Unregister-Event -SourceIdentifier $stdoutEvent.SourceIdentifier -ErrorAction SilentlyContinue
-                Remove-Job -Id $stdoutEvent.Id -Force -ErrorAction SilentlyContinue
-            }
-            if ($stderrEvent) {
-                Unregister-Event -SourceIdentifier $stderrEvent.SourceIdentifier -ErrorAction SilentlyContinue
-                Remove-Job -Id $stderrEvent.Id -Force -ErrorAction SilentlyContinue
-            }
             if ($proc) {
                 $proc.Dispose()
-            }
-            if ($stdoutDone) {
-                $stdoutDone.Dispose()
-            }
-            if ($stderrDone) {
-                $stderrDone.Dispose()
             }
         }
         """
@@ -730,7 +701,10 @@ def _stream_command_helper_source() -> str:
 
 
 def _stream_command_helper_setup() -> str:
-    helper_base64 = base64.b64encode(_stream_command_helper_source().encode("utf-8")).decode("ascii")
+    # Windows PowerShell 5.1 reads script files using the active ANSI code page
+    # when no BOM is present.  The helper includes Chinese diagnostics, so emit a
+    # UTF-8 BOM to keep it valid on every supported Windows locale.
+    helper_base64 = base64.b64encode(_stream_command_helper_source().encode("utf-8-sig")).decode("ascii")
     return dedent(
         f"""\
         set "PCIDS_STREAM_HELPER=%TEMP%\\pcids_stream_cmd_%TASK_ID%.ps1"
@@ -2342,11 +2316,72 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
     if script_name == "gowin_usb_cable_fpga_flash":
         return header + _template_runner("GOWIN_CMD_TEMPLATE", "GOWIN_PROGRAMMER_CLI", "请安装 Gowin Programmer 并配置 GOWIN_PROGRAMMER_CLI 或 GOWIN_CMD_TEMPLATE。") + dedent(
             r"""
-            set "PCIDS_CMD="%GOWIN_PROGRAMMER_CLI%" "%FIRMWARE_PATH%""
-            """
-        ) + _stream_command_helper_setup() + _stream_command_runner() + dedent(
-            r"""
-            exit /b !PCIDS_STREAM_EXIT!
+            if "%TARGET_CHIP%"=="" (
+              echo [ERROR] Gowin 烧录必须配置 TARGET_CHIP，例如 GW1N-4。
+              exit /b 2
+            )
+            if /I not "%INTERFACE_TYPE%"=="JTAG" (
+              echo [ERROR] 当前 Gowin 脚本仅支持 JTAG 接口。
+              exit /b 2
+            )
+            set "GOWIN_OPERATION=2"
+            if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"
+            if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=4"
+            if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=4"
+            if /I "%EXECUTION_OPERATION%"=="Flash固化" set "GOWIN_OPERATION=8"
+            if /I "%EXECUTION_OPERATION%"=="flash" set "GOWIN_OPERATION=8"
+            if /I "%EXECUTION_OPERATION%"=="Flash固化" if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=9"
+            if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=9"
+            if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=9"
+            set "GOWIN_CABLE_INDEX=%CABLE_INDEX%"
+            rem programmer_cli index 1 is Gowin USB Cable(FT2CH); 0 is GWU2X.
+            if "%GOWIN_CABLE_INDEX%"=="" set "GOWIN_CABLE_INDEX=1"
+            set "GOWIN_FREQUENCY=%TCK_FREQUENCY%"
+            if "%GOWIN_FREQUENCY%"=="" set "GOWIN_FREQUENCY=1MHz"
+            rem The physical package name in TARGET_CHIP is a board property, while
+            rem programmer_cli requires a family alias.  Resolve that alias from the
+            rem connected JTAG device instead of changing the board configuration.
+            set "GOWIN_SCAN_LOG=%TEMP%\pcids_gowin_scan_%TASK_ID%.log"
+            "%GOWIN_PROGRAMMER_CLI%" --scan --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!" >"!GOWIN_SCAN_LOG!" 2>&1
+            set "GOWIN_SCAN_EXIT=!ERRORLEVEL!"
+            type "!GOWIN_SCAN_LOG!"
+            if not "!GOWIN_SCAN_EXIT!"=="0" (
+              del /f /q "!GOWIN_SCAN_LOG!" >nul 2>nul
+              echo [ERROR] Gowin JTAG 扫描失败，无法确定目标器件。
+              exit /b !GOWIN_SCAN_EXIT!
+            )
+            set "GOWIN_DEVICE="
+            for /F "tokens=2" %%A in ('findstr /C:"Name:" "!GOWIN_SCAN_LOG!"') do if "!GOWIN_DEVICE!"=="" set "GOWIN_DEVICE=%%A"
+            del /f /q "!GOWIN_SCAN_LOG!" >nul 2>nul
+            if "!GOWIN_DEVICE!"=="" (
+              echo [ERROR] Gowin JTAG 扫描未返回可用器件型号。
+              exit /b 2
+            )
+            rem GW1N-4D is an embedded-Flash part.  Its Flash persistence path is
+            rem embFlash (5/6), not an external SPI exFlash (8/9).
+            if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "!GOWIN_DEVICE:~-1!"=="D" (
+              set "GOWIN_OPERATION=5"
+              if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=6"
+              if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=6"
+              if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=6"
+              echo [INFO] Gowin embedded Flash selected for !GOWIN_DEVICE!.
+            )
+            echo [INFO] Gowin operation=!GOWIN_OPERATION! target=!GOWIN_DEVICE! cable=FT2CH/!GOWIN_CABLE_INDEX! frequency=!GOWIN_FREQUENCY!
+            if /I "%EXECUTION_OPERATION%"=="Flash固化" (
+              echo [WARN] Flash固化将写入外接配置 Flash；请确认板卡硬件已接入对应 Flash。
+            )
+            rem Gowin cable name contains parentheses.  Invoke the vendor CLI directly
+            rem so cmd.exe does not reinterpret it while forwarding a command string.
+            echo [EXEC] "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index !GOWIN_OPERATION! --fsFile "%FIRMWARE_PATH%" --cable "Gowin USB Cable(FT2CH)" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!"
+            set "GOWIN_RUN_LOG=%TEMP%\pcids_gowin_run_%TASK_ID%.log"
+            "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index !GOWIN_OPERATION! --fsFile "%FIRMWARE_PATH%" --cable "Gowin USB Cable(FT2CH)" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!" >"!GOWIN_RUN_LOG!" 2>&1
+            set "GOWIN_EXIT=!ERRORLEVEL!"
+            type "!GOWIN_RUN_LOG!"
+            rem Some Programmer versions print an error but return exit code 0.
+            findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!" >nul
+            if not errorlevel 1 set "GOWIN_EXIT=64"
+            del /f /q "!GOWIN_RUN_LOG!" >nul 2>nul
+            exit /b !GOWIN_EXIT!
             """
         )
     if script_name == "sd_card_zynq7000_boot_update":

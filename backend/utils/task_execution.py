@@ -13,7 +13,7 @@ from backend.models.burner import Burner
 from backend.models.repository import Repository
 from backend.models.script import Script
 from backend.models.task import BurningTask
-from backend.utils.runtime_dependencies import configure_bundled_tools
+from backend.utils.runtime_dependencies import configure_bundled_tools, refresh_bundled_tools
 from backend.utils.text_normalization import normalize_text_payload
 
 
@@ -582,7 +582,8 @@ def build_execution_plan(
         artifact_name=used_file_path,
     )
     runtime_env = build_runtime_env(task, normalized_config, repo, burner, script, used_file_path)
-    runtime_env.update(configure_bundled_tools())
+    # 工具包可在服务启动后迁入项目目录；任务执行前必须重新发现一次。
+    runtime_env.update(refresh_bundled_tools())
     task_type = get_task_type(task, normalized_config)
     transport = determine_execution_transport(task_type, burner, normalized_config)
     return ExecutionPlan(

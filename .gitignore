@@ -102,3 +102,10 @@ frontend_source*.docx
 release-win7-private/
 tools/*
 !tools/build-backend.mjs
+!tools/burners/
+tools/burners/*
+!tools/burners/AL321/
+tools/burners/AL321/*
+!tools/burners/AL321/drivers/
+tools/burners/AL321/drivers/*
+!tools/burners/AL321/drivers/switch-al321-driver.ps1
