@@ -2357,6 +2357,21 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               echo [ERROR] Gowin JTAG 扫描未返回可用器件型号。
               exit /b 2
             )
+            rem GW1N-4D SRAM verification requires the IEEE 1149 variant.
+            rem operation 4 reports a false mismatch at address 0 on this device;
+            rem operation 17 has been validated against the same bitstream.
+            if /I "%EXECUTION_OPERATION%"=="SRAM下载" if /I "!GOWIN_DEVICE:~-1!"=="D" if "%WRITE_VERIFY%"=="1" (
+              set "GOWIN_OPERATION=17"
+              echo [INFO] Gowin SRAM JTAG 1149 verification selected for !GOWIN_DEVICE!.
+            )
+            if /I "%EXECUTION_OPERATION%"=="SRAM下载" if /I "!GOWIN_DEVICE:~-1!"=="D" if /I "%WRITE_VERIFY%"=="yes" (
+              set "GOWIN_OPERATION=17"
+              echo [INFO] Gowin SRAM JTAG 1149 verification selected for !GOWIN_DEVICE!.
+            )
+            if /I "%EXECUTION_OPERATION%"=="SRAM下载" if /I "!GOWIN_DEVICE:~-1!"=="D" if /I "%WRITE_VERIFY%"=="true" (
+              set "GOWIN_OPERATION=17"
+              echo [INFO] Gowin SRAM JTAG 1149 verification selected for !GOWIN_DEVICE!.
+            )
             rem GW1N-4D is an embedded-Flash part.  Its Flash persistence path is
             rem embFlash (5/6), not an external SPI exFlash (8/9).
             if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "!GOWIN_DEVICE:~-1!"=="D" (

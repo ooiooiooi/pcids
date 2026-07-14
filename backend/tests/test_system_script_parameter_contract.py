@@ -67,6 +67,7 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertIn('if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"', content)
         self.assertIn('findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!" >nul', content)
         self.assertIn('set "GOWIN_OPERATION=6"', content)
+        self.assertIn('set "GOWIN_OPERATION=17"', content)
 
     def test_stream_helper_is_written_as_utf8_with_bom_for_windows_powershell(self):
         content = build_system_script_content("gowin_usb_cable_fpga_flash", "Gowin USB Cable")
