@@ -57,6 +57,7 @@ logs/
 .env.local
 .env.production
 backend/config/agent.json
+config/codearts_flash_profiles.json
 
 # Node
 node_modules/
