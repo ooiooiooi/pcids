@@ -396,7 +396,6 @@ def _batch_header(script_name: str, burner_name: str) -> str:
         f"""\
         @echo off
         setlocal EnableExtensions EnableDelayedExpansion
-        chcp 65001 >nul
         set "SCRIPT_NAME={script_name}"
         set "BURNER_NAME={burner_name}"
         echo [INFO] PCIDS burner script started: %SCRIPT_NAME%

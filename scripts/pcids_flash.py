@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import subprocess
 import sys
@@ -26,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG, build_system_script_content
 from backend.utils.app_paths import get_app_data_root
+from backend.utils.runtime_dependencies import configure_bundled_tools
 from backend.utils.task_execution import build_runtime_env, validate_script_execution_config
 
 
@@ -35,6 +37,47 @@ EXIT_EXECUTION_FAILED = 10
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _console_json(payload: dict[str, Any]) -> None:
+    """Write one JSON event without trusting the Windows console code page.
+
+    CodeArts launches the adapter through Git Bash -> cmd.exe -> the frozen
+    backend.  In that chain stdout may still report GBK even after a generated
+    burner batch switches its own code page to UTF-8.  Keep readable Unicode
+    when the active stream can encode it; otherwise emit ASCII JSON escapes.
+    Both forms describe exactly the same payload and remain valid JSON Lines.
+    """
+    readable = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        readable.encode(encoding, errors="strict")
+        encoded = readable
+    except (LookupError, UnicodeEncodeError):
+        encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    print(encoded, flush=True)
+
+
+def _decode_tool_output(raw: bytes) -> str:
+    """Decode output from Windows burner tools that may mix UTF-8 and GBK."""
+    preferred = locale.getpreferredencoding(False)
+    encodings = ("utf-8-sig", "gb18030", preferred)
+    tried: set[str] = set()
+    for encoding in encodings:
+        normalized = str(encoding or "").strip().lower()
+        if not normalized or normalized in tried:
+            continue
+        tried.add(normalized)
+        try:
+            return raw.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="backslashreplace")
+
+
+def _batch_command(script_path: Path) -> list[str]:
+    """Build a cmd.exe invocation without embedding quotes in one argv item."""
+    return ["cmd.exe", "/d", "/s", "/c", "call", str(script_path)]
 
 
 class EventLogger:
@@ -54,7 +97,7 @@ class EventLogger:
             **{key: value for key, value in details.items() if value not in (None, "")},
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        print(encoded, flush=True)
+        _console_json(payload)
         with self.jsonl_path.open("a", encoding="utf-8") as handle:
             handle.write(encoded + "\n")
         with self.text_path.open("a", encoding="utf-8") as handle:
@@ -76,6 +119,22 @@ _BURNER_ALIASES = {
     "PWLINKV2": "PWLINK2",
     "STLINKV2": "STLINK",
     "STLINKV3": "STLINK",
+}
+
+# CodeArts runs through several Windows console layers.  Keep the adapter's
+# common runtime values ASCII; every existing system script already accepts
+# these canonical spellings alongside the UI's Chinese labels.
+_CODEARTS_RUNTIME_ENV_ALIASES = {
+    "ERASE_MODE": {
+        "全片擦除": "chip",
+        "扇区擦除": "sector",
+        "不擦除": "none",
+    },
+    "COMPLETION_ACTION": {
+        "复位运行": "reset-run",
+        "仅复位": "reset",
+        "不处理": "none",
+    },
 }
 
 
@@ -132,6 +191,10 @@ def _resolve_request(args: argparse.Namespace, overrides: dict[str, Any]) -> tup
 
 
 def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run_id: str) -> dict[str, str]:
+    # The CodeArts entrypoint starts the frozen backend in one-shot script mode,
+    # so it must discover packaged/vendor tools itself instead of relying on the
+    # long-running API service startup path.
+    tool_env = configure_bundled_tools()
     script = SimpleNamespace(
         id=0,
         name=item["name"],
@@ -161,6 +224,11 @@ def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run
         task_type=item.get("task_type", "board"),
     )
     env = build_runtime_env(task, normalized, None, burner, script, str(firmware))
+    env.update(tool_env)
+    for field, aliases in _CODEARTS_RUNTIME_ENV_ALIASES.items():
+        value = str(env.get(field) or "").strip()
+        if value in aliases:
+            env[field] = aliases[value]
     env["PCIDS_RUN_ID"] = run_id
     env["PCIDS_SCRIPT"] = item["name"]
     return env
@@ -169,12 +237,12 @@ def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run
 def _run(args: argparse.Namespace) -> int:
     firmware = Path(args.firmware).expanduser().resolve(strict=False)
     if not firmware.is_file():
-        print(json.dumps({"event": "failed", "status": "error", "code": "FIRMWARE_NOT_FOUND", "message": f"firmware not found: {firmware}"}, ensure_ascii=False))
+        _console_json({"event": "failed", "status": "error", "code": "FIRMWARE_NOT_FOUND", "message": f"firmware not found: {firmware}"})
         return EXIT_INVALID_REQUEST
 
     run_id = str(args.run_id or uuid.uuid4().hex).strip()
     if not run_id.replace("-", "").replace("_", "").isalnum():
-        print(json.dumps({"event": "failed", "status": "error", "code": "INVALID_RUN_ID", "message": "run-id allows only letters, numbers, hyphen and underscore"}, ensure_ascii=False))
+        _console_json({"event": "failed", "status": "error", "code": "INVALID_RUN_ID", "message": "run-id allows only letters, numbers, hyphen and underscore"})
         return EXIT_INVALID_REQUEST
     logger = EventLogger(Path(args.log_dir or (get_app_data_root() / "logs" / "codearts")).expanduser(), run_id)
     try:
@@ -223,23 +291,24 @@ def _run(args: argparse.Namespace) -> int:
 
     with tempfile.TemporaryDirectory(prefix="pcids-codearts-") as temp_dir:
         script_path = Path(temp_dir) / f"{item['name']}.bat"
-        script_path.write_text(script_content, encoding="utf-8-sig", newline="\r\n")
+        # cmd.exe parses batch source using the active Windows ANSI code page
+        # before it can execute a later ``chcp`` command.  GB18030 is compatible
+        # with the common Chinese Windows code page and, unlike UTF-8 BOM, does
+        # not turn ``@echo off`` into an unknown command.
+        script_path.write_text(script_content, encoding="gb18030", newline="\r\n")
         process_env = os.environ.copy()
         process_env.update({key: str(value) for key, value in env.items()})
         logger.emit("script-start", workflow=item["name"], script=str(script_path), burner=env.get("BURNER_NAME"))
         process = subprocess.Popen(
-            ["cmd.exe", "/d", "/s", "/c", f'call "{script_path}"'],
+            _batch_command(script_path),
             cwd=str(PROJECT_ROOT),
             env=process_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
         )
         assert process.stdout is not None
         for line in process.stdout:
-            text = line.rstrip()
+            text = _decode_tool_output(line).rstrip("\r\n")
             if text:
                 logger.emit("tool-output", message=text)
         return_code = process.wait()
@@ -254,16 +323,13 @@ def _run(args: argparse.Namespace) -> int:
 def _list_burners() -> int:
     """Expose the generic selector contract."""
     for item in SYSTEM_SCRIPT_CATALOG:
-        print(
-            json.dumps(
-                {
-                    "burner": item.get("burner"),
-                    "script": item["name"],
-                    "task_type": item.get("task_type", "board"),
-                    "type": item.get("type"),
-                },
-                ensure_ascii=False,
-            )
+        _console_json(
+            {
+                "burner": item.get("burner"),
+                "script": item["name"],
+                "task_type": item.get("task_type", "board"),
+                "type": item.get("type"),
+            }
         )
     return 0
 

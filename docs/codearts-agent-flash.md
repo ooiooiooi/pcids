@@ -6,30 +6,51 @@
 
 每次烧录由流水线传入当前任务参数，不需要预先创建“产品 profile”或为每块板复制脚本：
 
-| 参数 | 含义 |
-| --- | --- |
-| `--burner` | 烧录器类型，如 `ST-LINK`、`PW-LINK`、`XDS510plus`、`MPLAB ICD 3 DV164035` |
-| `--script` | 同一烧录器有多个工作流时才需要。例如 Altera Blaster II 必须选择 FPGA 或 CPLD 工作流。 |
-| `--target-chip` | 本次板卡使用的芯片型号。 |
-| `--board` | 可选板卡型号或资产编号，用于日志追溯。 |
-| `--burner-sn` | 可选烧录器序列号；一台 Agent 接多支烧录器时应传入。 |
-| `--config-json` | 该类烧录器的其余参数，例如接口、地址、擦除策略、TCK 频率。 |
-| `--firmware` | 已由 CodeArts Artifact 下载到 Agent 工作目录的固件文件。 |
+| 参数              | 含义                                                              |
+| --------------- | --------------------------------------------------------------- |
+| `--burner`      | 烧录器类型，如 `ST-LINK`、`PW-LINK`、`XDS510plus`、`MPLAB ICD 3 DV164035` |
+| `--script`      | 同一烧录器有多个工作流时才需要。例如 Altera Blaster II 必须选择 FPGA 或 CPLD 工作流。      |
+| `--target-chip` | 本次板卡使用的芯片型号。                                                    |
+| `--board`       | 可选板卡型号或资产编号，用于日志追溯。                                             |
+| `--burner-sn`   | 可选烧录器序列号；一台 Agent 接多支烧录器时应传入。                                   |
+| `--config-json` | 该类烧录器的其余参数，例如接口、地址、擦除策略、TCK 频率。                                 |
+| `--firmware`    | 已由 CodeArts Artifact 下载到 Agent 工作目录的固件文件。                       |
 
 使用以下命令查看当前 PCIDS 支持的烧录器和工作流：
 
 ```powershell
-& 'C:\Program Files\PCIDS\resources\flash-adapter\pcids-flash.cmd' list-burners
+& $env:PCIDS_FLASH_ADAPTER list-burners
 ```
 
 ## CodeArts Build Shell
 
+安装包会把实际安装位置写入机器环境变量 `PCIDS_FLASH_ADAPTER`。因此流水线不得拼接 `Program Files` 路径，而应直接调用该变量；无论安装时选择哪个目录，命令均不需要修改。安装或升级 PCIDS 后，必须重启 CodeArts Agent 服务，使服务进程读取新的环境变量。
+
+烧录器工具不随 CodeArts 入口打包。请按原有 PCIDS 工具目录结构手动放入 `<PCIDS安装目录>\resources\tools\burners\` 下，例如 PW-LINK 使用 `SWD_Downloader\pyocd-runtime`；入口会把该目录传给匹配到的内部脚本。不同烧录器仍由各自的既有内部脚本选择并调用对应工具。
+
 前一步使用 CodeArts 原生“下载发布仓库包”下载 Artifact。该步骤负责华为云鉴权；不要用无凭证的 `Invoke-WebRequest` 下载制品地址。
 
-以下示例是同一个入口，固件路径由 Build 工作目录提供。流水线参数替换为实际值即可：
+### 最终执行步骤：PW-LINK ARM 烧录
+
+前置步骤“下载发布仓库包”已把固件放入工作目录后，只需配置下面这一条 Build 的“执行 shell 命令”。当前 CodeArts Build 会以 Git Bash 执行该字段（日志文件名为 `script.sh`），即使 Agent 运行在 Windows 上也是如此。
+
+当前 POC 将以下**整行**直接复制到“命令”字段。芯片、板卡、PW-LINK 序列号和制品文件名均已填写，无需另建流水线参数，也无需自行添加 `@echo off`、`setlocal` 或 `exit /b`：
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing. Install the PCIDS package that provides the flash adapter, then restart the CodeArts Agent service."; exit 2; }; cmd.exe //d //s //c call "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+```
+
+该命令会先校验 `PCIDS_FLASH_ADAPTER`；变量缺失时直接以退出码 `2` 失败，避免出现“未调用 PCIDS 却显示构建成功”的假成功。Git Bash 下必须使用 `cmd.exe //d //s //c call`：双斜杠可防止 `/c` 被 Git Bash 转换成路径，`call` 可正确执行安装目录中带空格的 `.cmd` 文件并把退出码返回给 Build。随后采用 PCIDS 的 PW-LINK 默认接口、擦除、校验和复位策略。Build 返回 `0` 即烧录成功；非 `0` 时构建失败，控制台和 `${WORKSPACE}/pcids-logs` 均保留日志。若下载后的真实文件名不同，只替换 `--firmware` 后的文件名，且引号内不能带尾随空格。
+
+**不要改成多行命令**，也不要把 `call` 直接写成 Bash 命令、使用 `^`、`%WORKSPACE%`，或在此字段手工拼接带反斜杠转义的 `--config-json`；这些写法会导致 Bash 找不到命令或触发 Groovy 解析错误，构建还未开始烧录就会失败。
+
+以下示例用于**已明确选择 Windows PowerShell 执行器**的场景；它与上面的 Build Shell 模板不是同一种语法：
 
 ```powershell
-$adapter = 'C:\Program Files\PCIDS\resources\flash-adapter\pcids-flash.cmd'
+$adapter = $env:PCIDS_FLASH_ADAPTER
+if (-not $adapter -or -not (Test-Path -LiteralPath $adapter)) {
+  throw 'PCIDS_FLASH_ADAPTER is missing. Install or repair PCIDS, then restart the CodeArts Agent service.'
+}
 $firmware = "$env:WORKSPACE\Project.hex"
 
 & $adapter run `
@@ -69,30 +90,30 @@ Altera CPLD: --burner "Altera Blaster II" --script altera_blaster_ii_cpld_flash
 
 这里的“必填”是 PCIDS 适配器或生成的烧录脚本会拒绝执行的字段，不是推荐填写项。
 
-| 范围 | 必填 | 条件必填 | 可不填（采用默认或自动探测） |
-| --- | --- | --- | --- |
-| 所有本地流程 | `run`、`--firmware`，以及 `--burner` 或唯一的 `--script` | 无 | `--board`、`--run-id`、`--log-dir`。 |
-| ST-LINK、PW-LINK、GDLINK、SWD 下载器 | `--target-chip`、`--burner-sn` | 固件为 `.bin` 时 `start_address` | `interface_type`、`erase_mode`、`write_speed_khz`、`completion_action` 均有脚本默认值。 |
-| J-LINK | `--burner-sn`，以及 `--target-chip` **或** `--board` 至少一个 | 固件为 `.bin` 时建议填写 `start_address`；pyOCD 回退路径会要求它 | 其余 ARM 参数都有默认值。 |
-| XDS510plus | 固件必须为 `.out` | 自定义目标时 `target_config_file` 必须为 Agent 本地 `.ccxml`；当前受支持目标为 F28335 | `target_config_file` 留空时使用内置 SEED F28335 配置。 |
-| MPLAB ICD3 | `--target-chip` | 无 | ICD3 序列号目前不参与原 IPE 命令选择；其他 PIC 策略均有默认值。 |
-| AL321 | 无额外硬性参数 | `execution_operation=Flash固化` 时，`target_config_file`（本地 `.elf`）必填；固件必须为 `.bin` | SRAM 下载、QSPI、擦除、地址和完成动作有默认值。 |
-| Altera FPGA/CPLD | `--script`（因 Blaster II 有两个工作流） | 无 | `cable_index` 默认 `0`；其余字段有默认值。 |
-| Gowin | `--target-chip` | 无 | `cable_index` 默认 `1`，`tck_frequency` 默认 `1MHz`；其余字段有默认值。 |
-| SD 卡 | `sd_target_path` | 无 | `format_sd_card`、`completion_action` 有默认值。 |
+| 范围                      | 必填                                                    | 条件必填                                                                           | 可不填（采用默认或自动探测）                                                               |
+| ----------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| 所有本地流程                  | `run`、`--firmware`，以及 `--burner` 或唯一的 `--script`      | 无                                                                              | `--board`、`--run-id`、`--log-dir`。                                            |
+| ST-LINK、PW-LINK、GDLINK、 | `--target-chip`、`--burner-sn`                         | 固件为 `.bin` 时 `start_address`                                                   | `interface_type`、`erase_mode`、`write_speed_khz`、`completion_action` 均有脚本默认值。 |
+| J-LINK                  | `--burner-sn`，以及 `--target-chip` **或** `--board` 至少一个 | 固件为 `.bin` 时建议填写 `start_address`；pyOCD 回退路径会要求它                                | 其余 ARM 参数都有默认值。                                                              |
+| XDS510plus              | 固件必须为 `.out`                                          | 自定义目标时 `target_config_file` 必须为 Agent 本地 `.ccxml`；当前受支持目标为 F28335              | `target_config_file` 留空时使用内置 SEED F28335 配置。                                 |
+| MPLAB ICD3              | `--target-chip`                                       | 无                                                                              | ICD3 序列号目前不参与原 IPE 命令选择；其他 PIC 策略均有默认值。                                      |
+| AL321                   | 无额外硬性参数                                               | `execution_operation=Flash固化` 时，`target_config_file`（本地 `.elf`）必填；固件必须为 `.bin` | SRAM 下载、QSPI、擦除、地址和完成动作有默认值。                                                 |
+| Altera FPGA/CPLD        | `--script`（因 Blaster II 有两个工作流）                       | 无                                                                              | `cable_index` 默认 `0`；其余字段有默认值。                                               |
+| Gowin                   | `--target-chip`                                       | 无                                                                              | `cable_index` 默认 `1`，`tck_frequency` 默认 `1MHz`；其余字段有默认值。                     |
+| SD 卡                    | `sd_target_path`                                      | 无                                                                              | `format_sd_card`、`completion_action` 有默认值。                                   |
 
 `--burner-sn` 虽然在 ICD3、Altera、Gowin 的现有厂商脚本中不是硬性校验字段，但一台 Agent 连接多支同类烧录器时，仍应传入并逐步补充厂商工具的精确绑定能力；不能依赖 USB 枚举顺序。
 
 ### ARM MCU
 
-| 脚本 | `--burner` | 固件 | 专用字段与合法值 |
-| --- | --- | --- | --- |
-| `stlink_stm32_mcu_flash` | `ST-LINK` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`/`CJTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`；`qspi_flash_model`: `W25Q64`/`W25Q128`/`W25Q256`；`loader_type`: `Internal Flash`/`External Loader`。 |
-| `jlink_v4_arm_mcu_flash` | `J-LINK` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`/`CJTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`。 |
-| `pwlink_v2_arm_mcu_flash` | `PW-LINK` 或 `PWLINK2` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`。 |
-| `gdlink_arm_mcu_flash` | `GDLINK` | `.hex`、`.elf`、`.bin` | 与 PW-LINK 相同，另有 `bichina_burn_mode`: `单烧`/`量产烧录`/`擦除后烧录`。 |
-| `swd_downloader_arm_mcu_flash` | `SWD下载器` | `.hex`、`.elf`、`.bin` | 与 J-LINK 相同：接口可选 `SWD`/`JTAG`/`CJTAG`。 |
-| `hdsc_ccid_arm_mcu_flash` | `HDSC CCID` | 由 HDSC ISP 工具支持的格式 | `interface_type` 仅 `UART`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`；`completion_action`: `复位运行`/`仅复位`/`不处理`。 |
+| 脚本                             | `--burner`            | 固件                   | 专用字段与合法值                                                                                                                                                                                                                                                                                                     |
+| ------------------------------ | --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `stlink_stm32_mcu_flash`       | `ST-LINK`             | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`/`CJTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`；`qspi_flash_model`: `W25Q64`/`W25Q128`/`W25Q256`；`loader_type`: `Internal Flash`/`External Loader`。 |
+| `jlink_v4_arm_mcu_flash`       | `J-LINK`              | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`/`CJTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`。                                                                                                    |
+| `pwlink_v2_arm_mcu_flash`      | `PW-LINK` 或 `PWLINK2` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`。                                                                                                            |
+| `gdlink_arm_mcu_flash`         | `GDLINK`              | `.hex`、`.elf`、`.bin` | 与 PW-LINK 相同，另有 `bichina_burn_mode`: `单烧`/`量产烧录`/`擦除后烧录`。                                                                                                                                                                                                                                                    |
+| `swd_downloader_arm_mcu_flash` | `SWD下载器`              | `.hex`、`.elf`、`.bin` | 与 J-LINK 相同：接口可选 `SWD`/`JTAG`/`CJTAG`。                                                                                                                                                                                                                                                                       |
+| `hdsc_ccid_arm_mcu_flash`      | `HDSC CCID`           | 由 HDSC ISP 工具支持的格式   | `interface_type` 仅 `UART`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`；`completion_action`: `复位运行`/`仅复位`/`不处理`。                                                                                                                            |
 
 PW-LINK 的完整参数例子：
 
@@ -102,19 +123,19 @@ PW-LINK 的完整参数例子：
 
 ### DSP 与 PIC
 
-| 脚本 | `--burner` | 固件 | 专用字段与规则 |
-| --- | --- | --- | --- |
-| `xds510plus_dsp_flash` | `XDS510plus` | **仅 `.out`** | `interface_type` 仅 `JTAG`；`target_chip` 当前仅支持包含 `F28335` 的型号；`target_config_file` 可留空（使用内置 SEED F28335 `.ccxml`），否则必须是 Agent 上实际存在的 `.ccxml` 路径；`erase_mode` 仅 `全片擦除`；`completion_action`: `复位运行`/`不处理`。 |
-| `mplab_icd3_pic_flash` | `MPLAB ICD 3 DV164035` | 由 MPLAB IPE 支持的格式 | `erase_mode`: `全片擦除`/`不擦除直接编程`；`eeprom_write`: `是`/`否`；`blank_check`: `是`/`否`；`execute_program`: `是`/`否`；`completion_action`: `编程复位后运行`/`编程后保持复位`。 |
+| 脚本                     | `--burner`             | 固件                | 专用字段与规则                                                                                                                                                                                                  |
+| ---------------------- | ---------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `xds510plus_dsp_flash` | `XDS510plus`           | **仅** **`.out`**  | `interface_type` 仅 `JTAG`；`target_chip` 当前仅支持包含 `F28335` 的型号；`target_config_file` 可留空（使用内置 SEED F28335 `.ccxml`），否则必须是 Agent 上实际存在的 `.ccxml` 路径；`erase_mode` 仅 `全片擦除`；`completion_action`: `复位运行`/`不处理`。 |
+| `mplab_icd3_pic_flash` | `MPLAB ICD 3 DV164035` | 由 MPLAB IPE 支持的格式 | `erase_mode`: `全片擦除`/`不擦除直接编程`；`eeprom_write`: `是`/`否`；`blank_check`: `是`/`否`；`execute_program`: `是`/`否`；`completion_action`: `编程复位后运行`/`编程后保持复位`。                                                       |
 
 ### FPGA 与 CPLD
 
-| 脚本 | `--burner` 与 `--script` | 固件 | 专用字段与规则 |
-| --- | --- | --- | --- |
-| `al321_fpga_mcu_flash` | `--burner AL321` | `SRAM下载` 使用 `.bit`；`Flash固化` 使用 **`.bin`** | `interface_type` 仅 `JTAG`；`execution_operation`: `SRAM下载`/`Flash固化`；`qspi_flash_model`: `qspi-x1-single`/`qspi-x2-single`/`qspi-x4-single`/`qspi-x8-dual_parallel`/`qspi-x1-dual_stacked`/`qspi-x2-dual_stacked`/`qspi-x4-dual_stacked`；`start_address`；`erase_mode`: `默认自动擦除`/`全片擦除`/`扇区擦除`/`不擦除`；`completion_action`: `复位运行`/`不处理`。当 `execution_operation` 为 `Flash固化` 时，`target_config_file` 必填且必须为 Agent 本地 `.elf` 路径。 |
-| `altera_blaster_ii_fpga_flash` | `--burner "Altera Blaster II" --script altera_blaster_ii_fpga_flash` | Quartus Programmer 支持的格式 | `interface_type` 仅 `JTAG`；`erase_mode`: `默认自动擦除`/`全片擦除`/`扇区擦除`/`不擦除`；`cable_index`: `0`/`1`/`2`/`3`；`completion_action` 仅 `不处理`。 |
-| `altera_blaster_ii_cpld_flash` | `--burner "Altera Blaster II" --script altera_blaster_ii_cpld_flash` | Quartus Programmer 支持的格式 | `interface_type` 仅 `JTAG`；`pre_erase`: `默认是`/`否`；`tck_frequency`: `1MHz`/`2.5MHz`/`5MHz`/`10MHz`；`completion_action` 仅 `不处理`。 |
-| `gowin_usb_cable_fpga_flash` | `--burner "Gowin USB Cable"` | Gowin Programmer 支持的格式 | `interface_type` 仅 `JTAG`；`execution_operation`: `SRAM下载`/`Flash固化`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`completion_action` 仅 `不处理`。 |
+| 脚本                             | `--burner` 与 `--script`                                              | 固件                                         | 专用字段与规则                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------ | -------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `al321_fpga_mcu_flash`         | `--burner AL321`                                                     | `SRAM下载` 使用 `.bit`；`Flash固化` 使用 **`.bin`** | `interface_type` 仅 `JTAG`；`execution_operation`: `SRAM下载`/`Flash固化`；`qspi_flash_model`: `qspi-x1-single`/`qspi-x2-single`/`qspi-x4-single`/`qspi-x8-dual_parallel`/`qspi-x1-dual_stacked`/`qspi-x2-dual_stacked`/`qspi-x4-dual_stacked`；`start_address`；`erase_mode`: `默认自动擦除`/`全片擦除`/`扇区擦除`/`不擦除`；`completion_action`: `复位运行`/`不处理`。当 `execution_operation` 为 `Flash固化` 时，`target_config_file` 必填且必须为 Agent 本地 `.elf` 路径。 |
+| `altera_blaster_ii_fpga_flash` | `--burner "Altera Blaster II" --script altera_blaster_ii_fpga_flash` | Quartus Programmer 支持的格式                   | `interface_type` 仅 `JTAG`；`erase_mode`: `默认自动擦除`/`全片擦除`/`扇区擦除`/`不擦除`；`cable_index`: `0`/`1`/`2`/`3`；`completion_action` 仅 `不处理`。                                                                                                                                                                                                                                                                                           |
+| `altera_blaster_ii_cpld_flash` | `--burner "Altera Blaster II" --script altera_blaster_ii_cpld_flash` | Quartus Programmer 支持的格式                   | `interface_type` 仅 `JTAG`；`pre_erase`: `默认是`/`否`；`tck_frequency`: `1MHz`/`2.5MHz`/`5MHz`/`10MHz`；`completion_action` 仅 `不处理`。                                                                                                                                                                                                                                                                                              |
+| `gowin_usb_cable_fpga_flash`   | `--burner "Gowin USB Cable"`                                         | Gowin Programmer 支持的格式                     | `interface_type` 仅 `JTAG`；`execution_operation`: `SRAM下载`/`Flash固化`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`completion_action` 仅 `不处理`。                                                                                                                                                                                                                                                                                         |
 
 AL321 Flash 固化例子：
 
@@ -124,10 +145,10 @@ AL321 Flash 固化例子：
 
 ### SD 卡与混合流程
 
-| 脚本 | `--burner` | 参数 |
-| --- | --- | --- |
-| `sd_card_zynq7000_boot_update` | `SD卡文件写入` | `interface_type` 仅 `SD卡`；`sd_target_path` 为 Agent 上的目标 SD 卡目录；`format_sd_card`: `是`/`否`；`completion_action`: `自动弹出SD卡`/`不处理`。 |
-| `sylixos_ls2k_ftp_serial_flash` | `TFTP+串口` | 不通过此 CodeArts 本地烧录入口。它是 PCIDS 既有 Hybrid 任务，参数由其任务 API 传入：`configured_board_address`、`local_ip`、`serial_port`、`baud_rate`、`target_path`、TFTP/串口认证等。 |
+| 脚本                              | `--burner` | 参数                                                                                                                                                 |
+| ------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sd_card_zynq7000_boot_update`  | `SD卡文件写入`  | `interface_type` 仅 `SD卡`；`sd_target_path` 为 Agent 上的目标 SD 卡目录；`format_sd_card`: `是`/`否`；`completion_action`: `自动弹出SD卡`/`不处理`。                      |
+| `sylixos_ls2k_ftp_serial_flash` | `TFTP+串口`  | 不通过此 CodeArts 本地烧录入口。它是 PCIDS 既有 Hybrid 任务，参数由其任务 API 传入：`configured_board_address`、`local_ip`、`serial_port`、`baud_rate`、`target_path`、TFTP/串口认证等。 |
 
 ### 传参边界
 
@@ -140,7 +161,10 @@ AL321 Flash 固化例子：
 通用约定：
 
 ```powershell
-$adapter = 'C:\Program Files\PCIDS\resources\flash-adapter\pcids-flash.cmd'
+$adapter = $env:PCIDS_FLASH_ADAPTER
+if (-not $adapter -or -not (Test-Path -LiteralPath $adapter)) {
+  throw 'PCIDS_FLASH_ADAPTER is missing. Install or repair PCIDS, then restart the CodeArts Agent service.'
+}
 $logDir = "$env:WORKSPACE\pcids-logs"
 ```
 
