@@ -223,7 +223,7 @@ export const buildScriptSelectParameterDescriptors = ({
       label,
       value: String(currentValues[field] ?? ''),
       options,
-      disabled: !enabled,
+      disabled: !enabled || options.length === 1,
     })
   }
 

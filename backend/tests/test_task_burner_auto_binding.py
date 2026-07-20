@@ -188,7 +188,7 @@ class TaskBurnerAutoBindingTests(unittest.TestCase):
             task,
             {
                 "burner_type": "XDS510plus",
-                "burner_name": "Spectrum Digital XDS510USB-PLUS",
+                "burner_name": "SEED USB2.0 PLUS Emulator",
             },
         )
 

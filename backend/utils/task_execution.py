@@ -13,7 +13,7 @@ from backend.models.burner import Burner
 from backend.models.repository import Repository
 from backend.models.script import Script
 from backend.models.task import BurningTask
-from backend.utils.runtime_dependencies import configure_bundled_tools, refresh_bundled_tools
+from backend.utils.runtime_dependencies import configure_bundled_tools, get_bundled_tools_dir, refresh_bundled_tools
 from backend.utils.text_normalization import normalize_text_payload
 
 
@@ -387,6 +387,17 @@ def validate_script_execution_config(
     script_name = str(getattr(resolved_script, "name", None) or "").strip()
     _validate_strict_swd_script_config(normalized, script_name, artifact_name)
 
+    if script_name == "xds510plus_dsp_flash":
+        artifact_extension = _extract_artifact_extension(artifact_name)
+        if artifact_extension != "out":
+            raise HTTPException(status_code=400, detail="SEED XDS510Plus 烧录需要 TI C2000 .out 文件")
+        target_config_file = str(normalized.get("target_config_file") or "").strip()
+        if target_config_file and not target_config_file.lower().endswith(".ccxml"):
+            raise HTTPException(status_code=400, detail="SEED XDS510Plus 目标配置必须是 .ccxml 文件")
+        target_chip = str(normalized.get("target_chip") or normalized.get("chip_model") or "").strip().upper()
+        if target_chip and "F28335" not in target_chip:
+            raise HTTPException(status_code=400, detail="当前 SEED XDS510Plus 系统脚本仅支持 TMS320F28335")
+
     execution_operation = str(normalized.get("execution_operation") or "").strip()
     if not default_config:
         return normalized
@@ -476,6 +487,13 @@ def build_runtime_env(
     script: Optional[Script],
     used_file_path: Optional[str],
 ) -> dict[str, str]:
+    target_config_file = str(config.get("target_config_file") or "").strip()
+    if str(getattr(script, "name", None) or "").strip() == "xds510plus_dsp_flash" and not target_config_file:
+        bundled_root = get_bundled_tools_dir()
+        if bundled_root:
+            default_target_config = bundled_root / "XDS510plus" / "targets" / "seed_xds510plus_f28335.ccxml"
+            if default_target_config.is_file():
+                target_config_file = str(default_target_config.resolve())
     env = {
         "TASK_ID": str(task.id),
         "TASK_TYPE": get_task_type(task, config),
@@ -502,7 +520,7 @@ def build_runtime_env(
         "START_ADDRESS": str(config.get("start_address") or ""),
         "QSPI_FLASH_MODEL": str(config.get("qspi_flash_model") or ""),
         "LOADER_TYPE": str(config.get("loader_type") or ""),
-        "TARGET_CONFIG_FILE": str(config.get("target_config_file") or ""),
+        "TARGET_CONFIG_FILE": target_config_file,
         "GEL_INIT_SCRIPT": str(config.get("gel_init_script") or ""),
         "JTAG_CHAIN_INDEX": str(config.get("jtag_chain_index") or ""),
         "PROGRAM_VOLTAGE": str(config.get("program_voltage") or ""),

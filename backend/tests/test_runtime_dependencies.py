@@ -212,17 +212,17 @@ class RuntimeDependenciesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bundled_root = root / "burners"
-            dslite = bundled_root / "XDS510plus" / "UniFlash" / "dslite.bat"
+            dss = bundled_root / "XDS510plus" / "CCS" / "ccs_base" / "scripting" / "bin" / "dss.bat"
             driver_script = bundled_root / "XDS510plus" / "drivers" / "install-xds510plus-driver.ps1"
-            driver_inf = bundled_root / "XDS510plus" / "drivers" / "sdusb2em.inf"
-            dslite.parent.mkdir(parents=True)
+            driver_inf = bundled_root / "XDS510plus" / "drivers" / "seedxds510plus.inf"
+            dss.parent.mkdir(parents=True)
             driver_script.parent.mkdir(parents=True)
-            dslite.touch()
+            dss.touch()
             driver_script.touch()
             driver_inf.write_text("USB\\VID_0547&PID_1020", encoding="utf-8")
 
-            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root), "UNIFLASH_CLI": ""}, clear=False), patch.dict(
-                COMMON_TOOL_SEARCH_PATHS, {"UNIFLASH_CLI": []}, clear=False
+            with patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": str(bundled_root), "DSS_BAT": "", "XDS510_DRIVER_INSTALL_SCRIPT": ""}, clear=False), patch.dict(
+                COMMON_TOOL_SEARCH_PATHS, {"DSS_BAT": []}, clear=False
             ):
                 configure_bundled_tools.cache_clear()
                 build_runtime_dependency_report.cache_clear()
@@ -230,13 +230,13 @@ class RuntimeDependenciesTest(unittest.TestCase):
                 readiness = build_burner_tool_readiness()
 
             readiness_by_name = {str(item["burner"]): item for item in readiness}
-            self.assertEqual(configured["UNIFLASH_CLI"], str(dslite.resolve()))
+            self.assertEqual(configured["DSS_BAT"], str(dss.resolve()))
             self.assertEqual(configured["XDS510_DRIVER_INSTALL_SCRIPT"], str(driver_script.resolve()))
             self.assertEqual(readiness_by_name["XDS510plus"]["status"], "ok")
             self.assertEqual(readiness_by_name["XDS510plus"]["configured_mode"], "file")
             self.assertTrue(readiness_by_name["XDS510plus"]["driver_ready"])
             self.assertTrue(
-                any(str(item).endswith("sdusb2em.inf") for item in readiness_by_name["XDS510plus"]["driver_artifacts"])
+                any(str(item).endswith("seedxds510plus.inf") for item in readiness_by_name["XDS510plus"]["driver_artifacts"])
             )
 
     def test_external_amd_install_can_be_discovered(self):

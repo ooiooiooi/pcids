@@ -125,7 +125,7 @@ DEVICE_TYPE_ALIASES: list[tuple[str, list[str]]] = [
     ("AL321", ["al321"]),
     ("ST-LINK", ["st-link", "stlink"]),
     ("HDSC CCID", ["hdsc", "ccid"]),
-    ("XDS510plus", ["xds510", "xds510plus"]),
+    ("XDS510plus", ["seed xds510", "seed usb2.0 plus emulator", "xds510plus"]),
     ("MPLAB ICD 3 DV164035", ["mplab", "icd 3", "dv164035"]),
     ("Altera Blaster II", ["altera", "blaster"]),
     ("Gowin USB Cable", ["gowin", "gowin usb"]),
@@ -240,7 +240,7 @@ def _probe_usb_devices(cache_ttl_seconds: float = 3.0) -> list[dict]:
 def _probe_windows_usb_devices() -> list[dict]:
     ps_script = r"""
 try {
-  $items = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+  $baseItems = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
     Where-Object {
       $_.InstanceId -like 'USB\*' -or
       $_.Class -eq 'USBDevice' -or
@@ -248,15 +248,33 @@ try {
       $_.Class -eq 'Unknown' -or
       $_.FriendlyName -match '未知设备|Unknown device' -or
       $_.FriendlyName -match 'ST-?LINK|STM32|J-?LINK|PWLINK|GDLINK|CCID|XDS|MPLAB|Blaster|Gowin'
-    } |
+    })
+  $propertyMap = @{}
+  $instanceIds = @($baseItems | ForEach-Object { $_.InstanceId })
+  if ($instanceIds.Count -gt 0) {
+    $allProperties = $baseItems | Get-PnpDeviceProperty -KeyName @(
+      'DEVPKEY_Device_LocationInfo',
+      'DEVPKEY_Device_LocationPaths',
+      'DEVPKEY_Device_Parent',
+      'DEVPKEY_Device_ContainerId',
+      'DEVPKEY_Device_Service'
+    ) -ErrorAction SilentlyContinue
+    foreach ($property in @($allProperties)) {
+      $propertyMap["$($property.InstanceId)|$($property.KeyName)"] = $property.Data
+    }
+  }
+  $items = $baseItems |
     ForEach-Object {
       $locationInfo = ''
-      try {
-        $locationInfoProperty = Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue
-        if ($locationInfoProperty -and $null -ne $locationInfoProperty.Data) {
-          $locationInfo = [string]$locationInfoProperty.Data
-        }
-      } catch {}
+      $locationPaths = ''
+      $parent = ''
+      $containerId = ''
+      $service = ''
+      $locationInfo = [string]$propertyMap["$($_.InstanceId)|DEVPKEY_Device_LocationInfo"]
+      $locationPaths = @($propertyMap["$($_.InstanceId)|DEVPKEY_Device_LocationPaths"]) -join ';'
+      $parent = [string]$propertyMap["$($_.InstanceId)|DEVPKEY_Device_Parent"]
+      $containerId = [string]$propertyMap["$($_.InstanceId)|DEVPKEY_Device_ContainerId"]
+      $service = [string]$propertyMap["$($_.InstanceId)|DEVPKEY_Device_Service"]
       [PSCustomObject]@{
         Name = $_.FriendlyName
         Manufacturer = $_.Manufacturer
@@ -264,10 +282,11 @@ try {
         PNPClass = $_.Class
         Status = $_.Status
         LocationInformation = $locationInfo
-        LocationPaths = ''
+        LocationPaths = $locationPaths
         LocationInfo = $locationInfo
-        Parent = ''
-        ContainerId = ''
+        Parent = $parent
+        ContainerId = $containerId
+        Service = $service
       }
     }
   @($items) | ConvertTo-Json -Depth 3 -Compress
@@ -329,6 +348,7 @@ try {
                 "status": str(row.get("Status") or "").strip(),
                 "parent_id": str(row.get("Parent") or "").strip(),
                 "container_id": str(row.get("ContainerId") or "").strip(),
+                "driver_service": str(row.get("Service") or "").strip(),
                 "source": "windows_pnp",
             }
         )
@@ -684,6 +704,53 @@ def _derive_node_label(agent_url: Optional[str], host_name: Optional[str] = None
     return hostname.strip() or "局域网节点"
 
 
+USB_BINDING_FIELDS = (
+    "location_info",
+    "location_path",
+    "pnp_device_id",
+    "parent_id",
+    "container_id",
+    "vendor_id",
+    "product_id",
+    "driver_service",
+)
+USB_BINDING_IDENTITY_FIELDS = (
+    "location_info",
+    "location_path",
+    "pnp_device_id",
+    "container_id",
+)
+
+
+def _normalize_usb_binding(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        field: str(value.get(field) or "").strip()
+        for field in USB_BINDING_FIELDS
+        if str(value.get(field) or "").strip()
+    }
+
+
+def _build_usb_binding(item: dict) -> dict:
+    return _normalize_usb_binding({field: item.get(field) for field in USB_BINDING_FIELDS})
+
+
+def _burner_usb_binding(burner: Optional[Burner]) -> dict:
+    if burner is None:
+        return {}
+    try:
+        config = json.loads(getattr(burner, "config_json", None) or "{}") or {}
+    except Exception:
+        return {}
+    return _normalize_usb_binding(config.get("usb_binding"))
+
+
+def _usb_binding_port_values(binding: object) -> set[str]:
+    normalized = _normalize_usb_binding(binding)
+    return _port_match_values(*(normalized.get(field) for field in USB_BINDING_IDENTITY_FIELDS))
+
+
 def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name: Optional[str] = None, host_address: Optional[str] = None) -> list[dict]:
     classified_items = _classify_probe_items(item)
     node_key = str(agent_url or host_address or "").strip() or "local"
@@ -706,6 +773,7 @@ def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name:
         ]
         if str(value or "").strip() and str(value or "").strip() != str(port or "").strip()
     ]
+    usb_binding = _build_usb_binding(item)
     candidates: list[dict] = []
     for classified in classified_items:
         sn = _get_real_usb_serial(item, usb_devices, classified["type"]) or None
@@ -720,6 +788,7 @@ def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name:
                 "port": port,
                 "raw_port": raw_port,
                 "alternative_ports": alternative_ports,
+                "usb_binding": usb_binding,
                 "node_key": node_key,
                 "node_type": node_type,
                 "node_label": node_label,
@@ -747,6 +816,7 @@ def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name:
                 "port": port,
                 "raw_port": raw_port,
                 "alternative_ports": alternative_ports,
+                "usb_binding": usb_binding,
                 "node_key": node_key,
                 "node_type": node_type,
                 "node_label": node_label,
@@ -950,7 +1020,7 @@ def _port_match_values(*values: Optional[str]) -> set[str]:
 def _candidate_port_values(candidate: dict) -> set[str]:
     values = [candidate.get("port"), candidate.get("raw_port")]
     values.extend(candidate.get("alternative_ports") or [])
-    return _port_match_values(*values)
+    return _port_match_values(*values) | _usb_binding_port_values(candidate.get("usb_binding"))
 
 
 def _probe_item_port_values(item: dict, port: Optional[str], raw_port: Optional[str]) -> set[str]:
@@ -970,9 +1040,12 @@ def _candidate_physical_id(item: dict, device_type: str, node_key: str, sn: Opti
     product_id = str(item.get("product_id") or "").strip().lower()
     container_id = str(item.get("container_id") or "").strip().lower()
     parent_id = str(item.get("parent_id") or "").strip().lower()
+    location_path = str(item.get("location_path") or "").strip().lower()
     normalized_port = _normalize_windows_usb_physical_port(str(port or "")).lower()
     if sn:
         identity_value = f"sn:{sn}"
+    elif location_path:
+        identity_value = f"location_path:{location_path}"
     elif container_id:
         identity_value = f"container:{container_id}"
     elif parent_id:
@@ -992,7 +1065,7 @@ def _registered_binding_keys(burners: list[Burner], exclude_id: Optional[int] = 
         if exclude_id is not None and getattr(burner, "id", None) == exclude_id:
             continue
         sn = _normalize_binding_value(getattr(burner, "sn", None))
-        burner_ports = _port_match_values(getattr(burner, "port", None))
+        burner_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_port_values(_burner_usb_binding(burner))
         if sn:
             sn_values.add(sn)
         port_values.update(burner_ports)
@@ -1070,13 +1143,14 @@ def _match_usb_device(
     usb_devices: Optional[list[dict]] = None,
     expected_sn: Optional[str] = None,
     expected_port: Optional[str] = None,
+    expected_usb_binding: Optional[dict] = None,
 ) -> Optional[dict]:
     if usb_devices is None:
         usb_devices = _probe_usb_devices()
     type_hint = _normalize_device_token(device_type)
     location_hint = (location or "").strip().lower()
     expected_sn_value = _normalize_binding_value(expected_sn)
-    expected_port_values = _port_match_values(expected_port)
+    expected_port_values = _port_match_values(expected_port) | _usb_binding_port_values(expected_usb_binding)
     candidates = _device_alias_candidates(type_hint)
     best_match: Optional[dict] = None
     best_score = -1
@@ -1106,7 +1180,7 @@ def _match_usb_device(
         normalized_serial = _normalize_binding_value(serial)
         normalized_ports = item_port_values
         if expected_sn_value and normalized_serial == expected_sn_value:
-            matched = {"sn": serial or None, "port": port or None, "source": "usb_probe", "name": item.get("_name")}
+            matched = {"sn": serial or None, "port": port or None, "usb_binding": _build_usb_binding(item), "source": "usb_probe", "name": item.get("_name")}
             score = _candidate_display_score(
                 {
                     "detected_name": item.get("_name"),
@@ -1120,7 +1194,7 @@ def _match_usb_device(
                 best_match = matched
             continue
         if expected_port_values and normalized_ports & expected_port_values:
-            matched = {"sn": serial or None, "port": port or None, "source": "usb_probe", "name": item.get("_name")}
+            matched = {"sn": serial or None, "port": port or None, "usb_binding": _build_usb_binding(item), "source": "usb_probe", "name": item.get("_name")}
             score = _candidate_display_score(
                 {
                     "detected_name": item.get("_name"),
@@ -1188,6 +1262,7 @@ def _build_scan_result(
         usb_devices=usb_devices,
         expected_sn=expected_sn,
         expected_port=expected_port,
+        expected_usb_binding=_burner_usb_binding(existing),
     )
     if matched:
         return {
@@ -1466,7 +1541,7 @@ def _find_matching_candidate(burner: Burner, candidates: list[dict]) -> Optional
         burner_strategy = int(getattr(burner, "strategy", 1) or 1)
     except Exception:
         burner_strategy = 1
-    burner_port_values = _port_match_values(burner_port)
+    burner_port_values = _port_match_values(burner_port) | _usb_binding_port_values(_burner_usb_binding(burner))
 
     for candidate in candidates:
         candidate_port_values = _candidate_port_values(candidate)
@@ -1497,7 +1572,7 @@ def _find_discovery_binding_candidate(burner: Burner, candidates: list[dict]) ->
         burner_strategy = int(getattr(burner, "strategy", 1) or 1)
     except Exception:
         burner_strategy = 1
-    burner_port_values = _port_match_values(getattr(burner, "port", None))
+    burner_port_values = _port_match_values(getattr(burner, "port", None)) | _usb_binding_port_values(_burner_usb_binding(burner))
     best_match: Optional[dict] = None
     best_score = -1
 
@@ -1667,6 +1742,7 @@ def _build_discovery_payload(
                 "current_binding": {
                     "sn": matched.get("sn"),
                     "port": matched.get("port"),
+                    "usb_binding": matched.get("usb_binding") or {},
                     "node_key": matched.get("node_key"),
                     "node_label": matched.get("node_label"),
                     "node_type": matched.get("node_type"),
@@ -1962,6 +2038,10 @@ def _sort_by_preset_order(values: list[str], order: list[str]) -> list[str]:
     return sorted(unique_values, key=lambda item: order.index(item))
 
 
+def _burner_requires_physical_port(device_model: Optional[str]) -> bool:
+    return _normalize_burner_model_key(device_model) == "XDS510PLUS"
+
+
 def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) -> dict:
     normalized = dict(payload)
     resolved_type = str(normalized.get("type") or getattr(existing, "type", None) or "").strip()
@@ -1990,6 +2070,14 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
         config["supported_chips"] = _sort_by_preset_order(list(capability.get("supported_chips") or []), CHIP_ORDER)
         config["supported_card_types"] = []
         config["mount_path"] = ""
+        usb_binding = _normalize_usb_binding(config.get("usb_binding"))
+        if usb_binding:
+            config["usb_binding"] = usb_binding
+        else:
+            config.pop("usb_binding", None)
+        if _burner_requires_physical_port(resolved_type):
+            normalized["strategy"] = 2
+            normalized["sn"] = ""
 
     normalized["config_json"] = json.dumps(config, ensure_ascii=False)
     return normalized
@@ -1997,6 +2085,12 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
 
 def _clear_conflicting_burner_port(conflict_burner: Burner, modified_by: Optional[str] = None) -> None:
     conflict_burner.port = ""
+    try:
+        config = json.loads(getattr(conflict_burner, "config_json", None) or "{}") or {}
+    except Exception:
+        config = {}
+    config.pop("usb_binding", None)
+    conflict_burner.config_json = json.dumps(config, ensure_ascii=False)
     if modified_by:
         conflict_burner.modified_by = modified_by
 
@@ -2014,6 +2108,12 @@ def _validate_burner_binding_unique(
     sn = _normalize_binding_value(payload.get("sn"))
     port = _normalize_binding_value(payload.get("port"))
     normalized_port = _normalize_binding_port(payload.get("port"))
+    try:
+        payload_config = json.loads(payload.get("config_json") or "{}") or {}
+    except Exception:
+        payload_config = {}
+    payload_ports = _port_match_values(payload.get("port")) | _usb_binding_port_values(payload_config.get("usb_binding"))
+    payload_node_key = str(payload.get("agent_url") or payload.get("host_address") or "local").strip()
     if strategy == 1 and not sn:
         return None
     if strategy == 2 and not (port or normalized_port):
@@ -2033,6 +2133,8 @@ def _validate_burner_binding_unique(
     for burner in db.query(Burner).all():
         if exclude_id is not None and burner.id == exclude_id:
             continue
+        if not _is_same_node_address(payload_node_key, _burner_node_key(burner)):
+            continue
         if strategy == 1 and sn and _normalize_binding_value(getattr(burner, "sn", None)) == sn:
             conflict_label = _build_conflict_burner_label(burner)
             raise HTTPException(
@@ -2040,11 +2142,8 @@ def _validate_burner_binding_unique(
                 detail=f"当前 SN 标识码已被设备「{conflict_label}」登记，请编辑已有设备或选择其他设备",
             )
         if strategy == 2:
-            existing_ports = {
-                _normalize_binding_value(getattr(burner, "port", None)),
-                _normalize_binding_port(getattr(burner, "port", None)),
-            }
-            if (port and port in existing_ports) or (normalized_port and normalized_port in existing_ports):
+            existing_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_port_values(_burner_usb_binding(burner))
+            if payload_ports & existing_ports:
                 if force_rebind_port:
                     return burner
                 conflict_label = _build_conflict_burner_label(burner)
@@ -2394,6 +2493,9 @@ async def update_burner(
         "strategy": update_payload.get("strategy", burner.strategy),
         "sn": update_payload.get("sn", burner.sn),
         "port": update_payload.get("port", burner.port),
+        "config_json": update_payload.get("config_json", burner.config_json),
+        "agent_url": update_payload.get("agent_url", burner.agent_url),
+        "host_address": update_payload.get("host_address", burner.host_address),
     }
     conflict_burner = _validate_burner_binding_unique(
         db,

@@ -162,6 +162,9 @@ class BurnerScanPriorityTests(unittest.TestCase):
         self.assertEqual(candidates[0]["port"], "Port_#0011.Hub_#0001")
         self.assertIn(r"PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)", candidates[0]["alternative_ports"])
         self.assertIn(r"USB\VID_1234&PID_ABCD\6&123ABC&0&3", candidates[0]["alternative_ports"])
+        self.assertEqual(candidates[0]["usb_binding"]["location_info"], "Port_#0011.Hub_#0001")
+        self.assertEqual(candidates[0]["usb_binding"]["location_path"], r"PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)")
+        self.assertEqual(candidates[0]["usb_binding"]["pnp_device_id"], r"USB\VID_1234&PID_ABCD\6&123ABC&0&3")
 
         legacy_match = _match_usb_device(
             "Gowin USB Cable",
@@ -180,8 +183,8 @@ class BurnerScanPriorityTests(unittest.TestCase):
         completed.stdout = json.dumps(
             [
                 {
-                    "Name": "Spectrum Digital XDS510USB-PLUS",
-                    "Manufacturer": "Spectrum Digital",
+                    "Name": "SEED USB2.0 PLUS Emulator",
+                    "Manufacturer": "SEED International Ltd.",
                     "DeviceID": r"USB\VID_0547&PID_1020\6&23A967E&0&2",
                     "PNPClass": "USBDevice",
                     "Status": "OK",
@@ -190,6 +193,7 @@ class BurnerScanPriorityTests(unittest.TestCase):
                     "LocationPaths": "",
                     "Parent": "",
                     "ContainerId": "",
+                    "Service": "EZUSBPLUS",
                 }
             ]
         ).encode("utf-8")
@@ -200,6 +204,7 @@ class BurnerScanPriorityTests(unittest.TestCase):
         self.assertEqual(devices[0]["location_id"], "Port_#0002.Hub_#0002")
         self.assertEqual(devices[0]["device_manager_location"], "Port_#0002.Hub_#0002")
         self.assertEqual(devices[0]["pnp_device_id"], r"USB\VID_0547&PID_1020\6&23A967E&0&2")
+        self.assertEqual(devices[0]["driver_service"], "EZUSBPLUS")
 
     def test_remote_discovery_uses_configurable_timeout(self):
         response = MagicMock()

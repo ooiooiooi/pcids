@@ -4,6 +4,7 @@ from backend.utils.burner_automation import (
     SYSTEM_SCRIPT_BINDINGS,
     SYSTEM_SCRIPT_CATALOG,
     _stream_command_helper_source,
+    _xds510plus_dss_source,
     _xds510plus_usb_preflight_source,
     build_system_script_content,
 )
@@ -15,7 +16,6 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         for script_name, burner_name in [
             ("al321_fpga_mcu_flash", "AL321"),
             ("hdsc_ccid_arm_mcu_flash", "HDSC CCID"),
-            ("xds510plus_dsp_flash", "XDS510plus"),
             ("gowin_usb_cable_fpga_flash", "Gowin USB Cable"),
         ]:
             with self.subTest(script_name=script_name):
@@ -75,6 +75,14 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertIn("ReadToEndAsync", _stream_command_helper_source())
 
     def test_xds510plus_runs_usb_driver_preflight_before_vendor_command(self):
+        catalog_item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "xds510plus_dsp_flash")
+        default_config = catalog_item["default_config"]
+        self.assertEqual(default_config["target_config_file_label"], "目标配置文件（.ccxml）")
+        self.assertIn("SEED F28335", default_config["target_config_file_placeholder"])
+        self.assertIn("TMS320F28335", default_config["target_config_file_hint"])
+        self.assertEqual(default_config["erase_mode"], "全片擦除")
+        self.assertEqual(default_config["erase_mode_options"], ["全片擦除"])
+
         content = build_system_script_content("xds510plus_dsp_flash", "XDS510plus")
         preflight_source = _xds510plus_usb_preflight_source()
 
@@ -84,20 +92,23 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertIn("当前 burner 绑定的实例锚点", preflight_source)
         self.assertIn("在实例锚点命中 XDS510plus 设备", preflight_source)
         self.assertIn("VID_0547&PID_1020", preflight_source)
+        self.assertNotIn("VID_0C55", preflight_source)
         self.assertIn("CM_PROB_FAILED_INSTALL", preflight_source)
-        self.assertIn("Windows 未正确绑定 Spectrum Digital 驱动", preflight_source)
-        self.assertIn("SD USB Based Debug Tools", preflight_source)
-        self.assertIn("sdusb2em", preflight_source)
+        self.assertIn("Windows 未正确绑定 SEED EZUSBPLUS 驱动", preflight_source)
+        self.assertIn("EZUSBPLUS", preflight_source)
         self.assertIn('[string]$item.Status -eq "OK"', preflight_source)
         self.assertIn("XDS510_PREFLIGHT_EXIT", content)
-        self.assertLess(content.index("XDS510_PREFLIGHT_EXIT"), content.index('set "PCIDS_CMD='))
-        self.assertIn('set "PCIDS_UNIFLASH_BASENAME=%%~nxI"', content)
-        self.assertIn('set "PCIDS_CCS_DSLITE=C:\\ti\\ccsv8\\ccs_base\\DebugServer\\bin\\DSLite.exe"', content)
-        self.assertIn('set "PCIDS_CMD="!PCIDS_CCS_DSLITE!" flash -c "%TARGET_CONFIG_FILE%" -f "%FIRMWARE_PATH%""', content)
-        self.assertIn('set "PCIDS_CMD="%UNIFLASH_CLI%" -c "%TARGET_CONFIG_FILE%" -f "%FIRMWARE_PATH%""', content)
-        self.assertIn('set "PCIDS_CMD="%UNIFLASH_CLI%" flash -c "%TARGET_CONFIG_FILE%" -f "%FIRMWARE_PATH%""', content)
-        self.assertIn('set "PCIDS_CMD="%UNIFLASH_CLI%" -ccxml "%TARGET_CONFIG_FILE%" -program "%FIRMWARE_PATH%""', content)
-        self.assertIn('cmd /d /s /c "!PCIDS_CMD!"', content)
+        self.assertLess(content.index("XDS510_PREFLIGHT_EXIT"), content.index('set "XDS510_DSS_HELPER='))
+        self.assertIn('call "%DSS_BAT%" "%XDS510_DSS_HELPER%"', content)
+        self.assertIn('findstr /I /C:"SEED-XDS510PLUS_Connection.xml"', content)
+        self.assertIn('findstr /I /C:"seedxds510plusc28x.xml"', content)
+        self.assertNotIn("UNIFLASH_CLI", content)
+        self.assertNotIn("Spectrum Digital", content)
+        dss_source = _xds510plus_dss_source()
+        self.assertIn('setString("FlashOperations", writeVerify ? "Program, Verify" : "Program")', dss_source)
+        self.assertIn("session.flash.erase()", dss_source)
+        self.assertIn("session.target.reset()", dss_source)
+        self.assertIn("session.target.run()", dss_source)
 
     def test_sylixos_hybrid_script_uses_repository_artifact_upload_path(self):
         catalog_item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "sylixos_ls2k_ftp_serial_flash")

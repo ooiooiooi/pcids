@@ -156,31 +156,37 @@ class TaskExecutionRuleTests(unittest.TestCase):
             )
         self.assertIn("SRAM下载需要选择 FPGA bitstream", context.exception.detail)
 
-    def test_xds510plus_requires_target_config_file(self):
+    def test_xds510plus_validates_seed_f28335_inputs(self):
         script = build_script(
             {
                 "interface_type": "JTAG",
                 "interface_type_options": ["JTAG"],
                 "target_config_file": "",
                 "target_config_file_label": "目标配置文件",
-                "target_config_file_required": True,
-                "required_fields": ["target_config_file"],
             },
             name="xds510plus_dsp_flash",
         )
 
-        with self.assertRaises(HTTPException) as context:
-            validate_script_execution_config({}, script, artifact_name="M405C_Control.out")
-
-        self.assertEqual(context.exception.status_code, 400)
-        self.assertIn("目标配置文件", context.exception.detail)
+        normalized = validate_script_execution_config({}, script, artifact_name="M405C_Control.out")
+        self.assertEqual(normalized.get("target_config_file", ""), "")
 
         normalized = validate_script_execution_config(
-            {"target_config_file": r"D:\workspace\pcids\.dbg\xds510plus_f28335.ccxml"},
+            {"target_config_file": r"D:\workspace\pcids\tools\burners\XDS510plus\targets\seed_xds510plus_f28335.ccxml"},
             script,
             artifact_name="M405C_Control.out",
         )
-        self.assertEqual(normalized["target_config_file"], r"D:\workspace\pcids\.dbg\xds510plus_f28335.ccxml")
+        self.assertEqual(normalized["target_config_file"], r"D:\workspace\pcids\tools\burners\XDS510plus\targets\seed_xds510plus_f28335.ccxml")
+
+        with self.assertRaises(HTTPException):
+            validate_script_execution_config({}, script, artifact_name="firmware.bin")
+        with self.assertRaises(HTTPException):
+            validate_script_execution_config(
+                {"target_config_file": "wrong.xml"}, script, artifact_name="M405C_Control.out"
+            )
+        with self.assertRaises(HTTPException):
+            validate_script_execution_config(
+                {"target_chip": "TMS320F2808"}, script, artifact_name="M405C_Control.out"
+            )
 
     def test_strict_swd_scripts_require_target_chip(self):
         script = build_script({}, name="stlink_stm32_mcu_flash")

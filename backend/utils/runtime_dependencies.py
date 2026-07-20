@@ -188,9 +188,9 @@ BURNER_TOOL_GROUPS = [
     },
     {
         "burner": "XDS510plus",
-        "env_names": ["UNIFLASH_CLI", "DSS_BAT", "XDS510_CMD_TEMPLATE", "XDS510_DRIVER_INSTALL_SCRIPT"],
+        "env_names": ["DSS_BAT", "XDS510_DRIVER_INSTALL_SCRIPT"],
         "bundled_dir": "XDS510plus",
-        "tool_label": "TI UniFlash DSLite / CCS DSS / XDS510plus driver package",
+        "tool_label": "CCS 5.5 DSS / SEED XDS510Plus driver package",
     },
 ]
 
@@ -287,6 +287,18 @@ def _collect_driver_artifacts(burner: str, bundled_dir: Optional[Path], configur
             for match in root.rglob(pattern):
                 if not match.is_file():
                     continue
+                if burner == "XDS510plus":
+                    name = match.name.lower()
+                    supports_seed = "seed" in name or "ezusbplus" in name
+                    if match.suffix.lower() == ".inf":
+                        try:
+                            supports_seed = "usb\\vid_0547&pid_1020" in match.read_text(
+                                encoding="utf-8", errors="ignore"
+                            ).lower()
+                        except OSError:
+                            supports_seed = False
+                    if not supports_seed:
+                        continue
                 try:
                     label = str(match.resolve().relative_to(root.resolve()))
                 except Exception:
@@ -296,6 +308,31 @@ def _collect_driver_artifacts(burner: str, bundled_dir: Optional[Path], configur
                 if len(artifacts) >= limit:
                     return artifacts
     return artifacts
+
+
+def _seed_xds510plus_driver_is_bound() -> bool:
+    if os.name != "nt":
+        return False
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return False
+    command = (
+        "$device = Get-CimInstance Win32_PnPEntity -Filter "
+        "\"PNPDeviceID LIKE 'USB\\\\VID_0547&PID_1020%'\" -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Service -eq 'EZUSBPLUS' -and $_.ConfigManagerErrorCode -eq 0 }; "
+        "if ($device) { exit 0 } else { exit 1 }"
+    )
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 @lru_cache(maxsize=1)
@@ -377,6 +414,8 @@ def build_burner_tool_readiness() -> list[dict[str, object]]:
         bundled_dir_exists = bool(burner_dir and burner_dir.exists())
         top_level_items = _list_dir_summary(burner_dir) if burner_dir else []
         driver_artifacts = _collect_driver_artifacts(str(item["burner"]), burner_dir, configured_path if configured_mode == "file" else "")
+        seed_driver_bound = str(item["burner"]) == "XDS510plus" and _seed_xds510plus_driver_is_bound()
+        driver_ready = seed_driver_bound or bool(driver_artifacts)
         if configured_path:
             status = "ok"
             if driver_artifacts:
@@ -393,6 +432,8 @@ def build_burner_tool_readiness() -> list[dict[str, object]]:
             status = "warn"
             message = f'{item["burner"]} 尚未准备好可执行工具'
         support_issues: list[str] = []
+        if str(item["burner"]) == "XDS510plus" and not driver_ready:
+            support_issues.append("未检测到已绑定的 SEED EZUSBPLUS 驱动或支持 VID_0547&PID_1020 的驱动包")
         if str(item["burner"]) == "AL321" and str(os.environ.get("AL321_AUTO_DRIVER_SWITCH") or "1").strip() != "0":
             switch_script = str(os.environ.get("AL321_DRIVER_SWITCH_SCRIPT") or "").strip()
             if not switch_script or not Path(switch_script).is_file():
@@ -419,7 +460,8 @@ def build_burner_tool_readiness() -> list[dict[str, object]]:
                 "bundled_dir_exists": bundled_dir_exists,
                 "bundled_dir_items": top_level_items,
                 "driver_artifacts": driver_artifacts,
-                "driver_ready": bool(driver_artifacts),
+                "driver_ready": driver_ready,
+                "driver_bound": seed_driver_bound if str(item["burner"]) == "XDS510plus" else None,
                 "support_issues": support_issues,
             }
         )

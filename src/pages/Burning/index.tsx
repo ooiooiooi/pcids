@@ -1202,6 +1202,7 @@ const Burning: React.FC = () => {
   const supportedScriptConfigFields = getSupportedScriptConfigFields(selectedScriptDefaultConfig)
   const supportedScriptConfigFieldsKey = supportedScriptConfigFields.join(',')
   const isAl321Script = selectedScript?.name === 'al321_fpga_mcu_flash'
+  const isXds510plusScript = selectedScript?.name === 'xds510plus_dsp_flash'
   const isAl321FlashOperation = isAl321Script && wizardData.executionOperation === 'Flash固化'
   const scriptInputParameterDescriptors = [
     hasSdTargetPath
@@ -1215,7 +1216,8 @@ const Burning: React.FC = () => {
       ? {
           field: 'targetConfigFile',
           label: resolveScriptConfigDisplayText(selectedScriptDefaultConfig?.target_config_file_label, '目标配置文件'),
-          placeholder: '请输入目标配置文件路径',
+          placeholder: resolveScriptConfigDisplayText(selectedScriptDefaultConfig?.target_config_file_placeholder, '请输入目标配置文件路径'),
+          hint: resolveScriptConfigDisplayText(selectedScriptDefaultConfig?.target_config_file_hint, ''),
         }
       : null,
     hasGelInitScript
@@ -1232,7 +1234,7 @@ const Burning: React.FC = () => {
           placeholder: '请输入起始地址',
         }
       : null,
-  ].filter(Boolean) as Array<{ field: string; label: string; placeholder: string }>
+  ].filter(Boolean) as Array<{ field: string; label: string; placeholder: string; hint?: string }>
   const resolveTaskTimeoutSeconds = (source?: any) => {
     if (source?.timeout_seconds !== undefined && source?.timeout_seconds !== null && source?.timeout_seconds !== '') {
       return Number(source.timeout_seconds) || 120
@@ -2003,6 +2005,14 @@ const Burning: React.FC = () => {
     currentValues: wizardData,
     enabled: Boolean(selectedScript?.id),
   }).filter((item) => item.field !== 'qspiFlashModel' || !isAl321Script || isAl321FlashOperation)
+  const xds510plusFieldOrder = ['interfaceType', 'eraseMode', 'targetConfigFile', 'completionAction']
+  const scriptParameterDescriptors = [
+    ...scriptSelectParameterDescriptors.map((item) => ({ ...item, control: 'select' as const })),
+    ...scriptInputParameterDescriptors.map((item) => ({ ...item, control: 'input' as const })),
+  ].sort((left, right) => {
+    if (!isXds510plusScript) return 0
+    return xds510plusFieldOrder.indexOf(left.field) - xds510plusFieldOrder.indexOf(right.field)
+  })
 
   useEffect(() => {
     if ((platform !== 'board' && platform !== 'hybrid') || !selectedScript?.id || !selectedScriptDefaultConfig) return
@@ -3754,38 +3764,35 @@ const Burning: React.FC = () => {
                   ) : (
                     <>
                       <div style={{ ...helperTextStyle, marginBottom: 12 }}>已根据当前烧录器与脚本自动匹配并加载专属配置参数</div>
-                      {scriptSelectParameterDescriptors.length > 0 ? (
-                        <Row gutter={16} style={{ rowGap: 16, marginBottom: scriptInputParameterDescriptors.length > 0 ? 16 : 0 }}>
-                          {scriptSelectParameterDescriptors.map((item) => (
+                      {scriptParameterDescriptors.length > 0 ? (
+                        <Row gutter={16} style={{ rowGap: 16 }}>
+                          {scriptParameterDescriptors.map((item) => (
                             <Col key={item.field} span={12}>
                               <div style={fieldLabelStyle}>{isRequiredScriptField(item.field) ? requiredLabel(item.label) : item.label}</div>
-                              <Select
-                                style={{ width: '100%' }}
-                                value={item.value}
-                                onChange={(value) => updateWizardField(item.field, value)}
-                                options={item.options}
-                                disabled={item.disabled}
-                              />
+                              {item.control === 'select' ? (
+                                <Select
+                                  style={{ width: '100%' }}
+                                  value={item.value}
+                                  onChange={(value) => updateWizardField(item.field, value)}
+                                  options={item.options}
+                                  disabled={item.disabled}
+                                />
+                              ) : (
+                                <>
+                                  <Input
+                                    placeholder={item.placeholder}
+                                    value={wizardData[item.field]}
+                                    onChange={(event) => updateWizardField(item.field, event.target.value)}
+                                  />
+                                  {item.hint ? <div style={{ ...helperTextStyle, marginTop: 6 }}>{item.hint}</div> : null}
+                                </>
+                              )}
                             </Col>
                           ))}
                         </Row>
                       ) : (
-                        <div style={{ ...helperTextStyle, marginBottom: scriptInputParameterDescriptors.length > 0 ? 16 : 0 }}>当前脚本未提供可下拉调整的专属参数</div>
+                        <div style={helperTextStyle}>当前脚本未提供可调整的专属参数</div>
                       )}
-                      {scriptInputParameterDescriptors.length > 0 ? (
-                        <Row gutter={16} style={{ rowGap: 16 }}>
-                          {scriptInputParameterDescriptors.map((item) => (
-                            <Col key={item.field} span={12}>
-                              <div style={fieldLabelStyle}>{isRequiredScriptField(item.field) ? requiredLabel(item.label) : item.label}</div>
-                              <Input
-                                placeholder={item.placeholder}
-                                value={wizardData[item.field]}
-                                onChange={(event) => updateWizardField(item.field, event.target.value)}
-                              />
-                            </Col>
-                          ))}
-                        </Row>
-                      ) : null}
                     </>
                   )}
                 </div>

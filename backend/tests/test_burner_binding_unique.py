@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -103,6 +104,57 @@ class BurnerBindingUniqueTests(unittest.TestCase):
         _clear_conflicting_burner_port(conflict_burner, "tester")
         self.assertEqual(conflict_burner.port, "")
         self.assertEqual(conflict_burner.modified_by, "tester")
+
+    def test_strategy_two_uses_full_usb_binding_on_same_node(self):
+        conflict_burner = SimpleNamespace(
+            id=4,
+            name="Existing burner",
+            type="XDS510plus",
+            port="Port_#0001.Hub_#0003",
+            sn="",
+            host_name=None,
+            host_address="10.0.0.8",
+            agent_url=None,
+            config_json=json.dumps({"usb_binding": {"location_path": "PCIROOT(0)#USBROOT(0)#USB(4)#USB(1)"}}),
+        )
+        db = _FakeDB([conflict_burner])
+
+        with self.assertRaises(HTTPException):
+            _validate_burner_binding_unique(
+                db,
+                {
+                    "strategy": 2,
+                    "port": "Port_#9999.Hub_#9999",
+                    "host_address": "10.0.0.8",
+                    "config_json": json.dumps({"usb_binding": {"location_path": "PCIROOT(0)#USBROOT(0)#USB(4)#USB(1)"}}),
+                },
+            )
+
+    def test_same_short_port_is_allowed_on_different_nodes(self):
+        existing = SimpleNamespace(
+            id=5,
+            name="Remote burner",
+            type="J-LINK",
+            port="Port_#0001.Hub_#0003",
+            sn="",
+            host_name=None,
+            host_address="10.0.0.8",
+            agent_url=None,
+            config_json="{}",
+        )
+        db = _FakeDB([existing])
+
+        result = _validate_burner_binding_unique(
+            db,
+            {
+                "strategy": 2,
+                "port": "Port_#0001.Hub_#0003",
+                "host_address": "10.0.0.9",
+                "config_json": "{}",
+            },
+        )
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

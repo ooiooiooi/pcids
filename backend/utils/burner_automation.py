@@ -191,20 +191,16 @@ SYSTEM_SCRIPT_CATALOG = [
             "interface_type_label": "接口类型",
             "interface_type_options": ["JTAG"],
             "target_config_file": "",
-            "target_config_file_label": "目标配置文件",
-            "target_config_file_required": True,
-            "gel_init_script": "",
-            "gel_init_script_label": "GEL初始化脚本",
-            "jtag_chain_index": 0,
-            "jtag_chain_index_label": "JTAG链路序号",
+            "target_config_file_label": "目标配置文件（.ccxml）",
+            "target_config_file_placeholder": "可留空，默认使用内置 SEED F28335 配置",
+            "target_config_file_hint": "默认配置适用于 SEED XDS510Plus + TMS320F28335；连接其他受支持的 TI DSP 时，请指定由 CCS 导出的 .ccxml 文件。",
             "erase_mode": "全片擦除",
             "erase_mode_label": "擦除方式",
-            "erase_mode_options": ERASE_OPTIONS,
+            "erase_mode_options": ["全片擦除"],
             "completion_action": "复位运行",
             "completion_action_label": "完成后动作",
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
-            "required_fields": ["target_config_file"],
             "retry_count": 1,
             "timeout_minutes": 120,
         },
@@ -382,7 +378,7 @@ TOOL_REQUIREMENTS = [
     {"burner": "SWD下载器", "tool": "pyOCD / OpenOCD / 厂商 SWD CLI", "env": "SWD_CMD_TEMPLATE / PYOCD_EXE / OPENOCD_EXE", "download": "https://pyocd.io/"},
     {"burner": "AL321", "tool": "Bundled openFPGALoader", "env": "AL321_CMD_TEMPLATE 或 OPENFPGALOADER_EXE", "download": "https://github.com/trabucayre/openFPGALoader"},
     {"burner": "HDSC CCID", "tool": "HDSC ISP/Programmer", "env": "HDSC_CMD_TEMPLATE 或 HDSC_ISP_CLI", "download": "https://www.hdsc.com.cn/"},
-    {"burner": "XDS510plus", "tool": "TI UniFlash / CCS DSS", "env": "UNIFLASH_CLI 或 DSS_BAT", "download": "https://www.ti.com/tool/UNIFLASH"},
+    {"burner": "XDS510plus", "tool": "CCS 5.5 DSS + SEED XDS510Plus plugin", "env": "DSS_BAT", "download": "https://www.ti.com/tool/CCSTUDIO"},
     {"burner": "MPLAB ICD 3 DV164035", "tool": "MPLAB X IPE ipecmd", "env": "IPECMD_EXE", "download": "https://www.microchip.com/en-us/tools-resources/develop/mplab-x-ide"},
     {"burner": "Altera Blaster II", "tool": "Intel Quartus Programmer CLI", "env": "QUARTUS_PGM", "download": "https://www.intel.com/content/www/us/en/software-kit/795188/intel-quartus-prime-lite-edition-design-software-version-23-1-1-for-windows.html"},
     {"burner": "Gowin USB Cable", "tool": "Gowin Programmer CLI", "env": "GOWIN_PROGRAMMER_CLI", "download": "https://www.gowinsemi.com/en/support/download_eda/"},
@@ -744,8 +740,8 @@ def _xds510plus_usb_preflight_source() -> str:
         if ([string]::IsNullOrWhiteSpace($expectedInstanceAnchor) -and -not [string]::IsNullOrWhiteSpace($expectedPhysicalLocation) -and $expectedPhysicalLocation -notlike "Port_#*") {
             $expectedInstanceAnchor = $expectedPhysicalLocation
         }
-        $knownHardwareIds = @("USB\VID_0547&PID_1020", "USB\VID_0C55&PID_0540")
-        $driverPatterns = @("Spectrum Digital", "SD USB Based Debug Tools", "sdusb2em")
+        $knownHardwareIds = @("USB\VID_0547&PID_1020")
+        $driverPatterns = @("SEED International", "EZUSBPLUS", "SEED USB2.0 PLUS Emulator")
 
         function Write-Line([string]$Text) {
             [Console]::Out.WriteLine($Text)
@@ -806,8 +802,7 @@ def _xds510plus_usb_preflight_source() -> str:
         }
 
         $queries = @(
-            "PNPDeviceID LIKE 'USB\\VID_0547%'",
-            "PNPDeviceID LIKE 'USB\\VID_0C55%'"
+            "PNPDeviceID LIKE 'USB\\VID_0547%'"
         )
         $entities = @()
         foreach ($query in $queries) {
@@ -853,7 +848,7 @@ def _xds510plus_usb_preflight_source() -> str:
                 $locationInfo -ieq $expectedInstanceAnchor
             )
             $matchesKnownHardware = Test-ContainsAny $hardwareText $knownHardwareIds
-            $boundToSpectrum = Test-ContainsAny $driverText $driverPatterns
+            $boundToSeed = Test-ContainsAny $driverText $driverPatterns
             $records += [pscustomobject]@{
                 InstanceId = $instanceId
                 Location = $locationInfo
@@ -864,7 +859,7 @@ def _xds510plus_usb_preflight_source() -> str:
                 Service = $service
                 DriverInf = $driverInf
                 DriverProvider = $driverProvider
-                BoundToSpectrum = $boundToSpectrum
+                BoundToSeed = $boundToSeed
                 MatchesLocation = $matchesLocation
                 MatchesInstance = $matchesInstance
                 MatchesKnownHardware = $matchesKnownHardware
@@ -919,8 +914,8 @@ def _xds510plus_usb_preflight_source() -> str:
             Write-Line "[INFO] Driver INF: $($item.DriverInf)"
             Write-Line "[INFO] Driver Provider: $($item.DriverProvider)"
             Write-Line "[INFO] Service: $($item.Service)"
-            Write-Line "[INFO] 已绑定 Spectrum Digital/SD USB Based Debug Tools/sdusb2em: $($item.BoundToSpectrum)"
-            if ($item.BoundToSpectrum -and (
+            Write-Line "[INFO] 已绑定 SEED/EZUSBPLUS 驱动: $($item.BoundToSeed)"
+            if ($item.BoundToSeed -and (
                 [string]$item.ProblemName -eq "CM_PROB_NONE" -or
                 [string]$item.ProblemCode -eq "0" -or
                 [string]::IsNullOrWhiteSpace([string]$item.ProblemCode) -or
@@ -928,13 +923,13 @@ def _xds510plus_usb_preflight_source() -> str:
             )) {
                 $hasBoundDevice = $true
             }
-            if (-not $item.BoundToSpectrum -or ([string]$item.ProblemName -ne "CM_PROB_NONE" -and -not [string]::IsNullOrWhiteSpace([string]$item.ProblemName))) {
+            if (-not $item.BoundToSeed -or ([string]$item.ProblemName -ne "CM_PROB_NONE" -and -not [string]::IsNullOrWhiteSpace([string]$item.ProblemName))) {
                 $hasDriverFailure = $true
             }
         }
 
         if ($hasBoundDevice) {
-            Write-Line "[INFO] XDS510plus 已绑定 Spectrum Digital 驱动，继续执行烧录命令。"
+            Write-Line "[INFO] SEED XDS510Plus 已绑定 EZUSBPLUS 驱动，继续执行烧录命令。"
             exit 0
         }
 
@@ -945,8 +940,8 @@ def _xds510plus_usb_preflight_source() -> str:
             Write-Line "[ERROR] 实例ID: $($first.InstanceId)"
             Write-Line "[ERROR] Hardware IDs: $($first.HardwareIds)"
             Write-Line "[ERROR] 当前状态: $($first.ProblemName) ($($first.Status))"
-            Write-Line "[ERROR] 失败原因: Windows 未正确绑定 Spectrum Digital 驱动。"
-            Write-Line "[ERROR] 处理建议: 请安装或绑定支持该硬件ID的 Spectrum Digital 驱动后再重试。"
+            Write-Line "[ERROR] 失败原因: Windows 未正确绑定 SEED EZUSBPLUS 驱动。"
+            Write-Line "[ERROR] 处理建议: 请安装 SEED XDS510Plus 官方驱动后重新插拔烧录器。"
             exit 2
         }
 
@@ -978,6 +973,89 @@ def _xds510plus_usb_preflight_setup() -> str:
     )
 
 
+def _xds510plus_dss_source() -> str:
+    return dedent(
+        r"""
+        importPackage(Packages.com.ti.debug.engine.scripting);
+        importPackage(Packages.com.ti.ccstudio.scripting.environment);
+        importPackage(Packages.java.lang);
+
+        function envValue(name, fallback) {
+            var value = System.getenv(name);
+            if (value == null || String(value).length == 0) {
+                return fallback;
+            }
+            return String(value);
+        }
+
+        var configFile = envValue("TARGET_CONFIG_FILE", "");
+        var firmwareFile = envValue("FIRMWARE_PATH", "");
+        var eraseMode = envValue("XDS510_ERASE_MODE", "full");
+        var completionAction = envValue("XDS510_COMPLETION_ACTION", "reset-run");
+        var writeVerify = envValue("WRITE_VERIFY", "1") == "1";
+        var scripting = ScriptingEnvironment.instance();
+        var server = scripting.getServer("DebugServer.1");
+        var session = null;
+
+        try {
+            print("SEED_XDS510_DSS_CONFIG_BEGIN");
+            server.setConfig(configFile.replace(/\\/g, "/"));
+            session = server.openSession("*", "*");
+
+            print("SEED_XDS510_CONNECT_BEGIN");
+            session.target.connect();
+            session.target.halt();
+            print("SEED_XDS510_CONNECT_OK");
+
+            if (eraseMode == "full") {
+                print("SEED_XDS510_FULL_ERASE_BEGIN");
+                session.flash.erase();
+                print("SEED_XDS510_FULL_ERASE_OK");
+                session.flash.options.setString("FlashOperations", writeVerify ? "Program, Verify" : "Program");
+            } else {
+                session.flash.options.setString("FlashOperations", writeVerify ? "Erase, Program, Verify" : "Erase, Program");
+            }
+
+            print("SEED_XDS510_PROGRAM_BEGIN");
+            session.memory.loadProgram(firmwareFile.replace(/\\/g, "/"));
+            print(writeVerify ? "SEED_XDS510_PROGRAM_VERIFY_OK" : "SEED_XDS510_PROGRAM_OK");
+
+            if (completionAction == "reset-run") {
+                print("SEED_XDS510_RESET_RUN_BEGIN");
+                session.target.reset();
+                session.target.run();
+                print("SEED_XDS510_RESET_RUN_OK");
+            }
+            print("SEED_XDS510_WORKFLOW_OK");
+        } catch (err) {
+            print("SEED_XDS510_WORKFLOW_FAILED: " + err);
+            throw err;
+        } finally {
+            if (session != null) {
+                try { session.terminate(); } catch (ignore) {}
+            }
+            try { server.stop(); } catch (ignore) {}
+        }
+        """
+    )
+
+
+def _xds510plus_dss_setup() -> str:
+    helper_base64 = base64.b64encode(_xds510plus_dss_source().encode("utf-8")).decode("ascii")
+    return dedent(
+        f"""\
+        set "XDS510_DSS_HELPER=%TEMP%\\pcids_seed_xds510plus_%TASK_ID%.js"
+        if "%TASK_ID%"=="" set "XDS510_DSS_HELPER=%TEMP%\\pcids_seed_xds510plus.js"
+        powershell -NoProfile -Command "$bytes=[System.Convert]::FromBase64String('{helper_base64}'); [System.IO.File]::WriteAllBytes($env:XDS510_DSS_HELPER, $bytes)"
+        set "XDS510_DSS_WRITE_EXIT=!ERRORLEVEL!"
+        if not "!XDS510_DSS_WRITE_EXIT!"=="0" (
+          echo [ERROR] 无法生成 SEED XDS510Plus DSS 脚本。
+          exit /b !XDS510_DSS_WRITE_EXIT!
+        )
+        """
+    )
+
+
 def _xds510plus_runner() -> str:
     return dedent(
         r"""
@@ -989,49 +1067,37 @@ def _xds510plus_runner() -> str:
           echo [ERROR] XDS510plus 目标配置文件不存在: %TARGET_CONFIG_FILE%
           exit /b 2
         )
-        if "%UNIFLASH_CLI%"=="" if "%XDS510_CMD_TEMPLATE%"=="" if not "%DSS_BAT%"=="" (
-          echo [ERROR] 已检测到 DSS_BAT，但 DSS 需要版本相关的 JavaScript/命令模板。
-          echo [ERROR] 请配置 XDS510_CMD_TEMPLATE，或配置可直接执行 -ccxml/-program 的 UNIFLASH_CLI/DSLite。
+        findstr /I /C:"SEED-XDS510PLUS_Connection.xml" "%TARGET_CONFIG_FILE%" >nul
+        if not "!ERRORLEVEL!"=="0" (
+          echo [ERROR] 目标配置不是 SEED XDS510Plus 配置: %TARGET_CONFIG_FILE%
+          exit /b 2
+        )
+        findstr /I /C:"seedxds510plusc28x.xml" "%TARGET_CONFIG_FILE%" >nul
+        if not "!ERRORLEVEL!"=="0" (
+          echo [ERROR] 目标配置未使用 SEED C28x 驱动: %TARGET_CONFIG_FILE%
+          exit /b 2
+        )
+        if "%DSS_BAT%"=="" (
+          echo [ERROR] 未找到 CCS DSS 启动器 DSS_BAT。
+          echo [ERROR] 请安装包含 SEED XDS510Plus 插件的 Code Composer Studio 5.5。
           exit /b 127
         )
-        if "%UNIFLASH_CLI%"=="" if "%XDS510_CMD_TEMPLATE%"=="" (
-          echo [ERROR] 未配置 UNIFLASH_CLI 或 XDS510_CMD_TEMPLATE，无法执行官方工具自动化。
-          echo [ERROR] 请安装 TI UniFlash/CCS，并配置 UNIFLASH_CLI、DSLite 或 XDS510_CMD_TEMPLATE。
+        if not exist "%DSS_BAT%" (
+          echo [ERROR] CCS DSS 启动器不存在: %DSS_BAT%
           exit /b 127
         )
         """
-    ) + _xds510plus_usb_preflight_setup() + dedent(
+    ) + _xds510plus_usb_preflight_setup() + _xds510plus_dss_setup() + dedent(
         r"""
-        if not "%XDS510_CMD_TEMPLATE%"=="" (
-          set "PCIDS_CMD=%XDS510_CMD_TEMPLATE%"
-          set "PCIDS_CMD=!PCIDS_CMD:{firmware}=%FIRMWARE_PATH%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{target}=%TARGET_CHIP%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{probe}=%BURNER_SN%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{interface}=%INTERFACE_TYPE%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{speed}=%WRITE_SPEED_KHZ%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{address}=%START_ADDRESS%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{erase}=%ERASE_MODE%!"
-          set "PCIDS_CMD=!PCIDS_CMD:{action}=%COMPLETION_ACTION%!"
-        ) else (
-          for %%I in ("%UNIFLASH_CLI%") do set "PCIDS_UNIFLASH_BASENAME=%%~nxI"
-          set "PCIDS_CCS_DSLITE=C:\ti\ccsv8\ccs_base\DebugServer\bin\DSLite.exe"
-          if /I "!PCIDS_UNIFLASH_BASENAME!"=="dslite.bat" (
-            if exist "!PCIDS_CCS_DSLITE!" (
-              set "PCIDS_CMD="!PCIDS_CCS_DSLITE!" flash -c "%TARGET_CONFIG_FILE%" -f "%FIRMWARE_PATH%""
-            ) else (
-              set "PCIDS_CMD="%UNIFLASH_CLI%" -c "%TARGET_CONFIG_FILE%" -f "%FIRMWARE_PATH%""
-            )
-          ) else (
-            if /I "!PCIDS_UNIFLASH_BASENAME!"=="dslite.exe" (
-              set "PCIDS_CMD="%UNIFLASH_CLI%" flash -c "%TARGET_CONFIG_FILE%" -f "%FIRMWARE_PATH%""
-            ) else (
-              set "PCIDS_CMD="%UNIFLASH_CLI%" -ccxml "%TARGET_CONFIG_FILE%" -program "%FIRMWARE_PATH%""
-            )
-          )
-        )
-        echo [EXEC] !PCIDS_CMD!
-        cmd /d /s /c "!PCIDS_CMD!"
-        exit /b !ERRORLEVEL!
+        set "XDS510_ERASE_MODE=full"
+        if "%ERASE_MODE%"=="扇区擦除" set "XDS510_ERASE_MODE=sector"
+        set "XDS510_COMPLETION_ACTION=reset-run"
+        if "%COMPLETION_ACTION%"=="不处理" set "XDS510_COMPLETION_ACTION=none"
+        echo [EXEC] "%DSS_BAT%" "%XDS510_DSS_HELPER%"
+        call "%DSS_BAT%" "%XDS510_DSS_HELPER%"
+        set "XDS510_DSS_EXIT=!ERRORLEVEL!"
+        del /f /q "%XDS510_DSS_HELPER%" >nul 2>nul
+        exit /b !XDS510_DSS_EXIT!
         """
     )
 
