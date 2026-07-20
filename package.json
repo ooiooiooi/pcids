@@ -82,10 +82,6 @@
         "to": "flash-adapter/pcids_flash.py"
       },
       {
-        "from": "config/codearts_flash_profiles.example.json",
-        "to": "flash-adapter/codearts_flash_profiles.example.json"
-      },
-      {
         "from": "tools/protocol_adapters",
         "to": "tools/protocol_adapters",
         "filter": [

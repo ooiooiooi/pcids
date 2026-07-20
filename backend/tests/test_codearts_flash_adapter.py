@@ -13,17 +13,17 @@ ADAPTER = ROOT / "scripts" / "pcids_flash.py"
 
 
 class CodeArtsFlashAdapterTests(unittest.TestCase):
-    def test_lists_every_system_burner_profile(self):
+    def test_lists_every_generic_burner_workflow(self):
         result = subprocess.run(
-            [sys.executable, str(ADAPTER), "list-profiles"],
+            [sys.executable, str(ADAPTER), "list-burners"],
             cwd=ROOT,
             capture_output=True,
             text=True,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        profiles = [json.loads(line)["profile"] for line in result.stdout.splitlines() if line.strip()]
-        self.assertEqual(set(profiles), {item["name"] for item in SYSTEM_SCRIPT_CATALOG})
+        workflows = [json.loads(line)["script"] for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(set(workflows), {item["name"] for item in SYSTEM_SCRIPT_CATALOG})
 
     def test_each_windows_system_burner_has_a_generated_batch_script(self):
         for item in SYSTEM_SCRIPT_CATALOG:
@@ -46,8 +46,10 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
                     sys.executable,
                     str(ADAPTER),
                     "run",
-                    "--profile",
-                    "mplab_icd3_pic_flash",
+                    "--burner",
+                    "MPLAB ICD 3 DV164035",
+                    "--target-chip",
+                    "PIC32MZ2048EFM144",
                     "--firmware",
                     str(firmware),
                     "--run-id",
@@ -67,6 +69,36 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
             self.assertEqual(events[-1]["event"], "completed")
             self.assertTrue((log_dir / "pcids-flash-codearts-test.log").is_file())
             self.assertTrue((log_dir / "pcids-flash-codearts-test.jsonl").is_file())
+
+    def test_generic_pwlink_alias_does_not_need_a_profile_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            firmware = root / "firmware.hex"
+            firmware.write_text(":00000001FF\n", encoding="ascii")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER),
+                    "run",
+                    "--burner",
+                    "PW-LINK",
+                    "--target-chip",
+                    "STM32F107",
+                    "--burner-sn",
+                    "PW-001",
+                    "--firmware",
+                    str(firmware),
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            event = json.loads(result.stdout.splitlines()[0])
+            self.assertEqual(event["script"], "pwlink_v2_arm_mcu_flash")
+            self.assertEqual(event["burner_sn"], "PW-001")
 
 
 if __name__ == "__main__":

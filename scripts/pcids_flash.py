@@ -1,9 +1,10 @@
 """PCIDS local flash adapter for CodeArts Build Windows agents.
 
 The adapter deliberately invokes only PCIDS system burner scripts from
-``SYSTEM_SCRIPT_CATALOG``.  It is therefore a stable automation surface for
-CI while preserving the existing PCIDS burner implementations and their
-parameter validation inside the generated scripts.
+``SYSTEM_SCRIPT_CATALOG``.  Its normal automation contract is generic:
+select a burner (and, only when a burner has multiple workflows, a script),
+then pass board/chip parameters with the request. A pipeline never needs a
+pre-created per-board profile file.
 """
 from __future__ import annotations
 
@@ -65,19 +66,41 @@ def _catalog_by_name() -> dict[str, dict[str, Any]]:
     return {str(item["name"]): item for item in SYSTEM_SCRIPT_CATALOG}
 
 
-def _read_profile_file(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"profile file is not valid JSON: {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError("profile file root must be a JSON object")
-    profiles = value.get("profiles", value)
-    if not isinstance(profiles, dict):
-        raise ValueError("profiles must be a JSON object")
-    return profiles
+def _normalize_token(value: str) -> str:
+    """Compare burner identifiers without imposing a UI-specific spelling."""
+    return "".join(char for char in str(value or "").upper() if char.isalnum())
+
+
+_BURNER_ALIASES = {
+    "PWLINK": "PWLINK2",
+    "PWLINKV2": "PWLINK2",
+    "STLINKV2": "STLINK",
+    "STLINKV3": "STLINK",
+}
+
+
+def _resolve_item(burner_name: str, script_name: str) -> dict[str, Any]:
+    """Resolve one catalog entry from the generic burner/workflow selector."""
+    catalog = _catalog_by_name()
+    selected_script = str(script_name or "").strip()
+    if selected_script:
+        item = catalog.get(selected_script)
+        if not item:
+            raise ValueError(f"unknown script '{selected_script}'. Use list-burners to see supported workflows.")
+        if burner_name and _normalize_token(item.get("burner", "")) != _normalize_token(_BURNER_ALIASES.get(_normalize_token(burner_name), burner_name)):
+            raise ValueError(f"script '{selected_script}' does not belong to burner '{burner_name}'")
+        return item
+    if not burner_name:
+        raise ValueError("provide --burner or --script")
+    normalized_burner = _normalize_token(burner_name)
+    normalized_burner = _normalize_token(_BURNER_ALIASES.get(normalized_burner, normalized_burner))
+    candidates = [item for item in SYSTEM_SCRIPT_CATALOG if _normalize_token(item.get("burner", "")) == normalized_burner]
+    if not candidates:
+        raise ValueError(f"unknown burner '{burner_name}'. Use list-burners to see supported burners.")
+    if len(candidates) != 1:
+        choices = ", ".join(str(item["name"]) for item in candidates)
+        raise ValueError(f"burner '{burner_name}' has multiple workflows; add --script. Choices: {choices}")
+    return candidates[0]
 
 
 def _parse_json_object(raw: str, argument: str) -> dict[str, Any]:
@@ -92,24 +115,20 @@ def _parse_json_object(raw: str, argument: str) -> dict[str, Any]:
     return value
 
 
-def _resolve_profile(profile_name: str, profile_file: Path, overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
-    catalog = _catalog_by_name()
-    profiles = _read_profile_file(profile_file)
-    raw_profile = profiles.get(profile_name, {})
-    if raw_profile and not isinstance(raw_profile, dict):
-        raise ValueError(f"profile '{profile_name}' must be a JSON object")
-    raw_profile = dict(raw_profile or {})
-    script_name = str(raw_profile.get("script") or profile_name).strip()
-    item = catalog.get(script_name)
-    if not item:
-        raise ValueError(f"unknown profile/script '{profile_name}'. Use list-profiles to see supported system scripts.")
+def _resolve_request(args: argparse.Namespace, overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a request from generic CLI fields only."""
+    item = _resolve_item(args.burner, args.script)
     config = dict(item.get("default_config") or {})
-    profile_config = raw_profile.get("config", {})
-    if profile_config and not isinstance(profile_config, dict):
-        raise ValueError(f"profile '{profile_name}'.config must be a JSON object")
-    config.update(profile_config or {})
     config.update(overrides)
-    return item, config, str(raw_profile.get("description") or "")
+    if args.target_chip:
+        config["target_chip"] = args.target_chip
+    if args.board:
+        config["board_name"] = args.board
+    if args.burner_sn:
+        config["burner_sn"] = args.burner_sn
+    if args.burner_port:
+        config["burner_port"] = args.burner_port
+    return item, config
 
 
 def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run_id: str) -> dict[str, str]:
@@ -143,7 +162,7 @@ def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run
     )
     env = build_runtime_env(task, normalized, None, burner, script, str(firmware))
     env["PCIDS_RUN_ID"] = run_id
-    env["PCIDS_PROFILE"] = item["name"]
+    env["PCIDS_SCRIPT"] = item["name"]
     return env
 
 
@@ -159,15 +178,26 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_INVALID_REQUEST
     logger = EventLogger(Path(args.log_dir or (get_app_data_root() / "logs" / "codearts")).expanduser(), run_id)
     try:
-        item, config, description = _resolve_profile(args.profile, Path(args.profile_file), _parse_json_object(args.config_json, "--config-json"))
+        item, config = _resolve_request(args, _parse_json_object(args.config_json, "--config-json"))
         env = _build_env(item, config, firmware, run_id)
     except Exception as exc:
-        logger.emit("failed", status="error", message=str(exc), code="INVALID_PROFILE")
+        logger.emit("failed", status="error", message=str(exc), code="INVALID_REQUEST")
         return EXIT_INVALID_REQUEST
 
-    logger.emit("started", profile=item["name"], firmware=str(firmware), run_id=run_id, description=description, text_log=str(logger.text_path), json_log=str(logger.jsonl_path))
+    logger.emit(
+        "started",
+        script=item["name"],
+        burner=item.get("burner"),
+        firmware=str(firmware),
+        run_id=run_id,
+        target_chip=config.get("target_chip") or config.get("chip_model"),
+        board=config.get("board_name"),
+        burner_sn=config.get("burner_sn") or (config.get("burner") or {}).get("sn"),
+        text_log=str(logger.text_path),
+        json_log=str(logger.jsonl_path),
+    )
     if args.dry_run:
-        logger.emit("completed", status="success", message="dry run completed", profile=item["name"])
+        logger.emit("completed", status="success", message="dry run completed", script=item["name"])
         return 0
 
     # The CodeArts adapter is intentionally a local Windows burner surface.
@@ -178,7 +208,7 @@ def _run(args: argparse.Namespace) -> int:
             "failed",
             status="error",
             code="HYBRID_WORKFLOW_REQUIRED",
-            message="this profile is a PCIDS hybrid workflow; use the PCIDS task API/executor instead of the local CodeArts burner adapter",
+            message="this workflow is a PCIDS hybrid workflow; use the PCIDS task API/executor instead of the local CodeArts burner adapter",
         )
         return EXIT_INVALID_REQUEST
 
@@ -196,7 +226,7 @@ def _run(args: argparse.Namespace) -> int:
         script_path.write_text(script_content, encoding="utf-8-sig", newline="\r\n")
         process_env = os.environ.copy()
         process_env.update({key: str(value) for key, value in env.items()})
-        logger.emit("script-start", profile=item["name"], script=str(script_path), burner=env.get("BURNER_NAME"))
+        logger.emit("script-start", workflow=item["name"], script=str(script_path), burner=env.get("BURNER_NAME"))
         process = subprocess.Popen(
             ["cmd.exe", "/d", "/s", "/c", f'call "{script_path}"'],
             cwd=str(PROJECT_ROOT),
@@ -221,40 +251,43 @@ def _run(args: argparse.Namespace) -> int:
     return return_code if 0 < return_code < 256 else EXIT_EXECUTION_FAILED
 
 
-def _list_profiles(args: argparse.Namespace) -> int:
-    try:
-        profiles = _read_profile_file(Path(args.profile_file))
-    except ValueError as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
-        return EXIT_INVALID_REQUEST
+def _list_burners() -> int:
+    """Expose the generic selector contract."""
     for item in SYSTEM_SCRIPT_CATALOG:
-        name = str(item["name"])
-        profile = profiles.get(name, {})
-        print(json.dumps({"profile": name, "burner": item.get("burner"), "task_type": item.get("task_type", "board"), "configured": bool(profile)}, ensure_ascii=False))
-    for name, profile in profiles.items():
-        if name not in _catalog_by_name() and isinstance(profile, dict):
-            print(json.dumps({"profile": name, "script": profile.get("script"), "configured": True}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "burner": item.get("burner"),
+                    "script": item["name"],
+                    "task_type": item.get("task_type", "board"),
+                    "type": item.get("type"),
+                },
+                ensure_ascii=False,
+            )
+        )
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PCIDS local flash adapter for CodeArts Build Windows agents")
-    parser.add_argument(
-        "--profile-file",
-        default=os.environ.get("PCIDS_FLASH_PROFILE_FILE", str(get_app_data_root() / "codearts_flash_profiles.json")),
-        help="JSON profile file path",
-    )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("list-profiles", help="list supported PCIDS system burner profiles")
-    run_parser = subparsers.add_parser("run", help="run one PCIDS system burner profile")
-    run_parser.add_argument("--profile", required=True, help="profile name or PCIDS system script name")
+    subparsers.add_parser("list-burners", help="list generic burner and workflow selectors")
+    run_parser = subparsers.add_parser("run", help="run a PCIDS burner workflow")
+    run_parser.add_argument("--burner", default="", help="generic burner type, e.g. ST-LINK or PW-LINK")
+    run_parser.add_argument("--script", default="", help="PCIDS workflow; required only if the burner has multiple workflows")
+    run_parser.add_argument("--target-chip", default="", help="board/chip model for this run")
+    run_parser.add_argument("--board", default="", help="optional board model or asset name for traceability")
+    run_parser.add_argument("--burner-sn", default="", help="optional connected programmer serial number")
+    run_parser.add_argument("--burner-port", default="", help="optional USB port/location selector")
     run_parser.add_argument("--firmware", required=True, help="firmware file downloaded by CodeArts Artifact step")
-    run_parser.add_argument("--config-json", default="{}", help="JSON object with profile runtime overrides")
+    run_parser.add_argument("--config-json", default="{}", help="JSON object with workflow-specific parameters")
     run_parser.add_argument("--run-id", default="", help="CodeArts build/run identifier")
     run_parser.add_argument("--log-dir", default="", help="directory for .log and .jsonl output")
-    run_parser.add_argument("--dry-run", action="store_true", help="validate profile and emit logs without touching a burner")
+    run_parser.add_argument("--dry-run", action="store_true", help="validate request and emit logs without touching a burner")
     args = parser.parse_args(argv)
-    return _list_profiles(args) if args.command == "list-profiles" else _run(args)
+    if args.command == "list-burners":
+        return _list_burners()
+    return _run(args)
 
 
 if __name__ == "__main__":
