@@ -133,6 +133,132 @@ AL321 Flash 固化例子：
 
 不应把工具可执行文件路径、账号密码或厂商 CLI 原始命令放进 `--config-json`。这些属于 Agent 工位环境（例如 `STM32_PROGRAMMER_CLI`、`DSS_BAT`、`IPECMD_EXE`、`QUARTUS_PGM`、`GOWIN_PROGRAMMER_CLI`），应由 PCIDS 安装和运维配置管理。`--config-json` 只传这次板卡烧录所需的、已有脚本认可的参数。
 
+## 可直接复制到 CodeArts 的 PowerShell 配置
+
+在 CodeArts Build 的 Windows PowerShell 步骤中，先由前置“下载发布仓库包”步骤把制品下载到 `$env:WORKSPACE`。下面每段均可直接粘贴；只替换 `REPLACE_*` 和固件文件名，删除不需要的行即可。每条命令末尾的 `exit $LASTEXITCODE` 必须保留，让 Build 正确判定烧录成功或失败。
+
+通用约定：
+
+```powershell
+$adapter = 'C:\Program Files\PCIDS\resources\flash-adapter\pcids-flash.cmd'
+$logDir = "$env:WORKSPACE\pcids-logs"
+```
+
+### 1. ARM：ST-LINK
+
+必换：`REPLACE_STLINK_SN`、`STM32F407VGT6`（实际芯片）；`.bin` 固件时必换 `start_address`。
+
+```powershell
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'ST-LINK' --target-chip 'STM32F407VGT6' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_STLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":4000,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+若固件是 `.bin`，将 JSON 替换为：
+
+```json
+{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":4000,"start_address":"0x08000000","completion_action":"复位运行","write_verify":true}
+```
+
+### 2. ARM：J-LINK、PW-LINK、GDLINK、SWD 下载器、HDSC CCID
+
+以下五段与 ST-LINK 同样由 `--target-chip`、`--burner-sn` 绑定实际芯片和探针；`.bin` 时追加 `start_address`。
+
+```powershell
+# J-LINK
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'J-LINK' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_JLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":4000,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# PW-LINK；PW-LINK 与 PWLINK2 均可识别
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'PW-LINK' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_PWLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# GDLINK；量产模式可改为 量产烧录 或 擦除后烧录
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'GDLINK' --target-chip 'REPLACE_GD32_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_GDLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"bichina_burn_mode":"单烧","completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# 通用 SWD 下载器
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'SWD下载器' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_SWD_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# HDSC CCID；接口固定 UART。HDSC 厂商 CLI/模板由 Agent 环境配置。
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'HDSC CCID' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_HDSC_SN' --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+### 3. DSP：XDS510plus / TMS320F28335
+
+必换：固件文件名必须是 `.out`。`target_config_file` 留空时使用 PCIDS 内置 SEED F28335 `.ccxml`；非默认板卡将其替换为 Agent 上的真实 `.ccxml` 绝对路径。
+
+```powershell
+$firmware = "$env:WORKSPACE\Project.out"
+& $adapter run --burner 'XDS510plus' --target-chip 'TMS320F28335' --board 'REPLACE_DSP_BOARD' --config-json '{"interface_type":"JTAG","target_config_file":"","erase_mode":"全片擦除","completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+### 4. PIC：MPLAB ICD 3
+
+必换：`REPLACE_PIC_CHIP`。当前原 IPE 调用以 ICD3 工具链为准；若同机存在多支 ICD3，应在 Agent 工位侧做物理隔离或补充厂商工具的探针绑定配置。
+
+```powershell
+$firmware = "$env:WORKSPACE\Project.hex"
+& $adapter run --burner 'MPLAB ICD 3 DV164035' --target-chip 'REPLACE_PIC_CHIP' --board 'REPLACE_PIC_BOARD' --config-json '{"erase_mode":"全片擦除","eeprom_write":"否","blank_check":"否","execute_program":"是","completion_action":"编程复位后运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+### 5. FPGA：AL321、Altera Blaster II、Gowin USB Cable
+
+```powershell
+# AL321：SRAM 下载；固件应为 .bit
+$firmware = "$env:WORKSPACE\Project.bit"
+& $adapter run --burner 'AL321' --target-chip 'REPLACE_XILINX_PART' --board 'REPLACE_FPGA_BOARD' --burner-sn 'REPLACE_AL321_SN' --config-json '{"interface_type":"JTAG","execution_operation":"SRAM下载","qspi_flash_model":"qspi-x4-single","erase_mode":"默认自动擦除","completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# AL321：Flash 固化；固件必须为 .bin，FSBL 必须是 Agent 上真实的 .elf 路径
+$firmware = "$env:WORKSPACE\BOOT.bin"
+& $adapter run --burner 'AL321' --target-chip 'REPLACE_XILINX_PART' --board 'REPLACE_FPGA_BOARD' --burner-sn 'REPLACE_AL321_SN' --config-json '{"interface_type":"JTAG","execution_operation":"Flash固化","qspi_flash_model":"qspi-x4-single","target_config_file":"D:\\PCIDS-AgentData\\REPLACE_FSBL.elf","start_address":"0x0","erase_mode":"全片擦除","completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# Altera FPGA；必须保留 --script
+$firmware = "$env:WORKSPACE\Project.sof"
+& $adapter run --burner 'Altera Blaster II' --script 'altera_blaster_ii_fpga_flash' --target-chip 'REPLACE_INTEL_FPGA_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{"interface_type":"JTAG","erase_mode":"默认自动擦除","cable_index":0,"write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+```powershell
+# Gowin FPGA
+$firmware = "$env:WORKSPACE\Project.fs"
+& $adapter run --burner 'Gowin USB Cable' --target-chip 'REPLACE_GOWIN_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{"interface_type":"JTAG","execution_operation":"Flash固化","erase_mode":"全片擦除","cable_index":1,"tck_frequency":"1MHz","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
+### 6. CPLD：Altera Blaster II
+
+这里与 FPGA 唯一的选择差异是 `--script`；必须填写 CPLD 工作流，不能省略。
+
+```powershell
+$firmware = "$env:WORKSPACE\Project.pof"
+& $adapter run --burner 'Altera Blaster II' --script 'altera_blaster_ii_cpld_flash' --target-chip 'REPLACE_CPLD_PART' --board 'REPLACE_CPLD_BOARD' --config-json '{"interface_type":"JTAG","pre_erase":"默认是","tck_frequency":"2.5MHz","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+exit $LASTEXITCODE
+```
+
 ## 日志和退出码
 
 适配器将事件以 JSON Lines 输出到 Build 控制台，同时在 `--log-dir` 写入 `.log` 与 `.jsonl` 文件。上传这两个文件作为 Build 产物即可归档。
