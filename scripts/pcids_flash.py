@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG, build_system_script_content
+from backend.utils.app_paths import get_app_data_root
 from backend.utils.task_execution import build_runtime_env, validate_script_execution_config
 
 
@@ -156,7 +157,7 @@ def _run(args: argparse.Namespace) -> int:
     if not run_id.replace("-", "").replace("_", "").isalnum():
         print(json.dumps({"event": "failed", "status": "error", "code": "INVALID_RUN_ID", "message": "run-id allows only letters, numbers, hyphen and underscore"}, ensure_ascii=False))
         return EXIT_INVALID_REQUEST
-    logger = EventLogger(Path(args.log_dir or (PROJECT_ROOT / "logs" / "codearts")).expanduser(), run_id)
+    logger = EventLogger(Path(args.log_dir or (get_app_data_root() / "logs" / "codearts")).expanduser(), run_id)
     try:
         item, config, description = _resolve_profile(args.profile, Path(args.profile_file), _parse_json_object(args.config_json, "--config-json"))
         env = _build_env(item, config, firmware, run_id)
@@ -238,7 +239,11 @@ def _list_profiles(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PCIDS local flash adapter for CodeArts Build Windows agents")
-    parser.add_argument("--profile-file", default=os.environ.get("PCIDS_FLASH_PROFILE_FILE", str(PROJECT_ROOT / "config" / "codearts_flash_profiles.json")), help="JSON profile file path")
+    parser.add_argument(
+        "--profile-file",
+        default=os.environ.get("PCIDS_FLASH_PROFILE_FILE", str(get_app_data_root() / "codearts_flash_profiles.json")),
+        help="JSON profile file path",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list-profiles", help="list supported PCIDS system burner profiles")
     run_parser = subparsers.add_parser("run", help="run one PCIDS system burner profile")

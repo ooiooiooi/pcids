@@ -15,11 +15,12 @@ PCIDS 已登记的系统烧录脚本，不接受原始 shell 命令，因此不�
 ## CodeArts Build PowerShell 步骤
 
 ```powershell
-$pcids = 'D:\PCIDS'
+$adapter = 'C:\Program Files\PCIDS\resources\flash-adapter\pcids-flash.cmd'
+$profiles = 'D:\PCIDS-AgentData\codearts_flash_profiles.json'
 $firmware = "$env:WORKSPACE\artifact\firmware.hex"
 
-& "$pcids\scripts\pcids-flash.cmd" `
-  --profile-file "$pcids\config\codearts_flash_profiles.json" `
+& $adapter `
+  --profile-file $profiles `
   run `
   --profile 'STLINK_STM32_PRODUCT_A' `
   --firmware $firmware `

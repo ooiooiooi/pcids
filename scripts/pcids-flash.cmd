@@ -1,8 +1,12 @@
 @echo off
 setlocal
-rem CodeArts Build Windows entrypoint.  It calls only the PCIDS allow-listed adapter.
+rem CodeArts Build Windows entrypoint. It works both in a source checkout and
+rem in the installed Electron application's resources\\flash-adapter directory.
 set "PCIDS_ROOT=%~dp0.."
-if exist "%PCIDS_ROOT%\.venv\Scripts\python.exe" (
+set "PCIDS_BACKEND_EXE=%PCIDS_ROOT%\backend\pcids_backend.exe"
+if exist "%PCIDS_BACKEND_EXE%" (
+  "%PCIDS_BACKEND_EXE%" --run-script "%~dp0pcids_flash.py" %*
+) else if exist "%PCIDS_ROOT%\.venv\Scripts\python.exe" (
   "%PCIDS_ROOT%\.venv\Scripts\python.exe" "%~dp0pcids_flash.py" %*
 ) else (
   python "%~dp0pcids_flash.py" %*

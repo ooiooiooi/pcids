@@ -18,6 +18,18 @@
       ]
     },
     {
+      "from": "scripts/pcids-flash.cmd",
+      "to": "flash-adapter/pcids-flash.cmd"
+    },
+    {
+      "from": "scripts/pcids_flash.py",
+      "to": "flash-adapter/pcids_flash.py"
+    },
+    {
+      "from": "config/codearts_flash_profiles.example.json",
+      "to": "flash-adapter/codearts_flash_profiles.example.json"
+    },
+    {
       "from": "tools/codearts_release_debugger/browser_runtime",
       "to": "tools/codearts_browser_runtime",
       "filter": [

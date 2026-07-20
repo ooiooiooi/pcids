@@ -74,6 +74,18 @@
         "to": "driver-install/install-burner-drivers.ps1"
       },
       {
+        "from": "scripts/pcids-flash.cmd",
+        "to": "flash-adapter/pcids-flash.cmd"
+      },
+      {
+        "from": "scripts/pcids_flash.py",
+        "to": "flash-adapter/pcids_flash.py"
+      },
+      {
+        "from": "config/codearts_flash_profiles.example.json",
+        "to": "flash-adapter/codearts_flash_profiles.example.json"
+      },
+      {
         "from": "tools/protocol_adapters",
         "to": "tools/protocol_adapters",
         "filter": [
