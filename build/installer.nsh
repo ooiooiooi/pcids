@@ -12,6 +12,12 @@
 !macroend
 
 !macro customInstall
+  ; Keep CodeArts pipeline commands independent from the user-selected
+  ; installation folder. This is a machine variable because the Windows
+  ; CodeArts Agent commonly runs under a different service account.
+  WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_FLASH_ADAPTER" "$INSTDIR\resources\flash-adapter\pcids-flash.cmd"
+  DetailPrint "Configured PCIDS_FLASH_ADAPTER for CodeArts Agent."
+
   StrCpy $0 "$INSTDIR\logs"
 
   CreateDirectory "$0"
@@ -26,5 +32,6 @@
 !macroend
 
 !macro customUnInstall
+  DeleteRegValue HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_FLASH_ADAPTER"
   !insertmacro CloseRunningPcidsProcesses
 !macroend
