@@ -169,6 +169,18 @@ def _run(args: argparse.Namespace) -> int:
         logger.emit("completed", status="success", message="dry run completed", profile=item["name"])
         return 0
 
+    # The CodeArts adapter is intentionally a local Windows burner surface.
+    # Hybrid network/serial workflows have their own PCIDS task executor and
+    # must not be accidentally fed to cmd.exe as if they were USB/JTAG tools.
+    if str(item.get("task_type") or "board") == "hybrid" or str(item.get("type") or "").lower() != "bat":
+        logger.emit(
+            "failed",
+            status="error",
+            code="HYBRID_WORKFLOW_REQUIRED",
+            message="this profile is a PCIDS hybrid workflow; use the PCIDS task API/executor instead of the local CodeArts burner adapter",
+        )
+        return EXIT_INVALID_REQUEST
+
     if os.name != "nt":
         logger.emit("failed", status="error", code="WINDOWS_REQUIRED", message="PCIDS CodeArts local burner adapter requires Windows")
         return EXIT_INVALID_REQUEST

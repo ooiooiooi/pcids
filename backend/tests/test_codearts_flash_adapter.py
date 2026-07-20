@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG
+from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG, build_system_script_content
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +24,16 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         profiles = [json.loads(line)["profile"] for line in result.stdout.splitlines() if line.strip()]
         self.assertEqual(set(profiles), {item["name"] for item in SYSTEM_SCRIPT_CATALOG})
+
+    def test_each_windows_system_burner_has_a_generated_batch_script(self):
+        for item in SYSTEM_SCRIPT_CATALOG:
+            if item.get("task_type") == "hybrid" or item.get("type") != "bat":
+                continue
+            with self.subTest(profile=item["name"]):
+                content = build_system_script_content(item["name"], item["burner"])
+                self.assertTrue(content.strip())
+                self.assertIn("FIRMWARE_PATH", content)
+                self.assertIn("exit /b", content)
 
     def test_dry_run_writes_machine_readable_logs_without_running_hardware(self):
         with tempfile.TemporaryDirectory() as temp_dir:
