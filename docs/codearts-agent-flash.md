@@ -65,6 +65,24 @@ Altera CPLD: --burner "Altera Blaster II" --script altera_blaster_ii_cpld_flash
 
 所有 USB/JTAG 本地脚本均可附加：`retry_count`（整数，默认 `1`）、`timeout_minutes`（整数，默认 `120`）、`integrity`（布尔值）和 `write_verify`（布尔值）。是否真正由厂商工具支持，仍以原 PCIDS 脚本和工具链为准。
 
+### 必填判定
+
+这里的“必填”是 PCIDS 适配器或生成的烧录脚本会拒绝执行的字段，不是推荐填写项。
+
+| 范围 | 必填 | 条件必填 | 可不填（采用默认或自动探测） |
+| --- | --- | --- | --- |
+| 所有本地流程 | `run`、`--firmware`，以及 `--burner` 或唯一的 `--script` | 无 | `--board`、`--run-id`、`--log-dir`。 |
+| ST-LINK、PW-LINK、GDLINK、SWD 下载器 | `--target-chip`、`--burner-sn` | 固件为 `.bin` 时 `start_address` | `interface_type`、`erase_mode`、`write_speed_khz`、`completion_action` 均有脚本默认值。 |
+| J-LINK | `--burner-sn`，以及 `--target-chip` **或** `--board` 至少一个 | 固件为 `.bin` 时建议填写 `start_address`；pyOCD 回退路径会要求它 | 其余 ARM 参数都有默认值。 |
+| XDS510plus | 固件必须为 `.out` | 自定义目标时 `target_config_file` 必须为 Agent 本地 `.ccxml`；当前受支持目标为 F28335 | `target_config_file` 留空时使用内置 SEED F28335 配置。 |
+| MPLAB ICD3 | `--target-chip` | 无 | ICD3 序列号目前不参与原 IPE 命令选择；其他 PIC 策略均有默认值。 |
+| AL321 | 无额外硬性参数 | `execution_operation=Flash固化` 时，`target_config_file`（本地 `.elf`）必填；固件必须为 `.bin` | SRAM 下载、QSPI、擦除、地址和完成动作有默认值。 |
+| Altera FPGA/CPLD | `--script`（因 Blaster II 有两个工作流） | 无 | `cable_index` 默认 `0`；其余字段有默认值。 |
+| Gowin | `--target-chip` | 无 | `cable_index` 默认 `1`，`tck_frequency` 默认 `1MHz`；其余字段有默认值。 |
+| SD 卡 | `sd_target_path` | 无 | `format_sd_card`、`completion_action` 有默认值。 |
+
+`--burner-sn` 虽然在 ICD3、Altera、Gowin 的现有厂商脚本中不是硬性校验字段，但一台 Agent 连接多支同类烧录器时，仍应传入并逐步补充厂商工具的精确绑定能力；不能依赖 USB 枚举顺序。
+
 ### ARM MCU
 
 | 脚本 | `--burner` | 固件 | 专用字段与合法值 |
