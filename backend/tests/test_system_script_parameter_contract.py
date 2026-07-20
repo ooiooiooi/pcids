@@ -12,6 +12,11 @@ from backend.utils.db import DEFAULT_PRODUCT_CATALOG
 
 
 class SystemScriptParameterContractTests(unittest.TestCase):
+    def test_batch_header_quotes_usb_binding_diagnostics(self):
+        content = build_system_script_content("pwlink_v2_arm_mcu_flash", "PWLINK2")
+        self.assertIn('echo [CONFIG] BURNER_PORT="%BURNER_PORT%"', content)
+        self.assertIn('echo [CONFIG] BURNER_LOCATION="%BURNER_LOCATION%"', content)
+
     def test_parameterized_vendor_templates_receive_target_and_probe(self):
         for script_name, burner_name in [
             ("al321_fpga_mcu_flash", "AL321"),
@@ -68,6 +73,7 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertIn('findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!" >nul', content)
         self.assertIn('set "GOWIN_OPERATION=6"', content)
         self.assertIn('set "GOWIN_OPERATION=17"', content)
+        self.assertNotIn('switch-gowin-usb-mode.ps1', content)
 
     def test_stream_helper_is_written_as_utf8_with_bom_for_windows_powershell(self):
         content = build_system_script_content("gowin_usb_cable_fpga_flash", "Gowin USB Cable")

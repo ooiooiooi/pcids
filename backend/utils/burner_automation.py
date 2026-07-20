@@ -407,8 +407,10 @@ def _batch_header(script_name: str, burner_name: str) -> str:
         echo [CONFIG] SCRIPT_NAME=%SCRIPT_NAME%
         echo [CONFIG] BURNER_NAME=%BURNER_NAME%
         echo [CONFIG] BURNER_SN=%BURNER_SN%
-        echo [CONFIG] BURNER_PORT=%BURNER_PORT%
-        echo [CONFIG] BURNER_LOCATION=%BURNER_LOCATION%
+        rem USB instance paths may contain cmd metacharacters such as '&'. Keep the
+        rem expanded values quoted so diagnostic output cannot be executed as a command.
+        echo [CONFIG] BURNER_PORT="%BURNER_PORT%"
+        echo [CONFIG] BURNER_LOCATION="%BURNER_LOCATION%"
         echo [CONFIG] TARGET_CHIP=%TARGET_CHIP%
         echo [CONFIG] FIRMWARE_PATH=%FIRMWARE_PATH%
         echo [CONFIG] IDE_NAME=%IDE_NAME%

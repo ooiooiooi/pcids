@@ -110,6 +110,11 @@ tools/burners/AL321/*
 !tools/burners/AL321/drivers/
 tools/burners/AL321/drivers/*
 !tools/burners/AL321/drivers/switch-al321-driver.ps1
+!tools/burners/GOWIN/
+tools/burners/GOWIN/*
+!tools/burners/GOWIN/drivers/
+tools/burners/GOWIN/drivers/*
+!tools/burners/GOWIN/drivers/switch-gowin-usb-mode.ps1
 !tools/burners/HDSC/
 tools/burners/HDSC/*
 !tools/burners/HDSC/hdsc_ccid_agent.py

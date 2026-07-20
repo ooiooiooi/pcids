@@ -106,6 +106,7 @@ from backend.utils.runtime_dependencies import configure_bundled_tools, recover_
 from backend.utils.agent_security import build_agent_headers, require_agent_token
 from backend.utils.text_normalization import normalize_text, normalize_text_payload, parse_json_object
 from backend.utils.app_paths import get_task_runs_root
+from backend.utils.burner_environment import BurnerEnvironmentError, ensure_burner_environment, restore_burner_environment
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -4808,7 +4809,36 @@ async def _execute_script_content_locally(
     script_ext = _get_script_extension(normalized_type)
 
     temp_script_path = ""
+    environment_log = ""
     try:
+        try:
+            environment_log = await asyncio.to_thread(ensure_burner_environment, script_name, env)
+            logger.info(
+                "task.burner_environment.ready | %s",
+                json.dumps({"script_name": script_name, "task_id": env.get("TASK_ID")}, ensure_ascii=False),
+            )
+            if monitor:
+                monitor.record("burner-environment", "success", "烧录器环境检查完成", script_name=script_name)
+            if output_callback and environment_log:
+                await output_callback("stdout", f"{environment_log}\n")
+        except BurnerEnvironmentError as exc:
+            burner_name = str(env.get("BURNER_NAME") or env.get("BURNER_TYPE") or script_name or "未知烧录器")
+            failure_reason = "\n".join(
+                [
+                    "=== 烧录器环境检查 ===",
+                    f"[环境检查] 烧录器：{burner_name}",
+                    "[环境检查] 处理结果：失败，未执行烧录脚本",
+                    f"[环境检查] 失败原因：{exc}",
+                ]
+            )
+            logger.warning(
+                "task.burner_environment.failed | %s",
+                json.dumps({"script_name": script_name, "task_id": env.get("TASK_ID"), "error": str(exc)}, ensure_ascii=False),
+            )
+            if monitor:
+                monitor.record("burner-environment", "failed", "烧录器环境检查/切换失败", reason=str(exc))
+            return False, failure_reason, failure_reason
+
         with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
             temp_script.write(script_content)
             temp_script_path = temp_script.name
@@ -4840,6 +4870,8 @@ async def _execute_script_content_locally(
             output_callback=output_callback,
             stream_output=not (normalized_type == "bat" and output_callback is None),
         )
+        if environment_log:
+            stdout = f"{environment_log}\n\n{stdout or ''}"
         exit_code: Optional[int] = 0 if ok else None
         exit_code_match = re.search(r"(\d+)\s*$", str(failure_reason or ""))
         if not ok and exit_code_match:
@@ -4888,6 +4920,18 @@ async def _execute_script_content_locally(
         )
         return False, log_text, _command_failure_reason(stdout, stderr, failure_reason or "脚本执行失败")
     finally:
+        try:
+            restore_log = await asyncio.to_thread(restore_burner_environment, script_name, env)
+            if restore_log:
+                logger.info(
+                    "task.burner_environment.restored | %s",
+                    json.dumps({"script_name": script_name, "task_id": env.get("TASK_ID")}, ensure_ascii=False),
+                )
+        except Exception as exc:
+            logger.exception(
+                "task.burner_environment.restore_failed | %s",
+                json.dumps({"script_name": script_name, "task_id": env.get("TASK_ID"), "error": str(exc)}, ensure_ascii=False),
+            )
         try:
             if temp_script_path and os.path.exists(temp_script_path):
                 os.remove(temp_script_path)
