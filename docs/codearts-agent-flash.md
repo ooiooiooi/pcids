@@ -59,6 +59,62 @@ Altera CPLD: --burner "Altera Blaster II" --script altera_blaster_ii_cpld_flash
 
 `--config-json` 只包含该次任务的板卡参数；固件路径、烧录器型号和序列号均不写死在 PCIDS 配置文件中。PCIDS 仍会用原脚本的参数校验拒绝不支持的接口、错误固件格式和不完整的必填参数。
 
+## 各系统脚本的 `--config-json` 参数
+
+以下字段均是**本次任务参数**。未传入的字段采用 PCIDS 当前脚本默认值；`target_chip`、板卡名和烧录器序列号分别通过 `--target-chip`、`--board`、`--burner-sn` 传入，不放入 JSON。所有 JSON 必须是一行有效 JSON，双引号在 Windows `cmd` 中需要按实际 Shell 转义。
+
+所有 USB/JTAG 本地脚本均可附加：`retry_count`（整数，默认 `1`）、`timeout_minutes`（整数，默认 `120`）、`integrity`（布尔值）和 `write_verify`（布尔值）。是否真正由厂商工具支持，仍以原 PCIDS 脚本和工具链为准。
+
+### ARM MCU
+
+| 脚本 | `--burner` | 固件 | 专用字段与合法值 |
+| --- | --- | --- | --- |
+| `stlink_stm32_mcu_flash` | `ST-LINK` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`/`CJTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`；`qspi_flash_model`: `W25Q64`/`W25Q128`/`W25Q256`；`loader_type`: `Internal Flash`/`External Loader`。 |
+| `jlink_v4_arm_mcu_flash` | `J-LINK` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`/`CJTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`。 |
+| `pwlink_v2_arm_mcu_flash` | `PW-LINK` 或 `PWLINK2` | `.hex`、`.elf`、`.bin` | `interface_type`: `SWD`/`JTAG`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`（`.bin` 必填）；`completion_action`: `复位运行`/`仅复位`/`不处理`。 |
+| `gdlink_arm_mcu_flash` | `GDLINK` | `.hex`、`.elf`、`.bin` | 与 PW-LINK 相同，另有 `bichina_burn_mode`: `单烧`/`量产烧录`/`擦除后烧录`。 |
+| `swd_downloader_arm_mcu_flash` | `SWD下载器` | `.hex`、`.elf`、`.bin` | 与 J-LINK 相同：接口可选 `SWD`/`JTAG`/`CJTAG`。 |
+| `hdsc_ccid_arm_mcu_flash` | `HDSC CCID` | 由 HDSC ISP 工具支持的格式 | `interface_type` 仅 `UART`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`write_speed_khz`: `500`/`1000`/`2000`/`4000`/`5000`/`10000`；`start_address`；`completion_action`: `复位运行`/`仅复位`/`不处理`。 |
+
+PW-LINK 的完整参数例子：
+
+```json
+{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"start_address":"0x08000000","completion_action":"复位运行","write_verify":true}
+```
+
+### DSP 与 PIC
+
+| 脚本 | `--burner` | 固件 | 专用字段与规则 |
+| --- | --- | --- | --- |
+| `xds510plus_dsp_flash` | `XDS510plus` | **仅 `.out`** | `interface_type` 仅 `JTAG`；`target_chip` 当前仅支持包含 `F28335` 的型号；`target_config_file` 可留空（使用内置 SEED F28335 `.ccxml`），否则必须是 Agent 上实际存在的 `.ccxml` 路径；`erase_mode` 仅 `全片擦除`；`completion_action`: `复位运行`/`不处理`。 |
+| `mplab_icd3_pic_flash` | `MPLAB ICD 3 DV164035` | 由 MPLAB IPE 支持的格式 | `erase_mode`: `全片擦除`/`不擦除直接编程`；`eeprom_write`: `是`/`否`；`blank_check`: `是`/`否`；`execute_program`: `是`/`否`；`completion_action`: `编程复位后运行`/`编程后保持复位`。 |
+
+### FPGA 与 CPLD
+
+| 脚本 | `--burner` 与 `--script` | 固件 | 专用字段与规则 |
+| --- | --- | --- | --- |
+| `al321_fpga_mcu_flash` | `--burner AL321` | `SRAM下载` 使用 `.bit`；`Flash固化` 使用 **`.bin`** | `interface_type` 仅 `JTAG`；`execution_operation`: `SRAM下载`/`Flash固化`；`qspi_flash_model`: `qspi-x1-single`/`qspi-x2-single`/`qspi-x4-single`/`qspi-x8-dual_parallel`/`qspi-x1-dual_stacked`/`qspi-x2-dual_stacked`/`qspi-x4-dual_stacked`；`start_address`；`erase_mode`: `默认自动擦除`/`全片擦除`/`扇区擦除`/`不擦除`；`completion_action`: `复位运行`/`不处理`。当 `execution_operation` 为 `Flash固化` 时，`target_config_file` 必填且必须为 Agent 本地 `.elf` 路径。 |
+| `altera_blaster_ii_fpga_flash` | `--burner "Altera Blaster II" --script altera_blaster_ii_fpga_flash` | Quartus Programmer 支持的格式 | `interface_type` 仅 `JTAG`；`erase_mode`: `默认自动擦除`/`全片擦除`/`扇区擦除`/`不擦除`；`cable_index`: `0`/`1`/`2`/`3`；`completion_action` 仅 `不处理`。 |
+| `altera_blaster_ii_cpld_flash` | `--burner "Altera Blaster II" --script altera_blaster_ii_cpld_flash` | Quartus Programmer 支持的格式 | `interface_type` 仅 `JTAG`；`pre_erase`: `默认是`/`否`；`tck_frequency`: `1MHz`/`2.5MHz`/`5MHz`/`10MHz`；`completion_action` 仅 `不处理`。 |
+| `gowin_usb_cable_fpga_flash` | `--burner "Gowin USB Cable"` | Gowin Programmer 支持的格式 | `interface_type` 仅 `JTAG`；`execution_operation`: `SRAM下载`/`Flash固化`；`erase_mode`: `全片擦除`/`扇区擦除`/`不擦除`；`completion_action` 仅 `不处理`。 |
+
+AL321 Flash 固化例子：
+
+```json
+{"execution_operation":"Flash固化","qspi_flash_model":"qspi-x4-single","start_address":"0x0","target_config_file":"D:\\PCIDS-AgentData\\board_fsbl.elf","erase_mode":"全片擦除","completion_action":"复位运行"}
+```
+
+### SD 卡与混合流程
+
+| 脚本 | `--burner` | 参数 |
+| --- | --- | --- |
+| `sd_card_zynq7000_boot_update` | `SD卡文件写入` | `interface_type` 仅 `SD卡`；`sd_target_path` 为 Agent 上的目标 SD 卡目录；`format_sd_card`: `是`/`否`；`completion_action`: `自动弹出SD卡`/`不处理`。 |
+| `sylixos_ls2k_ftp_serial_flash` | `TFTP+串口` | 不通过此 CodeArts 本地烧录入口。它是 PCIDS 既有 Hybrid 任务，参数由其任务 API 传入：`configured_board_address`、`local_ip`、`serial_port`、`baud_rate`、`target_path`、TFTP/串口认证等。 |
+
+### 传参边界
+
+不应把工具可执行文件路径、账号密码或厂商 CLI 原始命令放进 `--config-json`。这些属于 Agent 工位环境（例如 `STM32_PROGRAMMER_CLI`、`DSS_BAT`、`IPECMD_EXE`、`QUARTUS_PGM`、`GOWIN_PROGRAMMER_CLI`），应由 PCIDS 安装和运维配置管理。`--config-json` 只传这次板卡烧录所需的、已有脚本认可的参数。
+
 ## 日志和退出码
 
 适配器将事件以 JSON Lines 输出到 Build 控制台，同时在 `--log-dir` 写入 `.log` 与 `.jsonl` 文件。上传这两个文件作为 Build 产物即可归档。
