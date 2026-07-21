@@ -67,6 +67,27 @@ function Invoke-DriverUpdate([string]$InfPath, [string]$InstanceId) {
   Start-Sleep -Seconds 1
 }
 
+function Test-Administrator {
+  $user = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($user)
+  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not (Test-Administrator)) {
+  Write-Host "[INFO] Requesting Administrator privileges to switch Gowin USB driver..."
+  $arguments = @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$($MyInvocation.MyCommand.Path)`"",
+    "-Mode", $Mode
+  )
+  if ($Serial) { $arguments += @("-Serial", "`"$Serial`"") }
+  if ($InstanceAnchor) { $arguments += @("-InstanceAnchor", "`"$InstanceAnchor`"") }
+  if ($DriverInfPath) { $arguments += @("-DriverInfPath", "`"$DriverInfPath`"") }
+  if ($StateFile) { $arguments += @("-StateFile", "`"$StateFile`"") }
+
+  $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join " ")
+  exit $process.ExitCode
+}
+
 function Set-GowinUsbMode {
   $device = Get-TargetDevice
   $current = Get-DriverMetadata $device.InstanceId
