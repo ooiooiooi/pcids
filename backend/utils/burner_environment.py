@@ -44,24 +44,6 @@ def _run_powershell(script_path: Path, arguments: list[str], env: Mapping[str, s
     return output
 
 
-def _gowin_environment(env: Mapping[str, str]) -> str:
-    script_path = PROJECT_ROOT / "tools" / "burners" / "GOWIN" / "drivers" / "switch-gowin-usb-mode.ps1"
-    task_id = str(env.get("TASK_ID") or "").strip() or "default"
-    state_file = Path(tempfile.gettempdir()) / f"pcids_gowin_usb_mode_{task_id}.json"
-    arguments = [
-        "-Mode",
-        "usb",
-        "-Serial",
-        str(env.get("BURNER_SN") or ""),
-        "-InstanceAnchor",
-        str(env.get("BURNER_LOCATION") or env.get("BURNER_PORT") or ""),
-        "-StateFile",
-        str(state_file),
-    ]
-    output = _run_powershell(script_path, arguments, env)
-    return output or "[INFO] Gowin USB 烧录环境已就绪。"
-
-
 def _al321_environment(env: Mapping[str, str]) -> str:
     configured = str(env.get("AL321_DRIVER_SWITCH_SCRIPT") or "").strip()
     script_path = Path(configured) if configured else PROJECT_ROOT / "tools" / "burners" / "AL321" / "drivers" / "switch-al321-driver.ps1"
@@ -77,6 +59,34 @@ def _al321_environment(env: Mapping[str, str]) -> str:
     return output or f"[INFO] AL321 {mode} 烧录环境已就绪。"
 
 
+def _xds510plus_environment(env: Mapping[str, str]) -> str:
+    script_path = PROJECT_ROOT / "tools" / "burners" / "XDS510plus" / "drivers" / "ensure-xds510plus-mode.ps1"
+    instance_anchor = str(env.get("BURNER_LOCATION") or env.get("BURNER_PORT") or "").strip()
+    arguments = ["-InstanceAnchor", instance_anchor]
+    output = _run_powershell(script_path, arguments, env)
+    if "[PCIDS_XDS510_LOCATION_MISMATCH]" not in output:
+        return output
+
+    saved_location = instance_anchor or "-"
+    actual_location = "-"
+    for line in output.splitlines():
+        if line.startswith("[PCIDS_XDS510_SAVED_LOCATION]"):
+            saved_location = line.removeprefix("[PCIDS_XDS510_SAVED_LOCATION]").strip() or "-"
+        elif line.startswith("[PCIDS_XDS510_ACTUAL_LOCATION]"):
+            actual_location = line.removeprefix("[PCIDS_XDS510_ACTUAL_LOCATION]").strip() or "-"
+    notice = "\n".join(
+        [
+            "[WARN] 设备保存的物理位置与当前实际连接位置不一致。",
+            f"[WARN] 保存位置：{saved_location}",
+            f"[WARN] 当前实际位置：{actual_location}",
+            "[WARN] 请到“烧录器设备管理”中编辑该设备，手动将物理位置修改为当前实际位置后再使用多台烧录器。",
+            "[WARN] 当前仅检测到一台 SEED，本次只读模式检查继续执行；不会自动修改保存的设备位置。",
+        ]
+    )
+    retained_lines = [line for line in output.splitlines() if not line.startswith("[PCIDS_XDS510_")]
+    return "\n".join([notice, *retained_lines]).strip()
+
+
 def ensure_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
     """Ensure the selected burner is in the mode required by this execution.
 
@@ -85,17 +95,6 @@ def ensure_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
     """
     normalized_script = str(script_name or "").strip().lower()
     burner_name = str(env.get("BURNER_NAME") or env.get("BURNER_TYPE") or "").strip()
-    if normalized_script == "gowin_usb_cable_fpga_flash" or "gowin" in burner_name.lower():
-        details = _gowin_environment(env)
-        return "\n".join(
-            [
-                "=== 烧录器环境检查 ===",
-                f"[环境检查] 烧录器：{burner_name or 'Gowin USB Cable'}",
-                "[环境检查] 目标环境：Gowin USB 模式（WinUSB）",
-                "[环境检查] 处理结果：检查完成，环境已就绪",
-                details,
-            ]
-        )
     if normalized_script == "al321_fpga_mcu_flash" or burner_name.lower() == "al321":
         operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
         target_mode = "AMD/JTAG 驱动环境" if "flash" in operation or "固化" in operation else "任务要求的 USB 环境"
@@ -109,14 +108,27 @@ def ensure_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
                 details,
             ]
         )
+    if normalized_script == "xds510plus_dsp_flash" or burner_name.lower() == "xds510plus":
+        details = _xds510plus_environment(env)
+        return "\n".join(
+            [
+                "=== 烧录器环境检查 ===",
+                f"[环境检查] 烧录器：{burner_name or 'XDS510plus'}",
+                "[环境检查] 目标环境：SEED EZUSBPLUS 驱动模式",
+                "[环境检查] 处理动作：只读检查；不匹配时停止并提示用户手动处理",
+                "[环境检查] 处理结果：检查完成，环境已就绪",
+                details,
+            ]
+        )
     fixed_name = burner_name or script_name or "未知烧录器"
     return "\n".join(
         [
             "=== 烧录器环境检查 ===",
             f"[环境检查] 烧录器：{fixed_name}",
-            "[环境检查] 当前环境：固定专用环境",
-            "[环境检查] 目标环境：固定专用环境",
-            "[环境检查] 处理结果：环境匹配，无需切换",
+            "[环境检查] 当前模式：由烧录器厂商 CLI 在脚本阶段探测",
+            "[环境检查] 目标模式：该烧录器没有 PCIDS 可安全切换的 Windows 驱动模式",
+            "[环境检查] 处理动作：不执行盲目驱动切换；连接/目标兼容性预检由专用脚本负责",
+            "[环境检查] 处理结果：已进入专用预检流程",
         ]
     )
 

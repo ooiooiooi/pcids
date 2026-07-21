@@ -5,17 +5,6 @@ from backend.utils.burner_environment import ensure_burner_environment, restore_
 
 
 class BurnerEnvironmentTests(unittest.TestCase):
-    @patch("backend.utils.burner_environment._gowin_environment", return_value="gowin-ready")
-    def test_gowin_uses_code_level_environment_switcher(self, switcher):
-        result = ensure_burner_environment(
-            "gowin_usb_cable_fpga_flash",
-            {"BURNER_NAME": "Gowin USB Cable", "BURNER_LOCATION": "registered-location"},
-        )
-        self.assertIn("=== 烧录器环境检查 ===", result)
-        self.assertIn("目标环境：Gowin USB 模式（WinUSB）", result)
-        self.assertIn("gowin-ready", result)
-        switcher.assert_called_once()
-
     @patch("backend.utils.burner_environment._al321_environment", return_value="al321-ready")
     def test_al321_uses_existing_environment_switcher(self, switcher):
         result = ensure_burner_environment(
@@ -29,8 +18,19 @@ class BurnerEnvironmentTests(unittest.TestCase):
     def test_fixed_environment_burner_still_runs_preflight(self):
         result = ensure_burner_environment("pwlink_v2_arm_mcu_flash", {"BURNER_NAME": "PWLINK2"})
         self.assertIn("烧录器：PWLINK2", result)
-        self.assertIn("当前环境：固定专用环境", result)
-        self.assertIn("处理结果：环境匹配，无需切换", result)
+        self.assertIn("当前模式：由烧录器厂商 CLI 在脚本阶段探测", result)
+        self.assertIn("不执行盲目驱动切换", result)
+
+    @patch("backend.utils.burner_environment._xds510plus_environment", return_value="xds510-ready")
+    def test_xds510_uses_dedicated_driver_mode_checker(self, checker):
+        result = ensure_burner_environment(
+            "xds510plus_dsp_flash",
+            {"BURNER_NAME": "XDS510plus", "BURNER_PORT": "Port_#0001.Hub_#0003"},
+        )
+        self.assertIn("目标环境：SEED EZUSBPLUS 驱动模式", result)
+        self.assertIn("不匹配时停止并提示用户手动处理", result)
+        self.assertIn("xds510-ready", result)
+        checker.assert_called_once()
 
     @patch("backend.utils.burner_environment._run_powershell", return_value="restored")
     def test_al321_is_restored_after_execution(self, runner):
