@@ -10,6 +10,7 @@ import glob
 import hashlib
 import io
 import json
+import locale
 import logging
 import os
 import posixpath
@@ -251,6 +252,30 @@ def _build_ssh_options(target_port: Optional[int], is_scp: bool = False) -> list
     ]
 
 
+def _decode_subprocess_output(raw: bytes) -> str:
+    """Decode native tool output without corrupting Chinese Windows console text.
+
+    Most modern command-line tools emit UTF-8, while ``cmd.exe``, legacy CCS,
+    and PowerShell 5.1 commonly emit the active Windows ANSI code page (GBK on
+    the deployed Chinese Windows image).  Strict UTF-8 is preferred; when it
+    is not valid, use the system code page before falling back to replacement.
+    """
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    encodings = [locale.getpreferredencoding(False), "mbcs", "gb18030"] if os.name == "nt" else ["gb18030"]
+    for encoding in dict.fromkeys(item for item in encodings if item):
+        try:
+            return raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 async def _run_subprocess_command(
     cmd: list[str],
     timeout_seconds: Optional[int],
@@ -294,7 +319,7 @@ async def _run_subprocess_command(
                 break
             chunks.append(chunk)
             if output_callback:
-                text = chunk.decode("utf-8", errors="replace")
+                text = _decode_subprocess_output(chunk)
                 if text:
                     await output_callback(stream_name, text)
 
@@ -358,8 +383,8 @@ async def _run_subprocess_command(
                 pass
         if monitor:
             monitor.record(stage_name, "timeout", "命令执行超时", command=" ".join(cmd))
-        stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-        stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        stdout = _decode_subprocess_output(b"".join(stdout_chunks))
+        stderr = _decode_subprocess_output(b"".join(stderr_chunks))
         return False, stdout, stderr, "脚本执行超时"
     finally:
         if task_id:
@@ -367,8 +392,8 @@ async def _run_subprocess_command(
             if current_proc is proc:
                 TASK_RUNTIME_PROCESSES.pop(task_id, None)
 
-    stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-    stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+    stdout = _decode_subprocess_output(b"".join(stdout_chunks))
+    stderr = _decode_subprocess_output(b"".join(stderr_chunks))
     if proc.returncode == 0:
         if monitor:
             monitor.record(stage_name, "success", "命令执行完成", exit_code=proc.returncode)
@@ -402,6 +427,15 @@ def _task_display_time(value: Optional[datetime]) -> Optional[datetime]:
 
 def _script_output_failure_reason(stdout: str, stderr: str) -> str:
     output = "\n".join(part for part in [stdout, stderr] if part)
+    xds_match = re.search(r"Error\s+(-\d+)\s+@\s*0x[0-9a-fA-F]+", output)
+    if xds_match:
+        error_code = xds_match.group(1)
+        if error_code in {"-342", "-171", "-1041"}:
+            return (
+                f"SEED XDS510Plus 无法连接目标板（CCS Error {error_code}）。"
+                "烧录尚未开始；请检查目标板供电、JTAG 排线方向/接触和仿真器后重试。"
+            )
+        return f"SEED XDS510Plus 目标连接失败（CCS Error {error_code}）；烧录尚未开始。"
     reasons: list[str] = []
     for line in output.splitlines():
         normalized = line.strip()
@@ -409,6 +443,8 @@ def _script_output_failure_reason(stdout: str, stderr: str) -> str:
             reason = normalized.removeprefix("[ERROR]").strip() or "脚本输出明确错误"
         elif "__PCIDS_" in normalized and "_ERROR__" in normalized:
             reason = normalized.split(":", 1)[-1].strip() or "脚本输出明确错误"
+        elif normalized.startswith("SEED_XDS510_WORKFLOW_FAILED:"):
+            reason = normalized.split(":", 1)[-1].strip() or "SEED XDS510Plus workflow failed"
         else:
             continue
         if reason not in reasons:
@@ -640,10 +676,12 @@ def _get_burner_runtime_issue(
             ),
         )
     else:
+        burner_strategy = int(getattr(burner, "strategy", 1) or 1)
+        scan_anchor = burner.port if burner_strategy == 2 else burner.location
         scanned = _build_scan_result(
             burner.type,
-            burner.location,
-            burner.strategy,
+            scan_anchor,
+            burner_strategy,
             burner,
             allow_fallback=False,
         )
@@ -4839,7 +4877,12 @@ async def _execute_script_content_locally(
                 monitor.record("burner-environment", "failed", "烧录器环境检查/切换失败", reason=str(exc))
             return False, failure_reason, failure_reason
 
-        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8") as temp_script:
+        # cmd.exe interprets batch files through the active Windows ANSI code
+        # page.  Writing a UTF-8 batch makes its literal Chinese diagnostics
+        # garbled before they ever reach the backend.  Keep PowerShell and
+        # other script types UTF-8, but use the active code page for .bat.
+        script_encoding = locale.getpreferredencoding(False) if normalized_type == "bat" and os.name == "nt" else "utf-8"
+        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding=script_encoding) as temp_script:
             temp_script.write(script_content)
             temp_script_path = temp_script.name
 
@@ -5708,6 +5751,8 @@ async def simulate_burning_process(
             text = str(value if value is not None else "").strip()
             return text or fallback
 
+        is_hdsc_ccid_task = str(execution_plan.metadata.get("script_name") or "").strip() == "hdsc_ccid_arm_mcu_flash"
+
         execution_monitor.record(
             "config",
             "success",
@@ -5736,7 +5781,11 @@ async def simulate_burning_process(
                 f"Cable index: {_display_text(config.get('cable_index'))}",
                 f"Completion action: {_display_text(config.get('completion_action'))}",
                 f"Start address: {_display_text(config.get('start_address'))}",
-                f"Write speed: {_display_text(config.get('write_speed_khz'))} kHz",
+                (
+                    f"Baud rate: {_display_text(config.get('write_speed_khz'))} baud"
+                    if is_hdsc_ccid_task
+                    else f"Write speed: {_display_text(config.get('write_speed_khz'))} kHz"
+                ),
             ),
         )
         execution_monitor.record(
@@ -5940,10 +5989,15 @@ async def simulate_burning_process(
             _ensure_task_not_terminated(db, task.id)
             task.progress_percent = 45
             if is_burning_task:
-                execution_monitor.record("prepare", "success", "物理烧录参数已就绪", speed_khz=write_speed_khz or "", start_address=start_address or "")
+                speed_metadata = {"baud_rate": write_speed_khz or ""} if is_hdsc_ccid_task else {"speed_khz": write_speed_khz or ""}
+                execution_monitor.record("prepare", "success", "物理烧录参数已就绪", **speed_metadata, start_address=start_address or "")
                 _set_task_result(
                     f"物理烧录参数已就绪，等待执行脚本... "
-                    f"速度：{write_speed_khz or '-'} khz，起始地址：{start_address or '-'}"
+                    + (
+                        f"波特率：{write_speed_khz or '-'} baud，起始地址：{start_address or '-'}"
+                        if is_hdsc_ccid_task
+                        else f"速度：{write_speed_khz or '-'} khz，起始地址：{start_address or '-'}"
+                    )
                 )
             else:
                 execution_monitor.record("prepare", "success", "安装环境准备完成", install_dir=(config.get('target_path') or install_dir or ""))

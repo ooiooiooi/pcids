@@ -48,13 +48,22 @@ def _gowin_environment(env: Mapping[str, str]) -> str:
     script_path = PROJECT_ROOT / "tools" / "burners" / "GOWIN" / "drivers" / "switch-gowin-usb-mode.ps1"
     task_id = str(env.get("TASK_ID") or "").strip() or "default"
     state_file = Path(tempfile.gettempdir()) / f"pcids_gowin_usb_mode_{task_id}.json"
+    serial = str(env.get("BURNER_SN") or "").strip()
+    location = str(env.get("BURNER_LOCATION") or "").strip()
+    port = str(env.get("BURNER_PORT") or "").strip()
+    if serial in {"-", "N/A"}:
+        serial = ""
+    if location in {"-", "N/A"}:
+        location = ""
+    if port in {"-", "N/A"}:
+        port = ""
     arguments = [
         "-Mode",
         "usb",
         "-Serial",
-        str(env.get("BURNER_SN") or ""),
+        serial,
         "-InstanceAnchor",
-        str(env.get("BURNER_LOCATION") or env.get("BURNER_PORT") or ""),
+        location or port,
         "-StateFile",
         str(state_file),
     ]

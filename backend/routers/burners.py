@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -1474,7 +1475,12 @@ def _discover_lan_agent_urls(cache_ttl_seconds: float = 15.0) -> list[str]:
     return discovered
 
 
-def _discover_scan_nodes(db: Session, scope: str, explicit_agent_url: Optional[str] = None) -> list[dict]:
+def _discover_scan_nodes(
+    db: Session,
+    scope: str,
+    explicit_agent_url: Optional[str] = None,
+    discovered_agent_urls: Optional[list[str]] = None,
+) -> list[dict]:
     service_address = _get_service_node_address()
     service_node_type = "server" if _is_configured_server_node(service_address) else "local"
     nodes = [
@@ -1501,7 +1507,9 @@ def _discover_scan_nodes(db: Session, scope: str, explicit_agent_url: Optional[s
             "host_name": None,
             "host_address": explicit_host,
         }
-    for discovered_url in _discover_lan_agent_urls():
+    for discovered_url in (
+        _discover_lan_agent_urls() if discovered_agent_urls is None else discovered_agent_urls
+    ):
         if discovered_url in agent_map:
             continue
         discovered_host = urlparse(discovered_url).hostname or ""
@@ -1531,6 +1539,59 @@ def _discover_scan_nodes(db: Session, scope: str, explicit_agent_url: Optional[s
         }
     nodes.extend(agent_map.values())
     return nodes
+
+
+def _scan_discovery_node(node: dict) -> list[dict]:
+    """Run one potentially slow discovery probe without touching the request DB session."""
+    if node["node_type"] in {"local", "server"}:
+        return _discover_local_candidates()
+
+    remote_res = _remote_discover_devices(str(node["agent_url"]))
+    raw_candidates = remote_res.get("data", {}).get("items") or []
+    candidates: list[dict] = []
+    for item in raw_candidates:
+        candidate = dict(item)
+        candidate["node_key"] = node["node_key"]
+        candidate["node_type"] = node["node_type"]
+        candidate["node_label"] = node["node_label"]
+        candidate["agent_url"] = node["agent_url"]
+        candidate["host_name"] = node.get("host_name")
+        candidate["host_address"] = node.get("host_address")
+        candidates.append(candidate)
+    return candidates
+
+
+async def _scan_discovery_nodes_async(
+    nodes: list[dict],
+    scope: str,
+    normalized_explicit_agent_url: Optional[str],
+    trace_id: str,
+) -> tuple[list[list[dict]], set[str]]:
+    """Offload blocking PnP, HTTP, and subprocess discovery work from the event loop."""
+    node_candidates: list[list[dict]] = []
+    failed_node_keys: set[str] = set()
+    for node in nodes:
+        try:
+            node_candidates.append(await asyncio.to_thread(_scan_discovery_node, node))
+        except Exception as exc:
+            failed_node_keys.add(str(node.get("node_key") or ""))
+            _debug_report_burner_scan_crash(
+                "A",
+                "burners.py:_scan_discovery_nodes_async:node_error",
+                "burner discovery node failed",
+                {"scope": scope, "agent_url": node.get("agent_url"), "node_label": node.get("node_label"), "error": str(exc)},
+                trace_id,
+            )
+            logger.warning(
+                "burner.discovery.agent_failed | %s",
+                json.dumps({"agent_url": node.get("agent_url"), "error": str(exc)}, ensure_ascii=False),
+            )
+            if normalized_explicit_agent_url and str(node.get("agent_url") or "").rstrip("/") == normalized_explicit_agent_url:
+                raise ValueError(
+                    f"无法连接下位机 Agent（{normalized_explicit_agent_url}），请确认下位机程序正在运行、IP/端口正确且防火墙已放行"
+                ) from exc
+            node_candidates.append([])
+    return node_candidates, failed_node_keys
 
 
 def _find_matching_candidate(burner: Burner, candidates: list[dict]) -> Optional[dict]:
@@ -1629,10 +1690,13 @@ def _build_discovery_payload(
     scope: str,
     editing_burner_id: Optional[int] = None,
     explicit_agent_url: Optional[str] = None,
+    nodes: Optional[list[dict]] = None,
+    scanned_node_candidates: Optional[list[list[dict]]] = None,
+    failed_node_keys: Optional[set[str]] = None,
 ) -> dict:
     trace_id = f"burner-discovery-build-{scope}-{int(time.time() * 1000)}"
     normalized_explicit_agent_url = _normalize_agent_url(explicit_agent_url)
-    nodes = _discover_scan_nodes(db, scope, explicit_agent_url=normalized_explicit_agent_url)
+    nodes = nodes or _discover_scan_nodes(db, scope, explicit_agent_url=normalized_explicit_agent_url)
     # #region debug-point SK:build-discovery-start
     _debug_report_burner_scan_crash(
         "A",
@@ -1648,25 +1712,16 @@ def _build_discovery_payload(
     # #endregion
     candidates: list[dict] = []
     seen_candidate_ids: set[str] = set()
-    failed_node_keys: set[str] = set()
+    failed_node_keys = set(failed_node_keys or ())
 
-    for node in nodes:
-        if node["node_type"] in {"local", "server"}:
+    for index, node in enumerate(nodes):
+        if scanned_node_candidates is not None:
+            node_candidates = scanned_node_candidates[index]
+        elif node["node_type"] in {"local", "server"}:
             node_candidates = _discover_local_candidates()
         else:
             try:
-                remote_res = _remote_discover_devices(str(node["agent_url"]))
-                raw_candidates = remote_res.get("data", {}).get("items") or []
-                node_candidates = []
-                for item in raw_candidates:
-                    candidate = dict(item)
-                    candidate["node_key"] = node["node_key"]
-                    candidate["node_type"] = node["node_type"]
-                    candidate["node_label"] = node["node_label"]
-                    candidate["agent_url"] = node["agent_url"]
-                    candidate["host_name"] = node.get("host_name")
-                    candidate["host_address"] = node.get("host_address")
-                    node_candidates.append(candidate)
+                node_candidates = _scan_discovery_node(node)
             except Exception as exc:
                 failed_node_keys.add(str(node.get("node_key") or ""))
                 # #region debug-point SL:build-discovery-remote-error
@@ -1942,10 +1997,12 @@ def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int]
             # #endregion
             return 1
     try:
+        burner_strategy = int(getattr(burner, "strategy", 1) or 1)
+        scan_anchor = burner.port if burner_strategy == 2 else burner.location
         scanned = _build_scan_result(
             burner.type,
-            burner.location,
-            burner.strategy,
+            scan_anchor,
+            burner_strategy,
             burner,
             allow_fallback=False,
             usb_devices=usb_devices,
@@ -2388,11 +2445,33 @@ async def discover_burners(
         editing_burner_id = None
     ensure_schema()
     try:
+        normalized_explicit_agent_url = _normalize_agent_url(explicit_agent_url)
+        # LAN probing may fan out to many hosts and local PnP uses synchronous
+        # PowerShell.  Keep both operations out of this worker's event loop so
+        # unrelated requests (such as PUT /api/burners/{id}) stay responsive.
+        discovered_agent_urls = (
+            await asyncio.to_thread(_discover_lan_agent_urls) if scope == "all" else None
+        )
+        nodes = _discover_scan_nodes(
+            db,
+            scope,
+            explicit_agent_url=normalized_explicit_agent_url,
+            discovered_agent_urls=discovered_agent_urls,
+        )
+        scanned_node_candidates, failed_node_keys = await _scan_discovery_nodes_async(
+            nodes,
+            scope,
+            normalized_explicit_agent_url,
+            trace_id,
+        )
         data = _build_discovery_payload(
             db,
             scope,
             editing_burner_id=editing_burner_id,
             explicit_agent_url=explicit_agent_url,
+            nodes=nodes,
+            scanned_node_candidates=scanned_node_candidates,
+            failed_node_keys=failed_node_keys,
         )
     except ValueError as exc:
         # #region debug-point SQ:discovery-route-value-error
@@ -2778,7 +2857,7 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
 @router.post("/agent/discovery", response_model=Response)
 async def agent_discover_burners(request: Request, _: Optional[dict] = Body(default=None)):
     require_agent_token(request)
-    items = _discover_local_candidates()
+    items = await asyncio.to_thread(_discover_local_candidates)
     return {
         "code": 0,
         "message": "success",

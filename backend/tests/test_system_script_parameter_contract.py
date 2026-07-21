@@ -44,7 +44,6 @@ class SystemScriptParameterContractTests(unittest.TestCase):
             ("al321_fpga_mcu_flash", "AL321"),
             ("gdlink_arm_mcu_flash", "GDLINK"),
             ("swd_downloader_arm_mcu_flash", "SWD下载器"),
-            ("hdsc_ccid_arm_mcu_flash", "HDSC CCID"),
             ("gowin_usb_cable_fpga_flash", "Gowin USB Cable"),
         ]:
             with self.subTest(script_name=script_name):
@@ -54,6 +53,23 @@ class SystemScriptParameterContractTests(unittest.TestCase):
                 self.assertIn("PCIDS_STREAM_TIMEOUT_SECONDS", content)
                 self.assertIn('powershell -NoProfile -ExecutionPolicy Bypass -File "%PCIDS_STREAM_HELPER%"', content)
                 self.assertNotIn('cmd /d /s /c "!PCIDS_CMD!"', content)
+
+    def test_hdsc_ccid_uses_the_bundled_v604_agent_over_swd(self):
+        content = build_system_script_content("hdsc_ccid_arm_mcu_flash", "HDSC CCID")
+        catalog_item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "hdsc_ccid_arm_mcu_flash")
+        default_config = catalog_item["default_config"]
+
+        self.assertIn("hdsc_ccid_agent.py", content)
+        self.assertIn("--target-chip \"%TARGET_CHIP%\"", content)
+        self.assertIn("--firmware \"%FIRMWARE_PATH%\"", content)
+        self.assertIn('if /I not "!HDSC_INTERFACE!"=="UART"', content)
+        self.assertIn('--baud-rate \"%WRITE_SPEED_KHZ%\"', content)
+        self.assertNotIn("--baud-khz", content)
+        self.assertEqual(default_config["speed_label"], "波特率")
+        self.assertEqual(default_config["write_speed_khz"], 115200)
+        self.assertEqual(default_config["speed_options"], [115200, 128000, 230400, 256000, 1000000])
+        self.assertNotIn("HDSC_ISP_CLI", content)
+        self.assertNotIn("HDSC_CMD_TEMPLATE", content)
 
     def test_gowin_script_passes_real_programmer_cli_arguments(self):
         content = build_system_script_content("gowin_usb_cable_fpga_flash", "Gowin USB Cable")
@@ -71,6 +87,7 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertNotIn('set "PCIDS_STREAM_CMD=!PCIDS_CMD!"', direct_gowin_section)
         self.assertIn('if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"', content)
         self.assertIn('findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!" >nul', content)
+        self.assertIn('echo [ERROR] Gowin Programmer: %%L', content)
         self.assertIn('set "GOWIN_OPERATION=6"', content)
         self.assertIn('set "GOWIN_OPERATION=17"', content)
         self.assertNotIn('switch-gowin-usb-mode.ps1', content)
@@ -104,17 +121,28 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertIn("EZUSBPLUS", preflight_source)
         self.assertIn('[string]$item.Status -eq "OK"', preflight_source)
         self.assertIn("XDS510_PREFLIGHT_EXIT", content)
-        self.assertLess(content.index("XDS510_PREFLIGHT_EXIT"), content.index('set "XDS510_DSS_HELPER='))
-        self.assertIn('call "%DSS_BAT%" "%XDS510_DSS_HELPER%"', content)
+        self.assertIn('set "XDS510_UNIFLASH=%%~dpI..\\examples\\uniflash\\cmdLine\\uniflash.bat"', content)
+        self.assertLess(content.index("XDS510_PREFLIGHT_EXIT"), content.index('call "%XDS510_UNIFLASH%"'))
+        self.assertIn('call "%XDS510_UNIFLASH%" -ccxml "%TARGET_CONFIG_FILE%" -operation Erase -program "%FIRMWARE_PATH%" -targetOp restart', content)
         self.assertIn('findstr /I /C:"SEED-XDS510PLUS_Connection.xml"', content)
         self.assertIn('findstr /I /C:"seedxds510plusc28x.xml"', content)
         self.assertNotIn("UNIFLASH_CLI", content)
         self.assertNotIn("Spectrum Digital", content)
         dss_source = _xds510plus_dss_source()
-        self.assertIn('setString("FlashOperations", writeVerify ? "Program, Verify" : "Program")', dss_source)
-        self.assertIn("session.flash.erase()", dss_source)
-        self.assertIn("session.target.reset()", dss_source)
-        self.assertIn("session.target.run()", dss_source)
+        self.assertIn('setString("VerifyAfterProgramLoad", "Full verification")', dss_source)
+        self.assertNotIn("session.target.halt()", dss_source)
+        self.assertIn('session.flash.performOperation("Erase")', dss_source)
+        self.assertIn("session.flash.multiloadStart()", dss_source)
+        self.assertIn("session.flash.multiloadEnd()", dss_source)
+        self.assertIn("SEED_XDS510_FULL_ERASE_BEGIN", dss_source)
+        self.assertIn("session.target.restart()", dss_source)
+        self.assertIn("workflowError = err", dss_source)
+        self.assertIn("System.exit(2)", dss_source)
+        self.assertLess(dss_source.index("try {"), dss_source.index("ScriptingEnvironment.instance()"))
+        self.assertIn('XDS510plus runner: CCS 5.5 Legacy UniFlash', content)
+        self.assertIn('-operation Erase -program "%FIRMWARE_PATH%" -targetOp restart', content)
+        self.assertNotIn('if "%ERASE_MODE%"==', content)
+        self.assertNotIn('if "%COMPLETION_ACTION%"==', content)
 
     def test_sylixos_hybrid_script_uses_repository_artifact_upload_path(self):
         catalog_item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "sylixos_ls2k_ftp_serial_flash")

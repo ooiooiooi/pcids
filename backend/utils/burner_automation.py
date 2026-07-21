@@ -9,6 +9,7 @@ COMMON_ACTIONS = ["复位运行", "仅复位", "不处理"]
 ERASE_OPTIONS = ["全片擦除", "扇区擦除", "不擦除"]
 FPGA_ERASE_OPTIONS = ["默认自动擦除", "全片擦除", "扇区擦除", "不擦除"]
 SPEED_OPTIONS = [500, 1000, 2000, 4000, 5000, 10000]
+HDSC_BAUD_OPTIONS = [115200, 128000, 230400, 256000, 1000000]
 PYOCD_TARGET_ALIASES = {
     "LPC55S69": "lpc55s69",
     "LPC5526": "lpc5526",
@@ -180,7 +181,19 @@ SYSTEM_SCRIPT_CATALOG = [
             "timeout_minutes": 120,
         },
     },
-    {"name": "hdsc_ccid_arm_mcu_flash", "burner": "HDSC CCID", "type": "bat", "default_config": arm_config("HDSC ISP", ["UART"], "UART")},
+    {
+        "name": "hdsc_ccid_arm_mcu_flash",
+        "burner": "HDSC CCID",
+        "type": "bat",
+        "default_config": {
+            **arm_config("HDSC ISP", ["UART"], "UART"),
+            # Keep the legacy storage key for task compatibility; HDSC uses
+            # it as an actual UART baud value, not a frequency in kHz.
+            "write_speed_khz": 115200,
+            "speed_label": "波特率",
+            "speed_options": HDSC_BAUD_OPTIONS,
+        },
+    },
     {
         "name": "xds510plus_dsp_flash",
         "burner": "XDS510plus",
@@ -377,8 +390,8 @@ TOOL_REQUIREMENTS = [
     {"burner": "GDLINK", "tool": "GigaDevice/GD-Link Programmer", "env": "GDLINK_CMD_TEMPLATE 或 GDLINK_CLI", "download": "https://www.gigadevice.com/"},
     {"burner": "SWD下载器", "tool": "pyOCD / OpenOCD / 厂商 SWD CLI", "env": "SWD_CMD_TEMPLATE / PYOCD_EXE / OPENOCD_EXE", "download": "https://pyocd.io/"},
     {"burner": "AL321", "tool": "Bundled openFPGALoader", "env": "AL321_CMD_TEMPLATE 或 OPENFPGALOADER_EXE", "download": "https://github.com/trabucayre/openFPGALoader"},
-    {"burner": "HDSC CCID", "tool": "HDSC ISP/Programmer", "env": "HDSC_CMD_TEMPLATE 或 HDSC_ISP_CLI", "download": "https://www.hdsc.com.cn/"},
-    {"burner": "XDS510plus", "tool": "CCS 5.5 DSS + SEED XDS510Plus plugin", "env": "DSS_BAT", "download": "https://www.ti.com/tool/CCSTUDIO"},
+    {"burner": "HDSC CCID", "tool": "Bundled HDSC CCID V6.04 agent", "env": "HDSC_CCID_V604_EXE（可选覆盖）", "download": "https://www.hdsc.com.cn/"},
+    {"burner": "XDS510plus", "tool": "CCS 5.5 Legacy UniFlash + SEED XDS510Plus plugin", "env": "DSS_BAT", "download": "https://www.ti.com/tool/CCSTUDIO"},
     {"burner": "MPLAB ICD 3 DV164035", "tool": "MPLAB X IPE ipecmd", "env": "IPECMD_EXE", "download": "https://www.microchip.com/en-us/tools-resources/develop/mplab-x-ide"},
     {"burner": "Altera Blaster II", "tool": "Intel Quartus Programmer CLI", "env": "QUARTUS_PGM", "download": "https://www.intel.com/content/www/us/en/software-kit/795188/intel-quartus-prime-lite-edition-design-software-version-23-1-1-for-windows.html"},
     {"burner": "Gowin USB Cable", "tool": "Gowin Programmer CLI", "env": "GOWIN_PROGRAMMER_CLI", "download": "https://www.gowinsemi.com/en/support/download_eda/"},
@@ -994,48 +1007,67 @@ def _xds510plus_dss_source() -> str:
         var eraseMode = envValue("XDS510_ERASE_MODE", "full");
         var completionAction = envValue("XDS510_COMPLETION_ACTION", "reset-run");
         var writeVerify = envValue("WRITE_VERIFY", "1") == "1";
-        var scripting = ScriptingEnvironment.instance();
-        var server = scripting.getServer("DebugServer.1");
+        var scripting = null;
+        var server = null;
         var session = null;
+        var workflowError = null;
 
         try {
+            scripting = ScriptingEnvironment.instance();
+            server = scripting.getServer("DebugServer.1");
             print("SEED_XDS510_DSS_CONFIG_BEGIN");
             server.setConfig(configFile.replace(/\\/g, "/"));
             session = server.openSession("*", "*");
 
             print("SEED_XDS510_CONNECT_BEGIN");
             session.target.connect();
-            session.target.halt();
             print("SEED_XDS510_CONNECT_OK");
+
+            session.options.setBoolean("AddCIOBreakpointAfterLoad", false);
+            session.options.setBoolean("AutoRunToLabelOnRestart", false);
+            if (writeVerify) {
+                session.options.setString("VerifyAfterProgramLoad", "Full verification");
+            }
 
             if (eraseMode == "full") {
                 print("SEED_XDS510_FULL_ERASE_BEGIN");
-                session.flash.erase();
+                // Use the same operation API as CCS5's bundled UniFlash
+                // runner. On this legacy F28335/SEED connection, halting the
+                // target then using the shortcut erase API can wait forever.
+                session.flash.performOperation("Erase");
                 print("SEED_XDS510_FULL_ERASE_OK");
-                session.flash.options.setString("FlashOperations", writeVerify ? "Program, Verify" : "Program");
-            } else {
-                session.flash.options.setString("FlashOperations", writeVerify ? "Erase, Program, Verify" : "Erase, Program");
             }
 
             print("SEED_XDS510_PROGRAM_BEGIN");
-            session.memory.loadProgram(firmwareFile.replace(/\\/g, "/"));
+            // Mirror CCS5 UniFlash's program path. multiloadStart/End lets
+            // Flash Manager initialise and close its loader correctly.
+            session.flash.multiloadStart();
+            try {
+                session.memory.loadProgram(firmwareFile.replace(/\\/g, "/"));
+            } finally {
+                session.flash.multiloadEnd();
+            }
             print(writeVerify ? "SEED_XDS510_PROGRAM_VERIFY_OK" : "SEED_XDS510_PROGRAM_OK");
 
             if (completionAction == "reset-run") {
                 print("SEED_XDS510_RESET_RUN_BEGIN");
-                session.target.reset();
-                session.target.run();
+                session.target.restart();
                 print("SEED_XDS510_RESET_RUN_OK");
             }
             print("SEED_XDS510_WORKFLOW_OK");
         } catch (err) {
             print("SEED_XDS510_WORKFLOW_FAILED: " + err);
-            throw err;
+            workflowError = err;
         } finally {
             if (session != null) {
                 try { session.terminate(); } catch (ignore) {}
             }
-            try { server.stop(); } catch (ignore) {}
+            if (server != null) {
+                try { server.stop(); } catch (ignore) {}
+            }
+        }
+        if (workflowError != null) {
+            System.exit(2);
         }
         """
     )
@@ -1088,17 +1120,17 @@ def _xds510plus_runner() -> str:
           exit /b 127
         )
         """
-    ) + _xds510plus_usb_preflight_setup() + _xds510plus_dss_setup() + dedent(
+    ) + _xds510plus_usb_preflight_setup() + dedent(
         r"""
-        set "XDS510_ERASE_MODE=full"
-        if "%ERASE_MODE%"=="扇区擦除" set "XDS510_ERASE_MODE=sector"
-        set "XDS510_COMPLETION_ACTION=reset-run"
-        if "%COMPLETION_ACTION%"=="不处理" set "XDS510_COMPLETION_ACTION=none"
-        echo [EXEC] "%DSS_BAT%" "%XDS510_DSS_HELPER%"
-        call "%DSS_BAT%" "%XDS510_DSS_HELPER%"
-        set "XDS510_DSS_EXIT=!ERRORLEVEL!"
-        del /f /q "%XDS510_DSS_HELPER%" >nul 2>nul
-        exit /b !XDS510_DSS_EXIT!
+        for %%I in ("%DSS_BAT%") do set "XDS510_UNIFLASH=%%~dpI..\examples\uniflash\cmdLine\uniflash.bat"
+        if not exist "%XDS510_UNIFLASH%" (
+          echo [ERROR] CCS 5.5 Legacy UniFlash not found: %XDS510_UNIFLASH%
+          exit /b 127
+        )
+        echo [INFO] XDS510plus runner: CCS 5.5 Legacy UniFlash (validated SEED/F28335 path)
+        echo [EXEC] "%XDS510_UNIFLASH%" -ccxml "%TARGET_CONFIG_FILE%" -operation Erase -program "%FIRMWARE_PATH%" -targetOp restart
+        call "%XDS510_UNIFLASH%" -ccxml "%TARGET_CONFIG_FILE%" -operation Erase -program "%FIRMWARE_PATH%" -targetOp restart
+        exit /b !ERRORLEVEL!
         """
     )
 
@@ -2220,13 +2252,43 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
     if script_name == "al321_fpga_mcu_flash":
         return header + _al321_openfpgaloader_runner()
     if script_name == "hdsc_ccid_arm_mcu_flash":
-        return header + _template_runner("HDSC_CMD_TEMPLATE", "HDSC_ISP_CLI", "请按 HDSC ISP/Programmer 工具版本配置 HDSC_CMD_TEMPLATE。") + dedent(
+        return header + dedent(
             r"""
-            set "PCIDS_CMD="%HDSC_ISP_CLI%" "%FIRMWARE_PATH%""
-            """
-        ) + _stream_command_helper_setup() + _stream_command_runner() + dedent(
-            r"""
-            exit /b !PCIDS_STREAM_EXIT!
+            rem HDSC native-agent parameter contract: {firmware} {target} {probe} {interface} {speed} {address} {erase} {action}
+            set "HDSC_INTERFACE=%INTERFACE_TYPE%"
+            echo %TARGET_CHIP% | findstr /I /R "^HC32L13" >nul
+            if not errorlevel 1 if /I "%HDSC_INTERFACE%"=="SWD" (
+              echo [WARN] 旧任务将 HC32L130 标记为 SWD；已按 V6.04 L006 算法自动改用 UART/ISP。
+              set "HDSC_INTERFACE=UART"
+            )
+            if /I not "!HDSC_INTERFACE!"=="UART" (
+              echo [ERROR] HDSC CCID V6.04 L006 为 HC32L130 使用 UART/ISP：RXD=PA9、TXD=PA10、BOOT=BOOT。
+              echo [ERROR] 当前任务接口为 %INTERFACE_TYPE%，请将任务接口改为 UART 后重试。
+              exit /b 2
+            )
+            if "%TARGET_CHIP%"=="" (
+              echo [ERROR] HDSC CCID 烧录需要 TARGET_CHIP。
+              exit /b 2
+            )
+            if "%HDSC_CCID_AGENT%"=="" set "HDSC_CCID_AGENT=%CD%\tools\burners\HDSC\hdsc_ccid_agent.py"
+            if not exist "%HDSC_CCID_AGENT%" (
+              echo [ERROR] 未找到内置 HDSC CCID agent: %HDSC_CCID_AGENT%
+              echo [ERROR] 请从 PCIDS 项目根目录启动服务，或设置 HDSC_CCID_AGENT。
+              exit /b 127
+            )
+            if "%HDSC_CCID_PYTHON%"=="" set "HDSC_CCID_PYTHON=python"
+            set "HDSC_BAUD_ARGS=--baud-rate "%WRITE_SPEED_KHZ%""
+            set "HDSC_ERASE_MODE=chip"
+            if /I "%ERASE_MODE%"=="none" set "HDSC_ERASE_MODE=none"
+            if /I "%ERASE_MODE%"=="no-erase" set "HDSC_ERASE_MODE=none"
+            if "%ERASE_MODE%"=="不擦除直接编程" set "HDSC_ERASE_MODE=none"
+            set "HDSC_COMPLETION_ACTION=reset-run"
+            if /I "%COMPLETION_ACTION%"=="none" set "HDSC_COMPLETION_ACTION=none"
+            if /I "%COMPLETION_ACTION%"=="off" set "HDSC_COMPLETION_ACTION=none"
+            if "%COMPLETION_ACTION%"=="不处理" set "HDSC_COMPLETION_ACTION=none"
+            echo [EXEC] "%HDSC_CCID_PYTHON%" "%HDSC_CCID_AGENT%" flash --target-chip "%TARGET_CHIP%" --firmware "%FIRMWARE_PATH%" --erase-mode !HDSC_ERASE_MODE! --completion-action !HDSC_COMPLETION_ACTION! !HDSC_BAUD_ARGS!
+            "%HDSC_CCID_PYTHON%" "%HDSC_CCID_AGENT%" flash --target-chip "%TARGET_CHIP%" --firmware "%FIRMWARE_PATH%" --erase-mode !HDSC_ERASE_MODE! --completion-action !HDSC_COMPLETION_ACTION! !HDSC_BAUD_ARGS!
+            exit /b !ERRORLEVEL!
             """
         )
     if script_name == "xds510plus_dsp_flash":
@@ -2413,6 +2475,7 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             set "GOWIN_SCAN_EXIT=!ERRORLEVEL!"
             type "!GOWIN_SCAN_LOG!"
             if not "!GOWIN_SCAN_EXIT!"=="0" (
+              for /F "usebackq delims=" %%L in (`findstr /I /C:"Error:" "!GOWIN_SCAN_LOG!"`) do echo [ERROR] Gowin JTAG scan: %%L
               del /f /q "!GOWIN_SCAN_LOG!" >nul 2>nul
               echo [ERROR] Gowin JTAG 扫描失败，无法确定目标器件。
               exit /b !GOWIN_SCAN_EXIT!
@@ -2461,7 +2524,10 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             type "!GOWIN_RUN_LOG!"
             rem Some Programmer versions print an error but return exit code 0.
             findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!" >nul
-            if not errorlevel 1 set "GOWIN_EXIT=64"
+            if not errorlevel 1 (
+              for /F "usebackq delims=" %%L in (`findstr /I /C:"Error:" /C:"Verify failed" "!GOWIN_RUN_LOG!"`) do echo [ERROR] Gowin Programmer: %%L
+              set "GOWIN_EXIT=64"
+            )
             del /f /q "!GOWIN_RUN_LOG!" >nul 2>nul
             exit /b !GOWIN_EXIT!
             """

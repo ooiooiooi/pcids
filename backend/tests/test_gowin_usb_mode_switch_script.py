@@ -22,6 +22,9 @@ class GowinUsbModeSwitchScriptTests(unittest.TestCase):
     def test_skips_a_valid_usb_mode_and_switches_an_invalid_mode(self):
         self.assertIn('$current.Service -ieq "WinUSB"', self.content)
         self.assertIn('already uses USB mode (WinUSB); no switch is required', self.content)
+        self.assertIn('VID_0403&PID_6014', self.content)
+        self.assertIn('FT2CH cable already uses the required FTDI driver (FTDIBUS)', self.content)
+        self.assertIn('Gowin device detected:', self.content)
         self.assertIn('Switching Gowin cable to USB mode', self.content)
         self.assertIn('GOWIN_USB_DRIVER_INF', self.content)
         self.assertIn('-Pattern "Gowin" -Quiet', self.content)

@@ -188,6 +188,16 @@ exit $LASTEXITCODE
 
 以下五段与 ST-LINK 同样由 `--target-chip`、`--burner-sn` 绑定实际芯片和探针；`.bin` 时追加 `start_address`。
 
+#### CodeArts Shell 示例：PW-LINK / STM32F107VCT6
+
+下列命令是已在 Windows CodeArts Agent 上验证的 Git Bash Shell 写法，可直接粘贴到“执行 Shell 命令”步骤。请按实际任务替换芯片、板卡、烧录器序列号和固件文件名；发布库下载步骤必须已将该 `.hex` 文件下载到 Build 工作目录。
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; cmd.exe //d //s //c call "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+```
+
+该示例不传 `--config-json`，因此采用 PCIDS 原有 PW-LINK 内部脚本的默认烧录参数；入口脚本只负责接收参数、定位并调用内部脚本。若某块板卡需要覆盖接口、擦除或完成动作，再使用下方 PowerShell 示例中的 `--config-json` 参数。
+
 ```powershell
 # J-LINK
 $firmware = "$env:WORKSPACE\Project.hex"
@@ -225,7 +235,17 @@ exit $LASTEXITCODE
 
 ### 3. DSP：XDS510plus / TMS320F28335
 
-必换：固件文件名必须是 `.out`。`target_config_file` 留空时使用 PCIDS 内置 SEED F28335 `.ccxml`；非默认板卡将其替换为 Agent 上的真实 `.ccxml` 绝对路径。
+当前系统脚本仅适用于 **SEED XDS510Plus + TMS320F28335**，固件必须为 `.out`。`target_config_file` 留空时使用 PCIDS 内置 SEED F28335 `.ccxml`；非默认板卡将其替换为 Agent 上真实存在的 `.ccxml` 绝对路径。
+
+在 CodeArts Build 的“执行 Shell 命令”步骤中，使用 Git Bash Shell 时可直接粘贴以下一整行。必须替换 `REPLACE_DSP_BOARD` 和 `Project.out`；不需要传入 `--burner-sn`。
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; cmd.exe //d //s //c call "$PCIDS_FLASH_ADAPTER" run --burner "XDS510plus" --target-chip "TMS320F28335" --board "REPLACE_DSP_BOARD" --config-json '{"interface_type":"JTAG","target_config_file":"","erase_mode":"全片擦除","completion_action":"复位运行","write_verify":true}' --firmware "$WORKSPACE/Project.out" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+```
+
+前置条件：Agent 已安装并可使用 SEED XDS510Plus 驱动与 CCS 5.5 Legacy UniFlash，且 `DSS_BAT` 已配置；发布库下载步骤必须把 `.out` 文件下载到 Build 工作目录。
+
+以下是 PowerShell 环境下的等价写法：
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.out"

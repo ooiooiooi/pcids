@@ -190,11 +190,36 @@ def _resolve_request(args: argparse.Namespace, overrides: dict[str, Any]) -> tup
     return item, config
 
 
+def _apply_adapter_defaults(item: dict[str, Any], config: dict[str, Any]) -> None:
+    """Fill adapter-owned defaults without changing the original burner script.
+
+    XDS510plus uses the SEED/F28335 ``.ccxml`` that PCIDS deploys alongside
+    manually installed burner tools.  Pipelines deliberately leave this field
+    blank; board-specific ``.ccxml`` files can still override it explicitly.
+    """
+    if item.get("name") != "xds510plus_dsp_flash" or str(config.get("target_config_file") or "").strip():
+        return
+
+    configured_root = str(os.environ.get("PCIDS_BUNDLED_TOOLS_DIR") or "").strip()
+    roots = [Path(configured_root)] if configured_root else []
+    install_tools_root = PROJECT_ROOT / "tools" / "burners"
+    if install_tools_root not in roots:
+        roots.append(install_tools_root)
+
+    relative_path = Path("XDS510plus") / "targets" / "seed_xds510plus_f28335.ccxml"
+    candidates = [root / relative_path for root in roots]
+    # Preserve a deterministic error path if a deployment omitted the default
+    # configuration file: the system script will report that exact path.
+    selected = next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
+    config["target_config_file"] = str(selected.resolve(strict=False))
+
+
 def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run_id: str) -> dict[str, str]:
     # The CodeArts entrypoint starts the frozen backend in one-shot script mode,
     # so it must discover packaged/vendor tools itself instead of relying on the
     # long-running API service startup path.
     tool_env = configure_bundled_tools()
+    _apply_adapter_defaults(item, config)
     script = SimpleNamespace(
         id=0,
         name=item["name"],

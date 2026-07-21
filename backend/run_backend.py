@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import runpy
+import subprocess
 import sys
+import time
 
 CURRENT_FILE = os.path.abspath(__file__)
 BACKEND_DIR = os.path.dirname(CURRENT_FILE)
@@ -15,6 +17,53 @@ from backend.utils.app_paths import get_app_data_root
 
 
 _BACKEND_LOCK_HANDLE = None
+
+
+def _terminate_port_listeners(port: int) -> None:
+    """Stop processes listening on the backend port before starting a new one."""
+    if os.name != "nt":
+        return
+
+    result = subprocess.run(
+        ["netstat", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0].upper() != "TCP" or fields[-2].upper() != "LISTENING":
+            continue
+        local_address = fields[1]
+        if local_address.rsplit(":", 1)[-1] != str(port):
+            continue
+        try:
+            pid = int(fields[-1])
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.add(pid)
+
+    for pid in pids:
+        print(f"Port {port} is in use; stopping process PID={pid}.")
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
+
+    if pids:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not any(str(port) in line and "LISTENING" in line.upper() for line in subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            ).stdout.splitlines()):
+                break
+            time.sleep(0.1)
 
 
 def _acquire_single_instance_lock(port: int):
@@ -118,6 +167,7 @@ def main() -> None:
     except ValueError:
         port = 8000
     if not reload_enabled:
+        _terminate_port_listeners(port)
         _acquire_single_instance_lock(port)
 
     # #region debug-point B:uvicorn-run

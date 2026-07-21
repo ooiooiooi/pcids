@@ -567,6 +567,7 @@ const Burning: React.FC = () => {
   const [versionBaselineChecksum, setVersionBaselineChecksum] = useState('')
   const [hybridConnectionPassed, setHybridConnectionPassed] = useState(false)
   const [wizardSubmitLoading, setWizardSubmitLoading] = useState(false)
+  const [wizardBoardPage, setWizardBoardPage] = useState(1)
   const [wizardBoardPageSize, setWizardBoardPageSize] = useState(5)
   const [deletingTaskId, setDeletingTaskId] = useState<number | null>(null)
   const [terminatingTaskId, setTerminatingTaskId] = useState<number | null>(null)
@@ -847,6 +848,7 @@ const Burning: React.FC = () => {
     setArtifactKeyword('')
     setArtifactLocationFilter('全部')
     setArtifactPage(1)
+    setWizardBoardPage(1)
     setHybridConnectionPassed(false)
     setOsConnectionResult(null)
     setIsWizardOpen(true)
@@ -2974,6 +2976,13 @@ const Burning: React.FC = () => {
     return matchType && matchKeyword
   })
 
+  useEffect(() => {
+    if (currentStep !== 1 || (platform !== 'board' && platform !== 'hybrid')) return
+    const selectedIndex = filteredBoards.findIndex((board) => Number(board.id) === Number(wizardData.boardId))
+    const nextPage = selectedIndex >= 0 ? Math.floor(selectedIndex / wizardBoardPageSize) + 1 : 1
+    setWizardBoardPage((currentPage) => currentPage === nextPage ? currentPage : nextPage)
+  }, [currentStep, platform, wizardData.boardId, wizardBoardPageSize, boards, boardFilter.type, boardFilter.keyword])
+
   const sectionTitleStyle: React.CSSProperties = { marginBottom: 16, fontSize: 15, fontWeight: 600, color: '#1d2129' }
   const fieldLabelStyle: React.CSSProperties = { marginBottom: 8, fontSize: 14, fontWeight: 500, color: '#1d2129' }
   const helperTextStyle: React.CSSProperties = { marginTop: 6, fontSize: 12, color: '#86909c' }
@@ -3164,9 +3173,11 @@ const Burning: React.FC = () => {
               dataSource={filteredBoards}
               pagination={{
                 total: filteredBoards.length,
+                current: wizardBoardPage,
                 pageSize: wizardBoardPageSize,
                 showSizeChanger: true,
                 pageSizeOptions: [5, 10, 20, 50],
+                onChange: (page) => setWizardBoardPage(page),
                 onShowSizeChange: (_current, size) => setWizardBoardPageSize(size),
                 showTotal: (t) =>
                   renderListPaginationTotal(t, wizardBoardPageSize, (size) => setWizardBoardPageSize(size), {
@@ -3964,7 +3975,16 @@ const Burning: React.FC = () => {
                       {detailTask.last_error ? (
                         <Fragment>
                           <div style={{ color: '#86909C' }}>失败原因</div>
-                          <div style={{ ...detailFieldValueStyle, color: '#F53F3F', fontWeight: 500 }}>
+                          <div style={{ 
+                            ...detailFieldValueStyle, 
+                            color: '#F53F3F', 
+                            fontWeight: 500,
+                            maxHeight: 120,
+                            overflowY: 'auto',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-all',
+                            paddingRight: 8
+                          }}>
                             {decodeMojibakeString(detailTask.last_error)}
                           </div>
                         </Fragment>

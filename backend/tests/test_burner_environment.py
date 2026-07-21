@@ -16,6 +16,14 @@ class BurnerEnvironmentTests(unittest.TestCase):
         self.assertIn("gowin-ready", result)
         switcher.assert_called_once()
 
+    @patch("backend.utils.burner_environment._run_powershell", return_value="gowin-ready")
+    def test_gowin_uses_port_when_location_is_a_placeholder(self, runner):
+        ensure_burner_environment(
+            "gowin_usb_cable_fpga_flash",
+            {"BURNER_NAME": "Gowin USB Cable", "BURNER_LOCATION": "-", "BURNER_PORT": "Port_#0002.Hub_#0003"},
+        )
+        self.assertIn("Port_#0002.Hub_#0003", runner.call_args.args[1])
+
     @patch("backend.utils.burner_environment._al321_environment", return_value="al321-ready")
     def test_al321_uses_existing_environment_switcher(self, switcher):
         result = ensure_burner_environment(

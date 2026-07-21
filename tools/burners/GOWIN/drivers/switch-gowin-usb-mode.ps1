@@ -4,19 +4,32 @@ param(
   [string]$Serial,
   [string]$InstanceAnchor,
   [string]$DriverInfPath = $env:GOWIN_USB_DRIVER_INF,
-  [string]$StateFile = ""
+  [string]$StateFile = "",
+  [string]$DiagnosticLogPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptPath = $MyInvocation.MyCommand.Path
 $gowinRoot = Split-Path -Parent $scriptRoot
 if (-not $StateFile) { $StateFile = Join-Path $gowinRoot "driver-switch-state.json" }
+
+function Write-GowinDiagnostic([string]$Message) {
+  Write-Host $Message
+  if ($DiagnosticLogPath) {
+    Add-Content -LiteralPath $DiagnosticLogPath -Value $Message -Encoding UTF8
+  }
+}
 
 function Get-DriverMetadata([string]$InstanceId) {
   return @{
     Inf = [string]((Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName "DEVPKEY_Device_DriverInfPath" -ErrorAction SilentlyContinue).Data)
     Service = [string]((Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName "DEVPKEY_Device_Service" -ErrorAction SilentlyContinue).Data)
   }
+}
+
+function Get-DeviceHardwareIds([string]$InstanceId) {
+  return @((Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName "DEVPKEY_Device_HardwareIds" -ErrorAction Stop).Data)
 }
 
 function Get-TargetDevice {
@@ -73,27 +86,49 @@ function Test-Administrator {
   return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not (Test-Administrator)) {
-  Write-Host "[INFO] Requesting Administrator privileges to switch Gowin USB driver..."
+function Invoke-ElevatedGowinUsbMode {
+  $elevatedLogPath = if ($DiagnosticLogPath) { $DiagnosticLogPath } else { [System.IO.Path]::GetTempFileName() }
+  Remove-Item -LiteralPath $elevatedLogPath -Force -ErrorAction SilentlyContinue
+  Write-GowinDiagnostic "[INFO] Requesting Administrator privileges to switch Gowin USB driver..."
   $arguments = @(
-    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$($MyInvocation.MyCommand.Path)`"",
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$scriptPath`"",
     "-Mode", $Mode
   )
   if ($Serial) { $arguments += @("-Serial", "`"$Serial`"") }
   if ($InstanceAnchor) { $arguments += @("-InstanceAnchor", "`"$InstanceAnchor`"") }
   if ($DriverInfPath) { $arguments += @("-DriverInfPath", "`"$DriverInfPath`"") }
   if ($StateFile) { $arguments += @("-StateFile", "`"$StateFile`"") }
+  $arguments += @("-DiagnosticLogPath", "`"$elevatedLogPath`"")
 
   $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join " ")
-  exit $process.ExitCode
+  $elevatedOutput = if (Test-Path -LiteralPath $elevatedLogPath) { Get-Content -LiteralPath $elevatedLogPath -Raw -ErrorAction SilentlyContinue } else { "" }
+  if ($process.ExitCode -ne 0) {
+    throw "Gowin USB driver switch failed in the elevated process (exit code $($process.ExitCode)). $elevatedOutput"
+  }
+  if ($elevatedOutput) {
+    Write-Host $elevatedOutput.TrimEnd()
+  }
 }
 
 function Set-GowinUsbMode {
   $device = Get-TargetDevice
   $current = Get-DriverMetadata $device.InstanceId
-  if ($current.Service -ieq "WinUSB") {
-    Write-Host "[INFO] Gowin cable already uses USB mode (WinUSB); no switch is required."
+  $location = [string]((Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName "DEVPKEY_Device_LocationInfo" -ErrorAction SilentlyContinue).Data)
+  $hardwareIds = Get-DeviceHardwareIds $device.InstanceId
+  $isFt2chCable = @($hardwareIds | Where-Object { [string]$_ -match "VID_0403&PID_6014" }).Count -gt 0
+  Write-GowinDiagnostic "[INFO] Gowin device detected: name=$($device.FriendlyName); instance=$($device.InstanceId); location=$location; hardware_id=$($hardwareIds -join ';'); driver_inf=$($current.Inf); service=$($current.Service)."
+  if ($isFt2chCable -and $current.Service -ieq "FTDIBUS") {
+    Write-GowinDiagnostic "[INFO] Gowin FT2CH cable already uses the required FTDI driver (FTDIBUS); no WinUSB switch is required."
     if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
+    return
+  }
+  if ($current.Service -ieq "WinUSB") {
+    Write-GowinDiagnostic "[INFO] Gowin cable already uses USB mode (WinUSB); no switch is required."
+    if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
+    return
+  }
+  if (-not (Test-Administrator)) {
+    Invoke-ElevatedGowinUsbMode
     return
   }
   $stateDir = Split-Path -Parent $StateFile
@@ -101,12 +136,19 @@ function Set-GowinUsbMode {
   @{ State = "pending_usb"; InstanceId = [string]$device.InstanceId; OriginalInf = $current.Inf; OriginalService = $current.Service } |
     ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
   $inf = Resolve-GowinUsbInf
-  Write-Host "[INFO] Switching Gowin cable to USB mode: INF=$inf, previous service=$($current.Service)."
+  Write-GowinDiagnostic "[INFO] Switching Gowin cable to USB mode: INF=$inf, previous service=$($current.Service)."
   Invoke-DriverUpdate $inf $device.InstanceId
   $after = Get-DriverMetadata $device.InstanceId
   if ($after.Service -ine "WinUSB") { throw "Gowin cable did not enter USB mode after driver update; current service is $($after.Service)." }
   Remove-Item -LiteralPath $StateFile -Force -ErrorAction Stop
-  Write-Host "[INFO] Gowin cable USB mode is ready."
+  Write-GowinDiagnostic "[INFO] Gowin cable USB mode is ready."
 }
 
-Set-GowinUsbMode
+try {
+  Set-GowinUsbMode
+} catch {
+  if ($DiagnosticLogPath) {
+    Add-Content -LiteralPath $DiagnosticLogPath -Value ("[ERROR] " + $_.Exception.Message) -Encoding UTF8
+  }
+  throw
+}

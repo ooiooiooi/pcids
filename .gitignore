@@ -118,3 +118,4 @@ tools/burners/GOWIN/drivers/*
 !tools/burners/HDSC/
 tools/burners/HDSC/*
 !tools/burners/HDSC/hdsc_ccid_agent.py
+!tools/burners/HDSC/hdsc_v604_host.ps1

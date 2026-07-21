@@ -20,6 +20,7 @@ import argparse
 import ctypes
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,10 @@ SCARD_E_UNKNOWN_READER = 0x80100009
 
 HDSC_READER_TOKEN = "hdsc ccid writer"
 PROFILE_FORMAT = "hdsc-ccid-v604-operation-v1"
+SCRIPT_DIR = Path(__file__).resolve().parent
+V604_HOST = SCRIPT_DIR / "hdsc_v604_host.ps1"
+DEFAULT_V604_EXE = Path(r"D:\HDSC CCID\HDSC CCID在线离线编程器Rev6.04\HDSC+CCID+Prog+REV6.04.exe")
+V604_EXE_NAME = "HDSC+CCID+Prog+REV6.04.exe"
 
 
 class PcscError(RuntimeError):
@@ -275,8 +280,82 @@ def execute_profile(reader: str, profile: OperationProfile) -> list[dict[str, st
     return results
 
 
+def _v604_powershell() -> Path:
+    preferred = Path(os.environ.get("HDSC_CCID_POWERSHELL", r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"))
+    if preferred.is_file():
+        return preferred
+    fallback = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if fallback.is_file():
+        return fallback
+    raise ProfileError("未找到运行 HDSC CCID Prog V6.04 所需的 Windows PowerShell。")
+
+
+def _resolve_v604_exe() -> Path:
+    configured = os.environ.get("HDSC_CCID_V604_EXE", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_file():
+            return candidate.resolve()
+        raise ProfileError(f"HDSC_CCID_V604_EXE does not exist: {candidate}")
+
+    direct_candidates = [
+        DEFAULT_V604_EXE,
+        Path.home() / "Desktop" / "HDSC CCID" / "HDSC CCID在线离线编程器Rev6.04" / V604_EXE_NAME,
+    ]
+    for candidate in direct_candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    search_roots = [Path(r"D:\HDSC CCID"), Path.home() / "Desktop" / "HDSC CCID"]
+    matches: list[Path] = []
+    for root in search_roots:
+        if root.is_dir():
+            matches.extend(item.resolve() for item in root.rglob(V604_EXE_NAME) if item.is_file())
+    unique_matches = list(dict.fromkeys(matches))
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+    if len(unique_matches) > 1:
+        raise ProfileError(
+            "found multiple HDSC CCID Prog V6.04 executables; set HDSC_CCID_V604_EXE: "
+            + ", ".join(str(item) for item in unique_matches)
+        )
+    raise ProfileError("HDSC CCID Prog V6.04 was not found; set HDSC_CCID_V604_EXE")
+
+
+def execute_v604(reader: str, target: str, firmware: Path | None, erase_mode: str, completion_action: str, baud_index: int, baud_khz: int = 0, baud_rate: int = 0) -> dict[str, Any]:
+    if os.name != "nt":
+        raise ProfileError("HDSC CCID Prog V6.04 算法只能在 Windows 上运行")
+    vendor_exe = _resolve_v604_exe()
+    command = [
+        str(_v604_powershell()), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(V604_HOST),
+        "-Command", "flash" if firmware else "preflight",
+        "-Reader", reader,
+        "-VendorExe", str(vendor_exe),
+    ]
+    if firmware:
+        command.extend([
+            "-TargetChip", target,
+            "-FirmwarePath", str(firmware),
+            "-EraseMode", erase_mode,
+            "-CompletionAction", completion_action,
+            "-BaudIndex", str(baud_index),
+            "-BaudKHz", str(baud_khz),
+            "-BaudRate", str(baud_rate),
+        ])
+    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    try:
+        payload = json.loads(lines[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise ProfileError(f"V6.04 算法主机未返回有效 JSON：{detail}") from exc
+    if completed.returncode or not payload.get("ok"):
+        raise ProfileError(str(payload.get("error") or "V6.04 芯片算法执行失败"))
+    return dict(payload.get("data") or {})
+
+
 def _emit(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    print(json.dumps(payload, ensure_ascii=True), flush=True)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -285,6 +364,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--reader", default="", help="Exact PC/SC reader name; auto-selects one HDSC CCID Writer when omitted")
     parser.add_argument("--target-chip", default="", help="Target MCU name; required by flash")
     parser.add_argument("--algorithm-profile", type=Path, help="Reviewed HDSC CCID Prog V6.04 operation profile JSON")
+    parser.add_argument("--firmware", type=Path, help="Firmware file for the built-in HDSC CCID Prog V6.04 algorithm")
+    parser.add_argument("--erase-mode", default="chip", choices=("chip", "all", "none", "no-erase"))
+    parser.add_argument("--completion-action", default="reset-run", choices=("reset-run", "run", "none", "off"))
+    parser.add_argument("--baud-index", type=int, default=0, choices=range(0, 9), help="V6.04 programmer baud-rate index (0 is 115200)")
+    parser.add_argument("--baud-khz", type=int, default=0, help="Requested target ISP rate in kHz; resolved against the selected V6.04 algorithm")
+    parser.add_argument("--baud-rate", type=int, default=0, help="Requested target ISP baud rate, for example 115200")
     args = parser.parse_args(argv)
     try:
         if args.command == "list-readers":
@@ -293,12 +378,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             return 0
         reader = find_hdsc_reader(args.reader)
         if args.command == "preflight":
-            _emit({"ok": True, "command": "preflight", **preflight(reader)})
+            _emit({"ok": True, "command": "preflight", **execute_v604(reader, "", None, "none", "none", args.baud_index)})
             return 0
         if not args.target_chip:
             raise ProfileError("flash requires --target-chip")
+        if args.firmware:
+            if not args.firmware.is_file():
+                raise ProfileError(f"firmware does not exist: {args.firmware}")
+            result = execute_v604(reader, args.target_chip, args.firmware, args.erase_mode, args.completion_action, args.baud_index, args.baud_khz, args.baud_rate)
+            _emit({"ok": True, "command": "flash", **result})
+            return 0
         if args.algorithm_profile is None:
-            raise ProfileError("flash requires --algorithm-profile; no target-writing APDU is guessed")
+            raise ProfileError("flash requires --firmware for built-in V6.04 algorithms or --algorithm-profile for a reviewed raw profile")
         profile = load_operation_profile(args.algorithm_profile, args.target_chip)
         _emit({"ok": True, "command": "flash", "reader": reader, "target": profile.target, "profile": str(profile.source), "operations": execute_profile(reader, profile)})
         return 0

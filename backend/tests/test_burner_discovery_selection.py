@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,6 +16,7 @@ from backend.routers.burners import (
     _refresh_registered_burner_statuses,
     _resolve_ambiguous_candidate_types,
     _resolve_discovery_status_updates,
+    _scan_discovery_nodes_async,
 )
 
 
@@ -438,6 +441,28 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
             serials = _probe_stlink_serials(cache_ttl_seconds=0)
 
         self.assertEqual(serials, ["51FF6F067182525607321487"])
+
+
+class BurnerDiscoveryAsyncOffloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_node_scan_runs_in_worker_thread(self):
+        scan_thread_ids: list[int] = []
+
+        def slow_scan(_node):
+            scan_thread_ids.append(threading.get_ident())
+            return []
+
+        with patch("backend.routers.burners._scan_discovery_node", side_effect=slow_scan):
+            candidates, failed_node_keys = await _scan_discovery_nodes_async(
+                [{"node_key": "local", "node_type": "local", "agent_url": None}],
+                "local",
+                None,
+                "test-trace",
+            )
+
+        self.assertEqual(candidates, [[]])
+        self.assertEqual(failed_node_keys, set())
+        self.assertEqual(len(scan_thread_ids), 1)
+        self.assertNotEqual(scan_thread_ids[0], threading.get_ident())
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 $ErrorActionPreference = "Stop"
 
-$projectRoot = "D:\workspace\pcids"
+$projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 
 Write-Host "========================================"
-Write-Host "  PCIDS 开发环境启动"
+Write-Host "  Starting PCIDS development environment"
 Write-Host "========================================"
 
 $backendPort = 8000
@@ -12,7 +12,7 @@ $backendHost = "127.0.0.1"
 $pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $pythonExe)) {
-  throw "未找到 Python 虚拟环境：$pythonExe"
+  throw "Python virtual environment was not found: $pythonExe"
 }
 
 $listeners = Get-NetTCPConnection -LocalPort $backendPort -State Listen -ErrorAction SilentlyContinue
@@ -21,7 +21,7 @@ if ($listeners) {
     Select-Object -ExpandProperty OwningProcess |
     Sort-Object -Unique |
     ForEach-Object {
-      Write-Host "停止旧后端进程 PID=$_"
+      Write-Host "Stopping existing backend process: PID=$_"
       Stop-Process -Id $_ -Force
     }
   Start-Sleep -Seconds 1
@@ -31,7 +31,7 @@ $env:PCIDS_BACKEND_HOST = $backendHost
 $env:PCIDS_BACKEND_PORT = "$backendPort"
 $env:PCIDS_BACKEND_RELOAD = "0"
 
-Write-Host "启动后端：http://$backendHost`:$backendPort"
+Write-Host "Starting backend: http://$backendHost`:$backendPort"
 Start-Process `
   -FilePath $pythonExe `
   -ArgumentList "backend\run_backend.py" `
@@ -55,11 +55,11 @@ for ($i = 1; $i -le 20; $i++) {
 }
 
 if (-not $ready) {
-  throw "后端启动失败，请查看 backend_restart.err.log"
+  throw "Backend startup failed; see backend_restart.err.log"
 }
 
-Write-Host "后端健康检查通过：$healthUrl"
-Write-Host "启动前端：npm.cmd run dev"
-Write-Host "前端通常访问：http://127.0.0.1:5173"
+Write-Host "Backend health check passed: $healthUrl"
+Write-Host "Starting frontend: npm.cmd run dev"
+Write-Host "Frontend URL: http://127.0.0.1:5173"
 
 npm.cmd run dev

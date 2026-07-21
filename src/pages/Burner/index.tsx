@@ -689,6 +689,17 @@ const Burner: React.FC = () => {
       })
   }
 
+  const getScanDeviceId = (candidate: any) => {
+    const binding = candidate?.usb_binding || {}
+    return String(
+      binding.pnp_device_id
+      || binding.container_id
+      || candidate?.candidate_id
+      || candidate?.raw_port
+      || '',
+    ).trim()
+  }
+
   const applyScanSelection = (state: ScanSelectState, value?: string) => {
     const nextValue = String(value || state.value || '').trim()
     if (!nextValue) {
@@ -1365,13 +1376,31 @@ const Burner: React.FC = () => {
         <Select
           style={{ width: '100%' }}
           value={scanSelect.value}
+          optionLabelProp="title"
           placeholder={scanSelect.field === 'sn' ? '请选择 SN 标识码' : '请选择物理端口'}
-          options={scanSelect.options.map((item) => ({
-            value: item.value,
-            label: scanSelect.field === 'sn'
-              ? `${item.value}${item.port ? `（${item.port}）` : ''}`
-              : `${item.value}${item.sn ? `（SN：${item.sn}）` : ''}`,
-          }))}
+          options={scanSelect.options.map((item) => {
+            const deviceId = getScanDeviceId(item)
+            if (scanSelect.field === 'sn') {
+              return {
+                value: item.value,
+                title: item.value,
+                label: `${item.value}${item.port ? `（${item.port}）` : ''}`,
+              }
+            }
+            return {
+              value: item.value,
+              title: item.value,
+              label: (
+                <div style={{ lineHeight: 1.45, padding: '2px 0' }}>
+                  <div>物理端口：{item.value}</div>
+                  <div style={{ color: '#667085', fontSize: 12, overflowWrap: 'anywhere' }}>
+                    设备 ID：{deviceId || '未获取'}
+                  </div>
+                  {item.sn ? <div style={{ color: '#667085', fontSize: 12 }}>SN：{item.sn}</div> : null}
+                </div>
+              ),
+            }
+          })}
           onChange={(value) => setScanSelect((prev) => ({ ...prev, value }))}
         />
       </Modal>

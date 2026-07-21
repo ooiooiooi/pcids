@@ -139,6 +139,29 @@ class TaskBurnerAutoBindingTests(unittest.TestCase):
         self.assertIsNone(issue)
         self.assertEqual(post_mock.call_args.kwargs["timeout_seconds"], 6)
 
+    def test_local_physical_port_strategy_uses_port_not_empty_location(self):
+        burner = SimpleNamespace(
+            id=36,
+            name="SEED USB2.0 PLUS Emulator",
+            type="XDS510plus",
+            strategy=2,
+            sn="",
+            port="Port_#0001.Hub_#0001",
+            location=None,
+            status=0,
+            is_enabled=True,
+            agent_url="",
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+
+        with patch("backend.routers.tasks._build_scan_result", return_value={"online": True}) as scan_mock:
+            issue = _get_burner_runtime_issue(db, burner, current_task_id=123)
+
+        self.assertIsNone(issue)
+        self.assertEqual(scan_mock.call_args.args[1], "Port_#0001.Hub_#0001")
+        self.assertEqual(scan_mock.call_args.args[2], 2)
+
     def test_terminating_task_keeps_burner_reserved_until_cleanup_finishes(self):
         burner = SimpleNamespace(
             id=2,

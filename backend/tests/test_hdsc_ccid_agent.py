@@ -15,6 +15,27 @@ SPEC.loader.exec_module(hdsc_ccid_agent)
 
 
 class HdscCcidAgentTests(unittest.TestCase):
+    def test_v604_host_uses_plaintext_intel_hex_converter(self):
+        host = AGENT_PATH.with_name("hdsc_v604_host.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("DftFile_Convert2List", host)
+        self.assertIn("$_.Name -eq 'DftFile_Convert2List'", host)
+        self.assertIn("PowerOn_3V3", host)
+        self.assertIn("PowerOff", host)
+        self.assertIn("$operationSucceeded = $false", host)
+        self.assertIn("if (-not $operationSucceeded)", host)
+        self.assertIn("Start-Sleep -Milliseconds 500", host)
+        self.assertIn("$effectiveBaud = [int]$supportedBauds[$effectiveBaudIndex]", host)
+        self.assertIn("'ISP_ConnectAndPps' @($effectiveBaud)", host)
+        self.assertNotIn("'ISP_ConnectAndPps' @($effectiveBaudIndex)", host)
+        self.assertIn("PreISP_ConnectAndPps", host)
+        self.assertIn("PreISP_Scripts_DownLoadRamcodeAndRun", host)
+        self.assertIn("'PreISP_Script_Exe'", host)
+        self.assertIn("'ISP_Script_Exe'", host)
+        self.assertNotIn("Invoke-McuBool $mcu 'PreISP_ScriptList_Exe'", host)
+        self.assertNotIn("Invoke-McuBool $mcu 'ISP_ScriptList_Exe'", host)
+        self.assertLess(host.index("PreISP_ConnectAndPps"), host.index("'ISP_ConnectAndPps' @($effectiveBaud)"))
+
     def test_profile_rejects_a_target_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             profile = Path(temp_dir) / "hc32l130.json"

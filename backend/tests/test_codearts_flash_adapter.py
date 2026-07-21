@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG, build_system_script_content
-from scripts.pcids_flash import EventLogger, _CODEARTS_RUNTIME_ENV_ALIASES, _batch_command, _decode_tool_output, _resolve_request
+from scripts.pcids_flash import EventLogger, _CODEARTS_RUNTIME_ENV_ALIASES, _apply_adapter_defaults, _batch_command, _decode_tool_output, _resolve_request
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +44,18 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
         self.assertEqual(config["erase_mode"], "全片擦除")
         self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["ERASE_MODE"]["全片擦除"], "chip")
         self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["COMPLETION_ACTION"]["复位运行"], "reset-run")
+
+    def test_xds510plus_uses_deployed_default_ccxml_when_pipeline_leaves_it_empty(self):
+        item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "xds510plus_dsp_flash")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tools_root = Path(temp_dir) / "tools" / "burners"
+            ccxml = tools_root / "XDS510plus" / "targets" / "seed_xds510plus_f28335.ccxml"
+            ccxml.parent.mkdir(parents=True)
+            ccxml.write_text("<config />", encoding="utf-8")
+            config = {"target_config_file": ""}
+            with mock.patch.dict("os.environ", {"PCIDS_BUNDLED_TOOLS_DIR": str(tools_root)}, clear=False):
+                _apply_adapter_defaults(item, config)
+            self.assertEqual(Path(config["target_config_file"]), ccxml)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows batch invocation contract")
     def test_batch_command_executes_generated_script_and_preserves_exit_code(self):
