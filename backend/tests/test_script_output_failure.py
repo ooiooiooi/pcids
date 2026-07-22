@@ -66,6 +66,14 @@ class ScriptOutputFailureTests(unittest.TestCase):
 
         self.assertEqual(reason, "")
 
+    def test_agent_json_error_is_decoded_for_task_failure_reason(self):
+        reason = _script_output_failure_reason(
+            '{"ok": false, "error": "PreISP target connect failed: \\u4e0b\\u8f7dRamCode\\u51fa\\u9519"}',
+            "",
+        )
+
+        self.assertEqual(reason, "PreISP target connect failed: 下载RamCode出错")
+
 
 if __name__ == "__main__":
     unittest.main()

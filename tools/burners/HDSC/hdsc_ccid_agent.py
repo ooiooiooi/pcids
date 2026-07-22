@@ -41,8 +41,8 @@ HDSC_READER_TOKEN = "hdsc ccid writer"
 PROFILE_FORMAT = "hdsc-ccid-v604-operation-v1"
 SCRIPT_DIR = Path(__file__).resolve().parent
 V604_HOST = SCRIPT_DIR / "hdsc_v604_host.ps1"
-DEFAULT_V604_EXE = Path(r"D:\HDSC CCID\HDSC CCID在线离线编程器Rev6.04\HDSC+CCID+Prog+REV6.04.exe")
 V604_EXE_NAME = "HDSC+CCID+Prog+REV6.04.exe"
+BUILTIN_V604_EXE = SCRIPT_DIR / "vendor" / "HDSC_CCID_Prog_Rev6.04" / V604_EXE_NAME
 
 
 class PcscError(RuntimeError):
@@ -308,8 +308,8 @@ def _resolve_v604_exe() -> Path:
 
     direct_candidates = [
         *(root / V604_EXE_NAME for root in bundled_search_roots),
-        DEFAULT_V604_EXE,
-        Path.home() / "Desktop" / "HDSC CCID" / "HDSC CCID在线离线编程器Rev6.04" / V604_EXE_NAME,
+        *(root / "vendor" / "HDSC_CCID_Prog_Rev6.04" / V604_EXE_NAME for root in bundled_search_roots),
+        BUILTIN_V604_EXE,
     ]
     for candidate in direct_candidates:
         if candidate.is_file():
@@ -317,8 +317,7 @@ def _resolve_v604_exe() -> Path:
 
     search_roots = [
         *bundled_search_roots,
-        Path(r"D:\HDSC CCID"),
-        Path.home() / "Desktop" / "HDSC CCID",
+        BUILTIN_V604_EXE.parent,
     ]
     matches: list[Path] = []
     for root in search_roots:

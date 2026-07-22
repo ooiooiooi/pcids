@@ -133,6 +133,20 @@ class TaskSubprocessStreamingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("=== Exit Code ===\n124", log_text)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows batch behavior")
+    async def test_batch_script_accepts_unicode_outside_gbk(self):
+        success, log_text, failure_reason = await _execute_script_content_locally(
+            "@echo off\r\necho [ERROR] unicode replacement: �\r\nexit /b 2\r\n",
+            "bat",
+            {},
+            10,
+            "unicode-batch.bat",
+        )
+
+        self.assertFalse(success)
+        self.assertIn("unicode replacement: �", failure_reason)
+        self.assertIn("unicode replacement: �", log_text)
+
     def test_timeout_summary_preserves_existing_log_output(self):
         log_text = _decorate_timeout_log("=== 执行脚本 ===\nfoo.bat\n=== 脚本输出 ===\nstep-1", 12)
 

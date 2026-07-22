@@ -77,7 +77,7 @@ class HdscCcidAgentTests(unittest.TestCase):
 
     def test_v604_exe_is_discovered_from_bundled_tools_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            vendor_exe = Path(temp_dir) / "HDSC_CCID" / hdsc_ccid_agent.V604_EXE_NAME
+            vendor_exe = Path(temp_dir) / "HDSC" / "vendor" / "HDSC_CCID_Prog_Rev6.04" / hdsc_ccid_agent.V604_EXE_NAME
             vendor_exe.parent.mkdir(parents=True)
             vendor_exe.touch()
             with patch.dict(
@@ -87,6 +87,11 @@ class HdscCcidAgentTests(unittest.TestCase):
             ):
                 os.environ.pop("HDSC_CCID_V604_EXE", None)
                 self.assertEqual(hdsc_ccid_agent._resolve_v604_exe(), vendor_exe.resolve())
+
+    def test_host_writes_json_as_utf8_bytes(self):
+        host = AGENT_PATH.with_name("hdsc_v604_host.ps1").read_text(encoding="utf-8")
+        self.assertIn("[Console]::OpenStandardOutput()", host)
+        self.assertIn("[System.Text.UTF8Encoding]::new($false)", host)
 
 
 if __name__ == "__main__":

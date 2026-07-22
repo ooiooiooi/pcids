@@ -439,13 +439,27 @@ def _script_output_failure_reason(stdout: str, stderr: str) -> str:
     reasons: list[str] = []
     for line in output.splitlines():
         normalized = line.strip()
-        if normalized.startswith("[ERROR]"):
+        # Tool agents return structured JSON. Do not expose its serialized
+        # representation (including literal ``\\uXXXX`` escapes) as the task
+        # failure reason; show the decoded, user-facing error instead.
+        if normalized.startswith("{") and normalized.endswith("}"):
+            try:
+                payload = json.loads(normalized)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                reason = str(payload.get("error") or "烧录工具执行失败").strip()
+            else:
+                reason = ""
+        elif normalized.startswith("[ERROR]"):
             reason = normalized.removeprefix("[ERROR]").strip() or "脚本输出明确错误"
         elif "__PCIDS_" in normalized and "_ERROR__" in normalized:
             reason = normalized.split(":", 1)[-1].strip() or "脚本输出明确错误"
         elif normalized.startswith("SEED_XDS510_WORKFLOW_FAILED:"):
             reason = normalized.split(":", 1)[-1].strip() or "SEED XDS510Plus workflow failed"
         else:
+            continue
+        if not reason:
             continue
         if reason not in reasons:
             reasons.append(reason)
@@ -4877,13 +4891,15 @@ async def _execute_script_content_locally(
                 monitor.record("burner-environment", "failed", "烧录器环境检查/切换失败", reason=str(exc))
             return False, failure_reason, failure_reason
 
-        # cmd.exe interprets batch files through the active Windows ANSI code
-        # page.  Writing a UTF-8 batch makes its literal Chinese diagnostics
-        # garbled before they ever reach the backend.  Keep PowerShell and
-        # other script types UTF-8, but use the active code page for .bat.
-        script_encoding = locale.getpreferredencoding(False) if normalized_type == "bat" and os.name == "nt" else "utf-8"
-        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding=script_encoding) as temp_script:
-            temp_script.write(script_content)
+        # Use one Unicode-safe contract for every local script.  A batch file
+        # first switches cmd.exe to UTF-8, then is written in UTF-8 itself.
+        # This avoids both GBK mojibake and failures when an error message
+        # contains a character outside CP936 (for example U+FFFD).
+        content_to_write = script_content
+        if normalized_type == "bat" and os.name == "nt":
+            content_to_write = "@chcp 65001 >nul\r\n" + script_content
+        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8", newline="") as temp_script:
+            temp_script.write(content_to_write)
             temp_script_path = temp_script.name
 
         st = os.stat(temp_script_path)

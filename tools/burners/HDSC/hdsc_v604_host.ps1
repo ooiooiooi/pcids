@@ -14,11 +14,21 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Write-Result([bool]$Ok, [object]$Data, [string]$ErrorText = '') {
-  [pscustomobject]@{
+  $json = [pscustomobject]@{
     ok = $Ok
     data = $Data
     error = $ErrorText
   } | ConvertTo-Json -Compress -Depth 6
+
+  # Windows PowerShell 5.1 writes pipeline text using the active OEM code
+  # page when stdout is redirected.  Vendor exceptions contain Chinese text,
+  # which then becomes '?' before the Python agent can parse the JSON.
+  # Write UTF-8 bytes directly so task logs retain the original diagnostics.
+  $utf8 = [System.Text.UTF8Encoding]::new($false)
+  $bytes = $utf8.GetBytes("$json`r`n")
+  $stream = [Console]::OpenStandardOutput()
+  $stream.Write($bytes, 0, $bytes.Length)
+  $stream.Flush()
 }
 
 function Normalise-Target([string]$Value) {

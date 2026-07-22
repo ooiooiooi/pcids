@@ -11,10 +11,8 @@ class HdscPackagingTests(unittest.TestCase):
         matches = [item for item in resources if item.get("to") == "tools/burners/HDSC"]
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].get("from"), "tools/burners/HDSC")
-        self.assertEqual(
-            set(matches[0].get("filter", [])),
-            {"hdsc_ccid_agent.py", "hdsc_v604_host.ps1"},
-        )
+        self.assertNotIn("filter", matches[0])
+        self.assertTrue((ROOT / "tools" / "burners" / "HDSC" / "vendor" / "HDSC_CCID_Prog_Rev6.04" / "HDSC+CCID+Prog+REV6.04.exe").is_file())
 
     def test_standard_package_contains_hdsc_runtime(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))

@@ -83,11 +83,7 @@
       },
       {
         "from": "tools/burners/HDSC",
-        "to": "tools/burners/HDSC",
-        "filter": [
-          "hdsc_ccid_agent.py",
-          "hdsc_v604_host.ps1"
-        ]
+        "to": "tools/burners/HDSC"
       },
       {
         "from": "tools/burners/GOWIN",
