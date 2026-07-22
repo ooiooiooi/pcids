@@ -63,6 +63,31 @@ class RuntimeDependenciesTest(unittest.TestCase):
                 self.assertEqual(configured["HDC_EXE"], str(hdc.resolve()))
                 self.assertEqual(os.environ["HDC_EXE"], str(hdc.resolve()))
 
+    def test_bundled_hdsc_runtime_is_discovered_for_script_initialization(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "burners"
+            agent = root / "HDSC" / "hdsc_ccid_agent.py"
+            vendor_exe = root / "HDSC_CCID" / "HDSC+CCID+Prog+REV6.04.exe"
+            agent.parent.mkdir(parents=True)
+            vendor_exe.parent.mkdir(parents=True)
+            agent.touch()
+            vendor_exe.touch()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "PCIDS_BUNDLED_TOOLS_DIR": str(root),
+                    "HDSC_CCID_AGENT": "",
+                    "HDSC_CCID_V604_EXE": "",
+                },
+                clear=False,
+            ):
+                configure_bundled_tools.cache_clear()
+                configured = configure_bundled_tools()
+
+                self.assertEqual(configured["HDSC_CCID_AGENT"], str(agent.resolve()))
+                self.assertEqual(configured["HDSC_CCID_V604_EXE"], str(vendor_exe.resolve()))
+
     def test_burner_readiness_distinguishes_ready_and_docs_only_tools(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

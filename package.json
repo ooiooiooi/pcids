@@ -82,6 +82,14 @@
         "to": "flash-adapter/pcids_flash.py"
       },
       {
+        "from": "tools/burners/HDSC",
+        "to": "tools/burners/HDSC",
+        "filter": [
+          "hdsc_ccid_agent.py",
+          "hdsc_v604_host.ps1"
+        ]
+      },
+      {
         "from": "tools/burners/GOWIN",
         "to": "tools/burners/GOWIN",
         "filter": [

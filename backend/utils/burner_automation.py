@@ -2271,10 +2271,11 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               echo [ERROR] HDSC CCID 烧录需要 TARGET_CHIP。
               exit /b 2
             )
+            if "%HDSC_CCID_AGENT%"=="" if not "%PCIDS_BUNDLED_TOOLS_DIR%"=="" if exist "%PCIDS_BUNDLED_TOOLS_DIR%\HDSC\hdsc_ccid_agent.py" set "HDSC_CCID_AGENT=%PCIDS_BUNDLED_TOOLS_DIR%\HDSC\hdsc_ccid_agent.py"
             if "%HDSC_CCID_AGENT%"=="" set "HDSC_CCID_AGENT=%CD%\tools\burners\HDSC\hdsc_ccid_agent.py"
             if not exist "%HDSC_CCID_AGENT%" (
               echo [ERROR] 未找到内置 HDSC CCID agent: %HDSC_CCID_AGENT%
-              echo [ERROR] 请从 PCIDS 项目根目录启动服务，或设置 HDSC_CCID_AGENT。
+              echo [ERROR] 请检查 PCIDS_BUNDLED_TOOLS_DIR，或设置 HDSC_CCID_AGENT。
               exit /b 127
             )
             if "%HDSC_CCID_PYTHON%"=="" set "HDSC_CCID_PYTHON=python"

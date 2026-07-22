@@ -37,10 +37,10 @@
 当前 POC 将以下**整行**直接复制到“命令”字段。芯片、板卡、PW-LINK 序列号和制品文件名均已填写，无需另建流水线参数，也无需自行添加 `@echo off`、`setlocal` 或 `exit /b`：
 
 ```bash
-[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing. Install the PCIDS package that provides the flash adapter, then restart the CodeArts Agent service."; exit 2; }; cmd.exe //d //s //c call "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing. Install the PCIDS package that provides the flash adapter, then restart the CodeArts Agent service."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
 ```
 
-该命令会先校验 `PCIDS_FLASH_ADAPTER`；变量缺失时直接以退出码 `2` 失败，避免出现“未调用 PCIDS 却显示构建成功”的假成功。Git Bash 下必须使用 `cmd.exe //d //s //c call`：双斜杠可防止 `/c` 被 Git Bash 转换成路径，`call` 可正确执行安装目录中带空格的 `.cmd` 文件并把退出码返回给 Build。随后采用 PCIDS 的 PW-LINK 默认接口、擦除、校验和复位策略。Build 返回 `0` 即烧录成功；非 `0` 时构建失败，控制台和 `${WORKSPACE}/pcids-logs` 均保留日志。若下载后的真实文件名不同，只替换 `--firmware` 后的文件名，且引号内不能带尾随空格。
+该命令会先校验 `PCIDS_FLASH_ADAPTER`；变量缺失时直接以退出码 `2` 失败，避免出现“未调用 PCIDS 却显示构建成功”的假成功。Git Bash 可直接执行该 `.cmd` 文件；不要再额外包一层 `cmd.exe /c call`，否则可能启动空 `cmd.exe` 并返回假成功。随后采用 PCIDS 的 PW-LINK 默认接口、擦除、校验和复位策略。Build 返回 `0` 即烧录成功；非 `0` 时构建失败，控制台和 `${WORKSPACE}/pcids-logs` 均保留日志。若下载后的真实文件名不同，只替换 `--firmware` 后的文件名，且引号内不能带尾随空格。
 
 **不要改成多行命令**，也不要把 `call` 直接写成 Bash 命令、使用 `^`、`%WORKSPACE%`，或在此字段手工拼接带反斜杠转义的 `--config-json`；这些写法会导致 Bash 找不到命令或触发 Groovy 解析错误，构建还未开始烧录就会失败。
 
@@ -193,7 +193,7 @@ exit $LASTEXITCODE
 下列命令是已在 Windows CodeArts Agent 上验证的 Git Bash Shell 写法，可直接粘贴到“执行 Shell 命令”步骤。请按实际任务替换芯片、板卡、烧录器序列号和固件文件名；发布库下载步骤必须已将该 `.hex` 文件下载到 Build 工作目录。
 
 ```bash
-[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; cmd.exe //d //s //c call "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
 ```
 
 该示例不传 `--config-json`，因此采用 PCIDS 原有 PW-LINK 内部脚本的默认烧录参数；入口脚本只负责接收参数、定位并调用内部脚本。若某块板卡需要覆盖接口、擦除或完成动作，再使用下方 PowerShell 示例中的 `--config-json` 参数。
@@ -227,11 +227,21 @@ exit $LASTEXITCODE
 ```
 
 ```powershell
-# HDSC CCID；接口固定 UART。HDSC 厂商 CLI/模板由 Agent 环境配置。
+# HDSC CCID；接口固定 UART，write_speed_khz 字段实际为波特率。HDSC 厂商工具由 Agent 环境配置。
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'HDSC CCID' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_HDSC_SN' --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'HDSC CCID' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":115200,"completion_action":"复位运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
+
+#### CodeArts Shell 示例：HDSC CCID / UART ISP
+
+HDSC CCID 当前走 UART/ISP，不能填 SWD；例如 HC32L130 使用 `RXD=PA9`、`TXD=PA10`、`BOOT=BOOT`。`--target-chip` 不能只填泛称 `HC32L130`，应填写实际芯片型号。发布仓库下载步骤必须先将 `.hex` 固件下载到 Build 工作目录。以下为 HC32L130J8TA 示例，在 Git Bash 的“执行 Shell 命令”步骤可直接粘贴：
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "HDSC CCID" --target-chip "HC32L130J8TA" --board "REPLACE_HDSC_BOARD" --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":115200,"completion_action":"复位运行","write_verify":true}' --firmware "$WORKSPACE/hc32l130j8ta_led_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+```
+
+HDSC 的 `write_speed_khz` 实际含义是 UART 波特率，通常填 `115200`；当前内置 HDSC 流程会自动选择唯一连接的 CCID Writer，因此不需要传 `--burner-sn`。Agent 需已安装 HDSC CCID Prog V6.04（或配置 `HDSC_CCID_V604_EXE`）并具备 Python 运行环境。
 
 ### 3. DSP：XDS510plus / TMS320F28335
 
@@ -240,7 +250,7 @@ exit $LASTEXITCODE
 在 CodeArts Build 的“执行 Shell 命令”步骤中，使用 Git Bash Shell 时可直接粘贴以下一整行。必须替换 `REPLACE_DSP_BOARD` 和 `Project.out`；不需要传入 `--burner-sn`。
 
 ```bash
-[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; cmd.exe //d //s //c call "$PCIDS_FLASH_ADAPTER" run --burner "XDS510plus" --target-chip "TMS320F28335" --board "REPLACE_DSP_BOARD" --config-json '{"interface_type":"JTAG","target_config_file":"","erase_mode":"全片擦除","completion_action":"复位运行","write_verify":true}' --firmware "$WORKSPACE/Project.out" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "XDS510plus" --target-chip "TMS320F28335" --board "REPLACE_DSP_BOARD" --config-json '{"interface_type":"JTAG","target_config_file":"","erase_mode":"全片擦除","completion_action":"复位运行","write_verify":true}' --firmware "$WORKSPACE/Project.out" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
 ```
 
 前置条件：Agent 已安装并可使用 SEED XDS510Plus 驱动与 CCS 5.5 Legacy UniFlash，且 `DSS_BAT` 已配置；发布库下载步骤必须把 `.out` 文件下载到 Build 工作目录。
@@ -292,6 +302,16 @@ $firmware = "$env:WORKSPACE\Project.fs"
 & $adapter run --burner 'Gowin USB Cable' --target-chip 'REPLACE_GOWIN_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{"interface_type":"JTAG","execution_operation":"Flash固化","erase_mode":"全片擦除","cable_index":1,"tck_frequency":"1MHz","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
+
+#### Gowin USB Cable：SRAM 下载（CodeArts Git Bash Shell，可直接粘贴）
+
+SRAM 下载只配置 FPGA 易失 SRAM，断电后配置会丢失。以下是当前发布库 `gowin/LED_Run.fs` 的 POC 完整命令：它自动在 Build 工作目录及其子目录定位制品，避免因发布库下载目录层级不同而找不到固件。单根 Gowin 下载线使用默认 `cable_index=1`，无需填写 `--burner-sn`；`write_verify=true` 会要求 Gowin Programmer 执行写入校验。
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; firmware="$(find "$WORKSPACE" -type f -name 'LED_Run.fs' -print -quit)"; [ -n "$firmware" ] || { echo "[ERROR] LED_Run.fs was not downloaded into WORKSPACE."; find "$WORKSPACE" -type f -print; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "Gowin USB Cable" --target-chip "GW1N-4" --board "Gowin FPGA" --config-json '{"interface_type":"JTAG","execution_operation":"SRAM下载","erase_mode":"不擦除","cable_index":1,"tck_frequency":"1MHz","write_verify":true,"completion_action":"不处理"}' --firmware "$firmware" --run-id "$BUILD_ID" --log-dir "C:/PCIDS-AgentData/codearts-logs/$BUILD_ID"
+```
+
+不要在命令前额外加入 `cmd.exe /c call`。Git Bash 可直接执行 `"$PCIDS_FLASH_ADAPTER"`；额外嵌套 `cmd.exe` 可能只启动空命令并返回 `0`，属于假成功。真实 SRAM 下载日志必须依次出现 `event: "started"`、Gowin JTAG 扫描输出、`[EXEC]` 的 `programmer_cli` 命令以及 `event: "completed"`。日志写入 `C:/PCIDS-AgentData/codearts-logs/$BUILD_ID`，不会随 CodeArts 工作目录清理而消失。
 
 ### 6. CPLD：Altera Blaster II
 

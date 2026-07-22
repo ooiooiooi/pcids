@@ -27,6 +27,8 @@ TOOL_EXECUTABLES = {
     "IPECMD_EXE": ["ipecmd.exe", "ipecmd"],
     "QUARTUS_PGM": ["quartus_pgm.exe", "quartus_pgm"],
     "GOWIN_PROGRAMMER_CLI": ["programmer_cli.exe", "programmer_cli"],
+    "HDSC_CCID_AGENT": ["hdsc_ccid_agent.py"],
+    "HDSC_CCID_V604_EXE": ["HDSC+CCID+Prog+REV6.04.exe", "*CCID*Prog*REV6.04*.exe"],
     "HDC_EXE": ["hdc.exe", "hdc"],
     "UNIFLASH_CLI": ["dslite.exe", "dslite.bat", "uniflash.bat", "uniflash.exe"],
     "DSS_BAT": ["dss.bat", "dss.exe"],
@@ -191,6 +193,12 @@ BURNER_TOOL_GROUPS = [
         "env_names": ["DSS_BAT", "XDS510_DRIVER_INSTALL_SCRIPT"],
         "bundled_dir": "XDS510plus",
         "tool_label": "CCS 5.5 DSS / SEED XDS510Plus driver package",
+    },
+    {
+        "burner": "HDSC CCID",
+        "env_names": ["HDSC_CCID_AGENT", "HDSC_CCID_V604_EXE"],
+        "bundled_dir": "HDSC",
+        "tool_label": "PCIDS HDSC CCID agent / HDSC CCID Prog V6.04",
     },
 ]
 

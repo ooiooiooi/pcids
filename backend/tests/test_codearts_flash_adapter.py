@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG, build_system_script_content
-from scripts.pcids_flash import EventLogger, _CODEARTS_RUNTIME_ENV_ALIASES, _apply_adapter_defaults, _batch_command, _decode_tool_output, _resolve_request
+from scripts.pcids_flash import EventLogger, _CODEARTS_RUNTIME_ENV_ALIASES, _adapter_validation_defaults, _apply_adapter_defaults, _batch_command, _decode_tool_output, _resolve_request
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +56,12 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"PCIDS_BUNDLED_TOOLS_DIR": str(tools_root)}, clear=False):
                 _apply_adapter_defaults(item, config)
             self.assertEqual(Path(config["target_config_file"]), ccxml)
+
+    def test_hdsc_adapter_validation_uses_uart_baud_options(self):
+        item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "hdsc_ccid_arm_mcu_flash")
+        defaults = _adapter_validation_defaults(item)
+        self.assertEqual(defaults["speed_label"], "波特率")
+        self.assertIn(115200, defaults["speed_options"])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows batch invocation contract")
     def test_batch_command_executes_generated_script_and_preserves_exit_code(self):

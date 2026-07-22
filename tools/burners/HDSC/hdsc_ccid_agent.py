@@ -298,7 +298,16 @@ def _resolve_v604_exe() -> Path:
             return candidate.resolve()
         raise ProfileError(f"HDSC_CCID_V604_EXE does not exist: {candidate}")
 
+    bundled_tools_value = os.environ.get("PCIDS_BUNDLED_TOOLS_DIR", "").strip()
+    bundled_tools_dir = Path(bundled_tools_value).expanduser() if bundled_tools_value else None
+    bundled_search_roots = (
+        [bundled_tools_dir / "HDSC", bundled_tools_dir / "HDSC_CCID"]
+        if bundled_tools_dir is not None
+        else []
+    )
+
     direct_candidates = [
+        *(root / V604_EXE_NAME for root in bundled_search_roots),
         DEFAULT_V604_EXE,
         Path.home() / "Desktop" / "HDSC CCID" / "HDSC CCID在线离线编程器Rev6.04" / V604_EXE_NAME,
     ]
@@ -306,7 +315,11 @@ def _resolve_v604_exe() -> Path:
         if candidate.is_file():
             return candidate.resolve()
 
-    search_roots = [Path(r"D:\HDSC CCID"), Path.home() / "Desktop" / "HDSC CCID"]
+    search_roots = [
+        *bundled_search_roots,
+        Path(r"D:\HDSC CCID"),
+        Path.home() / "Desktop" / "HDSC CCID",
+    ]
     matches: list[Path] = []
     for root in search_roots:
         if root.is_dir():

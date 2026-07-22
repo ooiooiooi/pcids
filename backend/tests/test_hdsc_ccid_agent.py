@@ -1,8 +1,10 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -72,6 +74,19 @@ class HdscCcidAgentTests(unittest.TestCase):
     def test_status_word_requires_two_response_bytes(self):
         with self.assertRaises(hdsc_ccid_agent.ProfileError):
             hdsc_ccid_agent._status_word(b"\x90")
+
+    def test_v604_exe_is_discovered_from_bundled_tools_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vendor_exe = Path(temp_dir) / "HDSC_CCID" / hdsc_ccid_agent.V604_EXE_NAME
+            vendor_exe.parent.mkdir(parents=True)
+            vendor_exe.touch()
+            with patch.dict(
+                os.environ,
+                {"PCIDS_BUNDLED_TOOLS_DIR": temp_dir},
+                clear=False,
+            ):
+                os.environ.pop("HDSC_CCID_V604_EXE", None)
+                self.assertEqual(hdsc_ccid_agent._resolve_v604_exe(), vendor_exe.resolve())
 
 
 if __name__ == "__main__":

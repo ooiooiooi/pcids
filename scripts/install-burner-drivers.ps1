@@ -146,6 +146,7 @@ function Configure-ToolEnvironment {
     Set-MachineEnvValue "HW_SERVER_EXE" (Find-FirstFile (Join-Path $Root "AL321\Vitis") @("hw_server.bat", "hw_server.exe", "hw_server"))
 
     Set-MachineEnvValue "HDSC_ISP_CLI" (Find-FirstFile (Join-Path $Root "HDSC_CCID") @("*isp*.exe", "*programmer*.exe", "*HDSC*.exe"))
+    Set-MachineEnvValue "HDSC_CCID_V604_EXE" (Find-FirstFile (Join-Path $Root "HDSC_CCID") @("HDSC+CCID+Prog+REV6.04.exe", "*CCID*Prog*REV6.04*.exe"))
     Set-MachineEnvValue "IPECMD_EXE" (Find-FirstFile (Join-Path $Root "MPLAB_ICD_3") @("ipecmd.exe", "ipecmd"))
     Set-MachineEnvValue "QUARTUS_PGM" (Find-FirstFile (Join-Path $Root "Altera_Blaster_II") @("quartus_pgm.exe", "quartus_pgm"))
     Set-MachineEnvValue "GOWIN_PROGRAMMER_CLI" (Find-FirstFile (Join-Path $Root "Gowin_USB_Cable") @("programmer_cli.exe", "programmer_cli"))

@@ -54,7 +54,7 @@ class SystemScriptParameterContractTests(unittest.TestCase):
                 self.assertIn('powershell -NoProfile -ExecutionPolicy Bypass -File "%PCIDS_STREAM_HELPER%"', content)
                 self.assertNotIn('cmd /d /s /c "!PCIDS_CMD!"', content)
 
-    def test_hdsc_ccid_uses_the_bundled_v604_agent_over_swd(self):
+    def test_hdsc_ccid_uses_the_bundled_v604_agent_over_uart(self):
         content = build_system_script_content("hdsc_ccid_arm_mcu_flash", "HDSC CCID")
         catalog_item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "hdsc_ccid_arm_mcu_flash")
         default_config = catalog_item["default_config"]
@@ -68,6 +68,8 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertEqual(default_config["speed_label"], "波特率")
         self.assertEqual(default_config["write_speed_khz"], 115200)
         self.assertEqual(default_config["speed_options"], [115200, 128000, 230400, 256000, 1000000])
+        self.assertIn("%PCIDS_BUNDLED_TOOLS_DIR%\\HDSC\\hdsc_ccid_agent.py", content)
+        self.assertIn('if exist "%PCIDS_BUNDLED_TOOLS_DIR%\\HDSC\\hdsc_ccid_agent.py"', content)
         self.assertNotIn("HDSC_ISP_CLI", content)
         self.assertNotIn("HDSC_CMD_TEMPLATE", content)
 

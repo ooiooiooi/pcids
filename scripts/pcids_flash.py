@@ -214,6 +214,28 @@ def _apply_adapter_defaults(item: dict[str, Any], config: dict[str, Any]) -> Non
     config["target_config_file"] = str(selected.resolve(strict=False))
 
 
+def _adapter_validation_defaults(item: dict[str, Any]) -> dict[str, Any]:
+    """Return adapter-owned validation metadata for legacy packaged backends.
+
+    HDSC uses the historic ``write_speed_khz`` storage key for a UART baud
+    rate.  Some already-deployed backend executables still expose the generic
+    ARM kHz option list for that key, which rejects a valid value such as
+    115200 before the existing HDSC script can run.  Override only the
+    adapter's one-shot validation metadata; the normal PCIDS task flow and
+    the generated HDSC burner script are left untouched.
+    """
+    defaults = dict(item.get("default_config") or {})
+    if item.get("name") == "hdsc_ccid_arm_mcu_flash":
+        defaults.update(
+            {
+                "write_speed_khz": 115200,
+                "speed_label": "波特率",
+                "speed_options": [115200, 128000, 230400, 256000, 1000000],
+            }
+        )
+    return defaults
+
+
 def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run_id: str) -> dict[str, str]:
     # The CodeArts entrypoint starts the frozen backend in one-shot script mode,
     # so it must discover packaged/vendor tools itself instead of relying on the
@@ -224,7 +246,7 @@ def _build_env(item: dict[str, Any], config: dict[str, Any], firmware: Path, run
         id=0,
         name=item["name"],
         type=item.get("type", "bat"),
-        default_config_json=json.dumps(item.get("default_config") or {}, ensure_ascii=False),
+        default_config_json=json.dumps(_adapter_validation_defaults(item), ensure_ascii=False),
     )
     # Reuse PCIDS's current configuration contract.  The generated burner
     # script remains the single implementation of erase/write/verify/reset.

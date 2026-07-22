@@ -746,6 +746,7 @@ from backend.utils.burner_automation import (
     SYSTEM_SCRIPT_BINDINGS as DEFAULT_AUTOMATION_SYSTEM_SCRIPT_BINDINGS,
     SYSTEM_SCRIPT_CATALOG as DEFAULT_AUTOMATION_SYSTEM_SCRIPT_CATALOG,
     TOOL_REQUIREMENTS as DEFAULT_BURNER_TOOL_REQUIREMENTS,
+    build_system_script_content as _build_system_script_content,
 )
 
 DEFAULT_SYSTEM_SCRIPT_CATALOG = DEFAULT_AUTOMATION_SYSTEM_SCRIPT_CATALOG
@@ -901,7 +902,7 @@ def sync_default_burners(db):
         print(f"已同步默认烧录器，移除 {removed} 个，迁移任务 {migrated} 条")
 
 
-def _build_system_script_content(script_name: str, burner_name: str) -> str:
+def _build_legacy_system_script_content(script_name: str, burner_name: str) -> str:
     if script_name in ["jlink_v4_arm_mcu_flash", "jlink_v11_arm_mcu_flash"]:
         return """#!/bin/bash
 set -euo pipefail
@@ -1384,17 +1385,6 @@ exit 0
 def ensure_default_system_scripts(db):
     """补齐系统级烧录脚本，已存在同名脚本时更新为系统脚本并同步关联烧录器"""
     from backend.models.script import Script
-    from backend.utils.burner_automation import (
-        SYSTEM_SCRIPT_BINDINGS as AUTOMATION_SYSTEM_SCRIPT_BINDINGS,
-        SYSTEM_SCRIPT_CATALOG as AUTOMATION_SYSTEM_SCRIPT_CATALOG,
-        TOOL_REQUIREMENTS as AUTOMATION_TOOL_REQUIREMENTS,
-        build_system_script_content as build_automation_script_content,
-    )
-
-    globals()["DEFAULT_SYSTEM_SCRIPT_CATALOG"] = AUTOMATION_SYSTEM_SCRIPT_CATALOG
-    globals()["DEFAULT_SYSTEM_SCRIPT_BINDINGS"] = AUTOMATION_SYSTEM_SCRIPT_BINDINGS
-    globals()["DEFAULT_BURNER_TOOL_REQUIREMENTS"] = AUTOMATION_TOOL_REQUIREMENTS
-    globals()["_build_system_script_content"] = build_automation_script_content
 
     desired_script_names = {item["name"] for item in DEFAULT_SYSTEM_SCRIPT_CATALOG}
     preferred_script_types = {
@@ -2804,8 +2794,18 @@ def init_db():
         return
 
     if _has_existing_business_data():
+        db = SessionLocal()
+        try:
+            # 旧版本数据库首次升级时也必须立即同步权威系统脚本。
+            # 否则仅写入初始化标记会导致新脚本/新默认参数要到下次启动才生效。
+            ensure_default_system_scripts(db)
+            ensure_script_task_types(db)
+            ensure_default_products(db)
+            ensure_product_burn_interfaces(db)
+        finally:
+            db.close()
         _mark_initial_seed_completed()
-        print("检测到已有业务数据，写入初始化标记并跳过默认数据初始化")
+        print("检测到已有业务数据，已同步系统脚本和默认板卡，写入初始化标记并跳过默认数据初始化")
         return
 
     db = SessionLocal()
