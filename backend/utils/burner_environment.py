@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import os
 import subprocess
 import tempfile
@@ -12,6 +13,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 class BurnerEnvironmentError(RuntimeError):
     pass
+
+
+def _decode_powershell_output(raw: bytes) -> str:
+    """Decode PowerShell/tool output without losing Chinese failure details.
+
+    Windows PowerShell and vendor driver helpers do not guarantee UTF-8 when
+    their output is redirected to a subprocess pipe.  Decoding with
+    ``errors='replace'`` turns a GBK/GB18030 diagnostic into irreversible
+    replacement characters before it is stored in a task log.  Keep the
+    execution contract unchanged and only choose the first strict decoding
+    that matches the returned bytes.
+    """
+    if not raw:
+        return ""
+
+    encodings = ["utf-8-sig"]
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings.append("utf-16")
+    encodings.extend([locale.getpreferredencoding(False), "mbcs", "gb18030"])
+    for encoding in dict.fromkeys(item for item in encodings if item):
+        try:
+            return raw.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="backslashreplace")
 
 
 def _burner_driver_script(burner: str, filename: str) -> Path:
@@ -46,13 +72,12 @@ def _run_powershell(script_path: Path, arguments: list[str], env: Mapping[str, s
         command,
         env={**os.environ, **{str(key): str(value) for key, value in env.items()}},
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=120,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
-    output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip())
+    stdout = _decode_powershell_output(completed.stdout or b"")
+    stderr = _decode_powershell_output(completed.stderr or b"")
+    output = "\n".join(part.strip() for part in (stdout, stderr) if part and part.strip())
     if completed.returncode != 0:
         raise BurnerEnvironmentError(output or f"环境切换失败，退出码 {completed.returncode}")
     return output

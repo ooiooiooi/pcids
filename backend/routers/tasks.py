@@ -6164,6 +6164,11 @@ async def simulate_burning_process(
                     )
             elif resolved_script:
                 if resolved_script.content:
+                    # The exception handlers below also cover the remote-agent path and
+                    # local BAT scripts, neither of which creates live streaming output.
+                    # Keep a defined empty value so an error in either path does not mask
+                    # the original execution failure with UnboundLocalError/NameError.
+                    live_text = ""
                     try:
                         if is_burning_task:
                             burner = db.query(Burner).filter(Burner.id == task.burner_id).first() if getattr(task, "burner_id", None) else None

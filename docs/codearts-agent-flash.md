@@ -267,6 +267,15 @@ exit $LASTEXITCODE
 
 必换：`REPLACE_PIC_CHIP`。当前原 IPE 调用以 ICD3 工具链为准；若同机存在多支 ICD3，应在 Agent 工位侧做物理隔离或补充厂商工具的探针绑定配置。
 
+#### CodeArts Shell 示例：MPLAB ICD3 / dsPIC30F6011A
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }
+firmware="$(find "$WORKSPACE" -type f -name 'STD.hex' -print -quit)"
+[ -n "$firmware" ] || { echo "[ERROR] STD.hex was not downloaded into WORKSPACE."; find "$WORKSPACE" -type f -print; exit 2; }
+"$PCIDS_FLASH_ADAPTER" run --burner "MPLAB ICD 3 DV164035" --target-chip "30F6011A" --board "dspic" --burner-sn "BUR184572334" --config-json '{"erase_mode":"全片擦除","eeprom_write":"否","blank_check":"否","execute_program":"是","completion_action":"编程复位后运行","write_verify":true}' --firmware "$firmware" --run-id "$BUILD_ID" --log-dir "C:/PCIDS-AgentData/codearts-logs/$BUILD_ID"
+```
+
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
 & $adapter run --burner 'MPLAB ICD 3 DV164035' --target-chip 'REPLACE_PIC_CHIP' --board 'REPLACE_PIC_BOARD' --config-json '{"erase_mode":"全片擦除","eeprom_write":"否","blank_check":"否","execute_program":"是","completion_action":"编程复位后运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
@@ -307,15 +316,58 @@ exit $LASTEXITCODE
 
 SRAM 下载只配置 FPGA 易失 SRAM，断电后配置会丢失。以下是当前发布库 `gowin/LED_Run.fs` 的 POC 完整命令：它自动在 Build 工作目录及其子目录定位制品，避免因发布库下载目录层级不同而找不到固件。单根 Gowin 下载线使用默认 `cable_index=1`，无需填写 `--burner-sn`；`write_verify=true` 会要求 Gowin Programmer 执行写入校验。
 
+命令不会写死 PCIDS 安装路径：它从安装程序写入的 `PCIDS_FLASH_ADAPTER` 推导 `<PCIDS安装目录>\\resources`，再定位其中的 `tools/burners/GOWIN/bin`。命令中的环境设置仅清理 **当前 CodeArts Shell 进程** 继承的 Python 环境，并将 Gowin `bin` 放在该进程的 `PATH` 最前面；这是 Gowin CLI 在 CodeArts Agent 中加载 `MAINCMD` 所需的运行条件，不会修改系统环境变量，也不会影响桌面 PCIDS 的正常烧录。
+
 ```bash
-[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; firmware="$(find "$WORKSPACE" -type f -name 'LED_Run.fs' -print -quit)"; [ -n "$firmware" ] || { echo "[ERROR] LED_Run.fs was not downloaded into WORKSPACE."; find "$WORKSPACE" -type f -print; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "Gowin USB Cable" --target-chip "GW1N-4" --board "Gowin FPGA" --config-json '{"interface_type":"JTAG","execution_operation":"SRAM下载","erase_mode":"不擦除","cable_index":1,"tck_frequency":"1MHz","write_verify":true,"completion_action":"不处理"}' --firmware "$firmware" --run-id "$BUILD_ID" --log-dir "C:/PCIDS-AgentData/codearts-logs/$BUILD_ID"
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }
+adapter_dir="$(dirname "$(cygpath -u "$PCIDS_FLASH_ADAPTER")")"
+pcids_resources="$(cd "$adapter_dir/.." && pwd)"
+gowin_bin="$pcids_resources/tools/burners/GOWIN/bin"
+[ -f "$gowin_bin/programmer_cli.exe" ] || { echo "[ERROR] Gowin CLI not found: $gowin_bin/programmer_cli.exe"; exit 2; }
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP
+export PATH="$gowin_bin:$PATH"
+firmware="$(find "$WORKSPACE" -type f -name 'LED_Run.fs' -print -quit)"
+[ -n "$firmware" ] || { echo "[ERROR] LED_Run.fs was not downloaded into WORKSPACE."; find "$WORKSPACE" -type f -print; exit 2; }
+"$PCIDS_FLASH_ADAPTER" run --burner "Gowin USB Cable" --target-chip "GW1N-4" --board "Gowin FPGA" --config-json '{"interface_type":"JTAG","execution_operation":"SRAM下载","erase_mode":"不擦除","cable_index":1,"tck_frequency":"1MHz","write_verify":true,"completion_action":"不处理"}' --firmware "$firmware" --run-id "$BUILD_ID" --log-dir "C:/PCIDS-AgentData/codearts-logs/$BUILD_ID"
 ```
 
 不要在命令前额外加入 `cmd.exe /c call`。Git Bash 可直接执行 `"$PCIDS_FLASH_ADAPTER"`；额外嵌套 `cmd.exe` 可能只启动空命令并返回 `0`，属于假成功。真实 SRAM 下载日志必须依次出现 `event: "started"`、Gowin JTAG 扫描输出、`[EXEC]` 的 `programmer_cli` 命令以及 `event: "completed"`。日志写入 `C:/PCIDS-AgentData/codearts-logs/$BUILD_ID`，不会随 CodeArts 工作目录清理而消失。
 
+#### Gowin USB Cable：Flash 固化（CodeArts Git Bash Shell，可直接粘贴）
+
+Flash 固化会写入器件的非易失配置 Flash，断电后配置仍保留。以下命令与 SRAM 示例使用相同的安装目录自动发现和 CodeArts 环境修正；唯一的业务差异是 `execution_operation` 改为 `Flash固化`，并使用全片擦除和写入校验。执行前请确认 `LED_Run.fs` 是目标板卡对应的 Flash 配置文件，且允许覆盖当前固化内容。
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }
+adapter_dir="$(dirname "$(cygpath -u "$PCIDS_FLASH_ADAPTER")")"
+pcids_resources="$(cd "$adapter_dir/.." && pwd)"
+gowin_bin="$pcids_resources/tools/burners/GOWIN/bin"
+[ -f "$gowin_bin/programmer_cli.exe" ] || { echo "[ERROR] Gowin CLI not found: $gowin_bin/programmer_cli.exe"; exit 2; }
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP
+export PATH="$gowin_bin:$PATH"
+firmware="$(find "$WORKSPACE" -type f -name 'LED_Run.fs' -print -quit)"
+[ -n "$firmware" ] || { echo "[ERROR] LED_Run.fs was not downloaded into WORKSPACE."; find "$WORKSPACE" -type f -print; exit 2; }
+"$PCIDS_FLASH_ADAPTER" run --burner "Gowin USB Cable" --target-chip "GW1N-4" --board "Gowin FPGA" --config-json '{"interface_type":"JTAG","execution_operation":"Flash固化","erase_mode":"全片擦除","cable_index":1,"tck_frequency":"1MHz","write_verify":true,"completion_action":"不处理"}' --firmware "$firmware" --run-id "$BUILD_ID" --log-dir "C:/PCIDS-AgentData/codearts-logs/$BUILD_ID"
+```
+
+真实 Flash 固化日志必须依次出现 `event: "started"`、Gowin JTAG 扫描输出、`[EXEC]` 的 `programmer_cli` 命令以及 `event: "completed"`。Gowin 脚本会根据扫描到的实际器件自动选择相应的厂商 Flash 操作；例如扫描到 `GW1N-4D` 时会选择该器件的 embedded Flash 操作，而不会将板卡名或 `--target-chip` 的封装型号直接作为 CLI 操作型号。
+
 ### 6. CPLD：Altera Blaster II
 
 这里与 FPGA 唯一的选择差异是 `--script`；必须填写 CPLD 工作流，不能省略。
+
+#### CodeArts Shell 示例：Altera USB-Blaster II / EPM7064AE
+
+以下命令复现 PCIDS 任务 `20260722016` 的已用参数：烧录器为 `Altera USB-Blaster II (JTAG interface)`，内部流程为 `altera_blaster_ii_cpld_flash`，目标板卡和芯片为 `EPM7064AE`，制品为 `JC.pof`。在 CodeArts 的 Git Bash“执行 Shell 命令”步骤中可直接粘贴。发布库下载步骤应已将 `JC.pof` 下载到 Build 工作目录或其子目录。
+
+```bash
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }
+firmware="$(find "$WORKSPACE" -type f -name 'JC.pof' -print -quit)"
+[ -n "$firmware" ] || { echo "[ERROR] JC.pof was not downloaded into WORKSPACE."; find "$WORKSPACE" -type f -print; exit 2; }
+"$PCIDS_FLASH_ADAPTER" run --burner "Altera Blaster II" --script "altera_blaster_ii_cpld_flash" --target-chip "EPM7064AE" --board "EPM7064AE" --config-json '{"interface_type":"JTAG","pre_erase":"默认是","tck_frequency":"2.5MHz","write_verify":true,"completion_action":"不处理"}' --firmware "$firmware" --run-id "$BUILD_ID" --log-dir "C:/PCIDS-AgentData/codearts-logs/$BUILD_ID"
+```
+
+`--script "altera_blaster_ii_cpld_flash"` 必须保留：Altera Blaster II 同时支持 FPGA 和 CPLD，入口脚本需依此参数选择对应的 PCIDS 内部流程。若下载的制品文件名不是 `JC.pof`，只替换 `-name 'JC.pof'` 中的文件名。
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.pof"

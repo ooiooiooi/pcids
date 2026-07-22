@@ -80,6 +80,34 @@ def _batch_command(script_path: Path) -> list[str]:
     return ["cmd.exe", "/d", "/s", "/c", "call", str(script_path)]
 
 
+def _adapter_working_directory(item: dict[str, Any], env: dict[str, str]) -> Path:
+    """Select a process directory needed only by the CodeArts adapter.
+
+    Gowin's ``programmer_cli.exe`` discovers MAINCMD and its Python modules
+    relative to its own ``bin`` directory.  PCIDS's normal task executor keeps
+    its established working directory; apply this compatibility rule solely
+    when the one-shot CodeArts adapter launches the generated batch script.
+    """
+    if item.get("name") == "gowin_usb_cable_fpga_flash":
+        configured_cli = str(env.get("GOWIN_PROGRAMMER_CLI") or "").strip().strip('"')
+        candidates = [Path(configured_cli)] if configured_cli else []
+
+        # A vendor tool folder can be copied into an installed PCIDS directory
+        # after the CodeArts Agent service has started.  The frozen backend may
+        # then retain no GOWIN_PROGRAMMER_CLI value even though the generated
+        # burner script discovers the executable.  Check the adapter's own
+        # installed tools root as a fallback, still without changing PCIDS's
+        # normal/manual task executor.
+        configured_root = str(os.environ.get("PCIDS_BUNDLED_TOOLS_DIR") or "").strip().strip('"')
+        tools_root = Path(configured_root) if configured_root else PROJECT_ROOT / "tools" / "burners"
+        candidates.append(tools_root / "GOWIN" / "bin" / "programmer_cli.exe")
+
+        for cli in candidates:
+            if cli.is_file():
+                return cli.parent
+    return PROJECT_ROOT
+
+
 class EventLogger:
     """Emit JSON Lines to stdout and keep both JSON and readable local logs."""
 
@@ -345,10 +373,17 @@ def _run(args: argparse.Namespace) -> int:
         script_path.write_text(script_content, encoding="gb18030", newline="\r\n")
         process_env = os.environ.copy()
         process_env.update({key: str(value) for key, value in env.items()})
-        logger.emit("script-start", workflow=item["name"], script=str(script_path), burner=env.get("BURNER_NAME"))
+        working_directory = _adapter_working_directory(item, env)
+        logger.emit(
+            "script-start",
+            workflow=item["name"],
+            script=str(script_path),
+            burner=env.get("BURNER_NAME"),
+            working_directory=str(working_directory),
+        )
         process = subprocess.Popen(
             _batch_command(script_path),
-            cwd=str(PROJECT_ROOT),
+            cwd=str(working_directory),
             env=process_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from backend.utils.burner_automation import SYSTEM_SCRIPT_CATALOG, build_system_script_content
-from scripts.pcids_flash import EventLogger, _CODEARTS_RUNTIME_ENV_ALIASES, _adapter_validation_defaults, _apply_adapter_defaults, _batch_command, _decode_tool_output, _resolve_request
+from scripts.pcids_flash import EventLogger, _CODEARTS_RUNTIME_ENV_ALIASES, _adapter_validation_defaults, _adapter_working_directory, _apply_adapter_defaults, _batch_command, _decode_tool_output, _resolve_request
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +64,27 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
         self.assertEqual(defaults["speed_label"], "波特率")
         self.assertIn(115200, defaults["speed_options"])
 
+    def test_gowin_adapter_uses_the_cli_directory_without_changing_normal_scripts(self):
+        item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "gowin_usb_cable_fpga_flash")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli = Path(temp_dir) / "bin" / "programmer_cli.exe"
+            cli.parent.mkdir()
+            cli.write_bytes(b"")
+            self.assertEqual(_adapter_working_directory(item, {"GOWIN_PROGRAMMER_CLI": str(cli)}), cli.parent)
+        bundled_cli = ROOT / "tools" / "burners" / "GOWIN" / "bin" / "programmer_cli.exe"
+        expected_directory = bundled_cli.parent if bundled_cli.is_file() else ROOT
+        self.assertEqual(_adapter_working_directory(item, {}), expected_directory)
+
+    def test_gowin_adapter_falls_back_to_its_installed_tools_directory(self):
+        item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "gowin_usb_cable_fpga_flash")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli = Path(temp_dir) / "GOWIN" / "bin" / "programmer_cli.exe"
+            cli.parent.mkdir(parents=True)
+            cli.write_bytes(b"")
+            with mock.patch("scripts.pcids_flash.PROJECT_ROOT", Path(temp_dir).parent):
+                with mock.patch.dict(os.environ, {"PCIDS_BUNDLED_TOOLS_DIR": temp_dir}, clear=False):
+                    self.assertEqual(_adapter_working_directory(item, {}), cli.parent)
+
     @unittest.skipUnless(sys.platform == "win32", "Windows batch invocation contract")
     def test_batch_command_executes_generated_script_and_preserves_exit_code(self):
         with tempfile.TemporaryDirectory(prefix="pcids batch path ") as temp_dir:
@@ -100,9 +122,14 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
             self.assertIn("exit /b", content)
 
     def test_generated_batch_scripts_are_gbk_compatible_without_codepage_switch(self):
-        content = build_system_script_content("pwlink_v2_arm_mcu_flash", "PWLINK2")
-        content.encode("gb18030")
-        self.assertNotIn("chcp 65001", content)
+        for script_name, burner in (
+            ("pwlink_v2_arm_mcu_flash", "PWLINK2"),
+            ("mplab_icd3_pic_flash", "MPLAB ICD 3 DV164035"),
+        ):
+            with self.subTest(profile=script_name):
+                content = build_system_script_content(script_name, burner)
+                content.encode("gb18030")
+                self.assertNotIn("chcp 65001", content)
 
     def test_dry_run_writes_machine_readable_logs_without_running_hardware(self):
         with tempfile.TemporaryDirectory() as temp_dir:

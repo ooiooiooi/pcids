@@ -2,10 +2,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.utils.burner_environment import ensure_burner_environment, restore_burner_environment
+from backend.utils.burner_environment import _decode_powershell_output, ensure_burner_environment, restore_burner_environment
 
 
 class BurnerEnvironmentTests(unittest.TestCase):
+    def test_powershell_output_decoder_keeps_gb18030_chinese_diagnostics(self):
+        message = "Gowin USB 驱动切换失败"
+        self.assertEqual(_decode_powershell_output(message.encode("gb18030")), message)
+
+    def test_powershell_output_decoder_keeps_utf8_diagnostics(self):
+        message = "烧录器环境检查完成"
+        self.assertEqual(_decode_powershell_output(message.encode("utf-8")), message)
+
     @patch("backend.utils.burner_environment._gowin_environment", return_value="gowin-ready")
     def test_gowin_uses_code_level_environment_switcher(self, switcher):
         result = ensure_burner_environment(
