@@ -82,6 +82,13 @@
         "to": "flash-adapter/pcids_flash.py"
       },
       {
+        "from": "tools/burners/GOWIN",
+        "to": "tools/burners/GOWIN",
+        "filter": [
+          "drivers/switch-gowin-usb-mode.ps1"
+        ]
+      },
+      {
         "from": "tools/protocol_adapters",
         "to": "tools/protocol_adapters",
         "filter": [

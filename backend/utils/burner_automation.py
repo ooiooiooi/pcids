@@ -1558,7 +1558,8 @@ def _al321_openfpgaloader_runner() -> str:
         dedent(
             r'''
             set "AL321_OPERATION=%EXECUTION_OPERATION%"
-            if "%AL321_OPERATION%"=="" set "AL321_OPERATION=SRAM下载"
+            set "AL321_OPERATION_MODE=%EXECUTION_OPERATION_MODE%"
+            if /I not "%AL321_OPERATION_MODE%"=="flash" set "AL321_OPERATION_MODE=sram"
             if not "%AL321_CMD_TEMPLATE%"=="" (
               set "PCIDS_CMD=%AL321_CMD_TEMPLATE%"
               set "PCIDS_CMD=!PCIDS_CMD:{firmware}=%FIRMWARE_PATH%!"
@@ -1583,7 +1584,7 @@ def _al321_openfpgaloader_runner() -> str:
         ).lstrip(),
         dedent(
         r'''
-        if "%AL321_OPERATION%"=="Flash固化" (
+        if /I "%AL321_OPERATION_MODE%"=="flash" (
           if "%PROGRAM_FLASH_EXE%"=="" for /f "delims=" %%I in ('where program_flash.bat 2^>nul') do if "%PROGRAM_FLASH_EXE%"=="" set "PROGRAM_FLASH_EXE=%%I"
           if "%PROGRAM_FLASH_EXE%"=="" for /f "delims=" %%I in ('where program_flash.exe 2^>nul') do if "%PROGRAM_FLASH_EXE%"=="" set "PROGRAM_FLASH_EXE=%%I"
           if "%XSDB_EXE%"=="" for /f "delims=" %%I in ('where xsdb.bat 2^>nul') do if "%XSDB_EXE%"=="" set "XSDB_EXE=%%I"
@@ -1911,11 +1912,11 @@ def _al321_openfpgaloader_runner() -> str:
         set "AL321_OFFSET_ARG="
         if not "%START_ADDRESS%"=="" set "AL321_OFFSET_ARG=-o %START_ADDRESS%"
         set "AL321_ERASE_ARG="
-        if "%AL321_OPERATION%"=="Flash固化" if "%ERASE_MODE%"=="全片擦除" set "AL321_ERASE_ARG=--bulk-erase"
-        if /I "%AL321_OPERATION%"=="Flash固化" if /I "%ERASE_MODE%"=="chip" set "AL321_ERASE_ARG=--bulk-erase"
-        if /I "%AL321_OPERATION%"=="Flash固化" if /I "%ERASE_MODE%"=="all" set "AL321_ERASE_ARG=--bulk-erase"
+        if /I "%AL321_OPERATION_MODE%"=="flash" if "%ERASE_MODE%"=="全片擦除" set "AL321_ERASE_ARG=--bulk-erase"
+        if /I "%AL321_OPERATION_MODE%"=="flash" if /I "%ERASE_MODE%"=="chip" set "AL321_ERASE_ARG=--bulk-erase"
+        if /I "%AL321_OPERATION_MODE%"=="flash" if /I "%ERASE_MODE%"=="all" set "AL321_ERASE_ARG=--bulk-erase"
         for %%I in ("%FIRMWARE_PATH%") do set "AL321_FIRMWARE_EXT=%%~xI"
-        if /I not "%AL321_OPERATION%"=="Flash固化" if /I "!AL321_FIRMWARE_EXT!"==".bin" (
+        if /I not "%AL321_OPERATION_MODE%"=="flash" if /I "!AL321_FIRMWARE_EXT!"==".bin" (
           echo [ERROR] ZynqMP SRAM下载需要 FPGA bitstream ^(.bit^) 文件，不能使用 BOOT.bin/.bin。
           echo [ERROR] BOOT.bin 是启动镜像/Flash固化文件；请改选 Flash固化，或为 SRAM下载选择 Vivado 生成的 .bit 文件。
           exit /b 2
@@ -2010,7 +2011,7 @@ def _al321_openfpgaloader_runner() -> str:
           echo [ERROR] 当前 PID !AL321_ONLY_PID! 尚未验证，请配置 AL321_CMD_TEMPLATE
           exit /b 2
         )
-        if "%AL321_OPERATION%"=="Flash固化" (
+        if /I "%AL321_OPERATION_MODE%"=="flash" (
           echo [INFO] 尝试检测 AL321 cable: !AL321_CABLE! 检测目标 Flash
           echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect !AL321_DETECT_FLASH_FLAG! -v
           del /f /q "!AL321_DETECT_LOG!" >nul 2>nul
@@ -2457,11 +2458,10 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"
             if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=4"
             if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=4"
-            if /I "%EXECUTION_OPERATION%"=="Flash固化" set "GOWIN_OPERATION=8"
-            if /I "%EXECUTION_OPERATION%"=="flash" set "GOWIN_OPERATION=8"
-            if /I "%EXECUTION_OPERATION%"=="Flash固化" if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=9"
-            if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=9"
-            if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=9"
+            if /I "%GOWIN_OPERATION_MODE%"=="flash" set "GOWIN_OPERATION=8"
+            if /I "%GOWIN_OPERATION_MODE%"=="flash" if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=9"
+            if /I "%GOWIN_OPERATION_MODE%"=="flash" if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=9"
+            if /I "%GOWIN_OPERATION_MODE%"=="flash" if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=9"
             set "GOWIN_CABLE_INDEX=%CABLE_INDEX%"
             rem programmer_cli index 1 is Gowin USB Cable(FT2CH); 0 is GWU2X.
             if "%GOWIN_CABLE_INDEX%"=="" set "GOWIN_CABLE_INDEX=1"
@@ -2490,21 +2490,21 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             rem GW1N-4D SRAM verification requires the IEEE 1149 variant.
             rem operation 4 reports a false mismatch at address 0 on this device;
             rem operation 17 has been validated against the same bitstream.
-            if /I "%EXECUTION_OPERATION%"=="SRAM下载" if /I "!GOWIN_DEVICE:~-1!"=="D" if "%WRITE_VERIFY%"=="1" (
+            if /I "%GOWIN_OPERATION_MODE%"=="sram" if /I "!GOWIN_DEVICE:~-1!"=="D" if "%WRITE_VERIFY%"=="1" (
               set "GOWIN_OPERATION=17"
               echo [INFO] Gowin SRAM JTAG 1149 verification selected for !GOWIN_DEVICE!.
             )
-            if /I "%EXECUTION_OPERATION%"=="SRAM下载" if /I "!GOWIN_DEVICE:~-1!"=="D" if /I "%WRITE_VERIFY%"=="yes" (
+            if /I "%GOWIN_OPERATION_MODE%"=="sram" if /I "!GOWIN_DEVICE:~-1!"=="D" if /I "%WRITE_VERIFY%"=="yes" (
               set "GOWIN_OPERATION=17"
               echo [INFO] Gowin SRAM JTAG 1149 verification selected for !GOWIN_DEVICE!.
             )
-            if /I "%EXECUTION_OPERATION%"=="SRAM下载" if /I "!GOWIN_DEVICE:~-1!"=="D" if /I "%WRITE_VERIFY%"=="true" (
+            if /I "%GOWIN_OPERATION_MODE%"=="sram" if /I "!GOWIN_DEVICE:~-1!"=="D" if /I "%WRITE_VERIFY%"=="true" (
               set "GOWIN_OPERATION=17"
               echo [INFO] Gowin SRAM JTAG 1149 verification selected for !GOWIN_DEVICE!.
             )
             rem GW1N-4D is an embedded-Flash part.  Its Flash persistence path is
             rem embFlash (5/6), not an external SPI exFlash (8/9).
-            if /I "%EXECUTION_OPERATION%"=="Flash固化" if /I "!GOWIN_DEVICE:~-1!"=="D" (
+            if /I "%GOWIN_OPERATION_MODE%"=="flash" if /I "!GOWIN_DEVICE:~-1!"=="D" (
               set "GOWIN_OPERATION=5"
               if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=6"
               if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=6"
@@ -2512,7 +2512,7 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               echo [INFO] Gowin embedded Flash selected for !GOWIN_DEVICE!.
             )
             echo [INFO] Gowin operation=!GOWIN_OPERATION! target=!GOWIN_DEVICE! cable=FT2CH/!GOWIN_CABLE_INDEX! frequency=!GOWIN_FREQUENCY!
-            if /I "%EXECUTION_OPERATION%"=="Flash固化" (
+            if /I "%GOWIN_OPERATION_MODE%"=="flash" (
               echo [WARN] Flash固化将写入外接配置 Flash；请确认板卡硬件已接入对应 Flash。
             )
             rem Gowin cable name contains parentheses.  Invoke the vendor CLI directly

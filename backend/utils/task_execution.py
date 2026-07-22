@@ -488,6 +488,11 @@ def build_runtime_env(
     used_file_path: Optional[str],
 ) -> dict[str, str]:
     target_config_file = str(config.get("target_config_file") or "").strip()
+    execution_operation = str(config.get("execution_operation") or "").strip()
+    # Batch files run through cmd.exe's active code page.  Keep the user-facing
+    # Chinese value for display, but provide vendor scripts an ASCII operation
+    # token so their control flow never depends on console encoding.
+    execution_operation_mode = "flash" if "flash" in execution_operation.lower() or "固化" in execution_operation else "sram"
     if str(getattr(script, "name", None) or "").strip() == "xds510plus_dsp_flash" and not target_config_file:
         bundled_root = get_bundled_tools_dir()
         if bundled_root:
@@ -526,7 +531,12 @@ def build_runtime_env(
         "PROGRAM_VOLTAGE": str(config.get("program_voltage") or ""),
         "EEPROM_WRITE": str(config.get("eeprom_write") or ""),
         "WRITE_CONFIG_BITS": str(config.get("write_config_bits") or ""),
-        "EXECUTION_OPERATION": str(config.get("execution_operation") or ""),
+        "EXECUTION_OPERATION": execution_operation,
+        # ASCII-only operation token used by Windows batch control flow.  Keep
+        # EXECUTION_OPERATION unchanged for the UI and task logs.
+        "EXECUTION_OPERATION_MODE": execution_operation_mode,
+        # Retained for existing generated Gowin scripts during upgrade.
+        "GOWIN_OPERATION_MODE": execution_operation_mode,
         "BICHINA_BURN_MODE": str(config.get("bichina_burn_mode") or ""),
         "PRE_ERASE": str(config.get("pre_erase") or ""),
         "BLANK_CHECK": str(config.get("blank_check") or ""),

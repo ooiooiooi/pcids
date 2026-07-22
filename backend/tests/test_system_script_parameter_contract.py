@@ -82,7 +82,8 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         self.assertIn('--cable-index !GOWIN_CABLE_INDEX!', content)
         self.assertIn('if "%GOWIN_CABLE_INDEX%"=="" set "GOWIN_CABLE_INDEX=1"', content)
         self.assertIn('--frequency "!GOWIN_FREQUENCY!"', content)
-        self.assertIn('if /I "%EXECUTION_OPERATION%"=="Flash固化" set "GOWIN_OPERATION=8"', content)
+        self.assertIn('if /I "%GOWIN_OPERATION_MODE%"=="flash" set "GOWIN_OPERATION=8"', content)
+        self.assertIn('if /I "%GOWIN_OPERATION_MODE%"=="sram" if /I "!GOWIN_DEVICE:~-1!"=="D"', content)
         direct_gowin_section = content.split("rem Gowin cable name contains parentheses.", 1)[1]
         self.assertNotIn('set "PCIDS_STREAM_CMD=!PCIDS_CMD!"', direct_gowin_section)
         self.assertIn('if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"', content)

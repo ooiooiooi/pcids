@@ -14,6 +14,20 @@ class BurnerEnvironmentError(RuntimeError):
     pass
 
 
+def _burner_driver_script(burner: str, filename: str) -> Path:
+    """Resolve a burner helper from the installed app before source resources.
+
+    A PyInstaller one-file backend executes from a temporary ``_MEI`` directory,
+    so ``PROJECT_ROOT`` cannot be used for tools shipped as Electron resources.
+    ``PCIDS_BUNDLED_TOOLS_DIR`` is supplied by Electron and points directly to
+    ``resources/tools/burners`` in packaged installs.
+    """
+    bundled_tools_dir = str(os.environ.get("PCIDS_BUNDLED_TOOLS_DIR") or "").strip()
+    if bundled_tools_dir:
+        return Path(bundled_tools_dir) / burner / "drivers" / filename
+    return PROJECT_ROOT / "tools" / "burners" / burner / "drivers" / filename
+
+
 def _run_powershell(script_path: Path, arguments: list[str], env: Mapping[str, str]) -> str:
     if os.name != "nt":
         raise BurnerEnvironmentError("烧录器环境自动切换当前仅支持 Windows 执行节点")
@@ -45,7 +59,7 @@ def _run_powershell(script_path: Path, arguments: list[str], env: Mapping[str, s
 
 
 def _gowin_environment(env: Mapping[str, str]) -> str:
-    script_path = PROJECT_ROOT / "tools" / "burners" / "GOWIN" / "drivers" / "switch-gowin-usb-mode.ps1"
+    script_path = _burner_driver_script("GOWIN", "switch-gowin-usb-mode.ps1")
     task_id = str(env.get("TASK_ID") or "").strip() or "default"
     state_file = Path(tempfile.gettempdir()) / f"pcids_gowin_usb_mode_{task_id}.json"
     serial = str(env.get("BURNER_SN") or "").strip()
@@ -73,11 +87,13 @@ def _gowin_environment(env: Mapping[str, str]) -> str:
 
 def _al321_environment(env: Mapping[str, str]) -> str:
     configured = str(env.get("AL321_DRIVER_SWITCH_SCRIPT") or "").strip()
-    script_path = Path(configured) if configured else PROJECT_ROOT / "tools" / "burners" / "AL321" / "drivers" / "switch-al321-driver.ps1"
+    script_path = Path(configured) if configured else _burner_driver_script("AL321", "switch-al321-driver.ps1")
     task_id = str(env.get("TASK_ID") or "").strip() or "default"
     state_file = Path(tempfile.gettempdir()) / f"pcids_al321_driver_state_{task_id}.json"
     operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
-    mode = "amd" if "flash" in operation or "固化" in operation else "recover-pending"
+    operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
+    is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
+    mode = "amd" if is_flash else "recover-pending"
     arguments = ["-Mode", mode, "-StateFile", str(state_file)]
     serial = str(env.get("BURNER_SN") or "").strip()
     if serial:
@@ -107,7 +123,9 @@ def ensure_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
         )
     if normalized_script == "al321_fpga_mcu_flash" or burner_name.lower() == "al321":
         operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
-        target_mode = "AMD/JTAG 驱动环境" if "flash" in operation or "固化" in operation else "任务要求的 USB 环境"
+        operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
+        is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
+        target_mode = "AMD/JTAG 驱动环境" if is_flash else "任务要求的 USB 环境"
         details = _al321_environment(env)
         return "\n".join(
             [
@@ -137,7 +155,7 @@ def restore_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
     if normalized_script != "al321_fpga_mcu_flash" and burner_name != "al321":
         return ""
     configured = str(env.get("AL321_DRIVER_SWITCH_SCRIPT") or "").strip()
-    script_path = Path(configured) if configured else PROJECT_ROOT / "tools" / "burners" / "AL321" / "drivers" / "switch-al321-driver.ps1"
+    script_path = Path(configured) if configured else _burner_driver_script("AL321", "switch-al321-driver.ps1")
     task_id = str(env.get("TASK_ID") or "").strip() or "default"
     state_file = Path(tempfile.gettempdir()) / f"pcids_al321_driver_state_{task_id}.json"
     output = _run_powershell(script_path, ["-Mode", "winusb", "-StateFile", str(state_file)], env)

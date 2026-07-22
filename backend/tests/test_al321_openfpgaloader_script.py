@@ -20,6 +20,7 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         runner = _al321_openfpgaloader_runner()
         self.assertFalse(runner.startswith("\\"))
         self.assertTrue(runner.startswith('set "AL321_OPERATION=%EXECUTION_OPERATION%"'))
+        self.assertIn('set "AL321_OPERATION_MODE=%EXECUTION_OPERATION_MODE%"', runner)
         self.assertNotIn("\n\\\n", self.content)
 
     def test_keeps_template_override_and_logs_real_command(self):
@@ -50,7 +51,8 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
 
     def test_maps_sram_and_zynqmp_flash_to_separate_tools(self):
         self.assertIn('set "AL321_MODE_FLAG=-m"', self.content)
-        self.assertIn('if "%AL321_OPERATION%"=="Flash固化"', self.content)
+        self.assertIn('if /I "%AL321_OPERATION_MODE%"=="flash"', self.content)
+        self.assertNotIn('if "%AL321_OPERATION%"=="Flash固化"', self.content)
         self.assertIn("ZynqMP SRAM下载需要 FPGA bitstream", self.content)
         self.assertIn("不能使用 BOOT.bin/.bin", self.content)
         self.assertIn("PROGRAM_FLASH_EXE", self.content)
@@ -173,7 +175,7 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
 
     def test_flash_driver_switch_stays_inside_flash_mode_branch(self):
         self.assertNotIn(')\n          )\n          if not "%AL321_AUTO_DRIVER_SWITCH%"=="0"', self.content)
-        flash_guard_index = self.content.index('if "%AL321_OPERATION%"=="Flash固化"')
+        flash_guard_index = self.content.index('if /I "%AL321_OPERATION_MODE%"=="flash"')
         switch_guard_index = self.content.index('if not "%AL321_AUTO_DRIVER_SWITCH%"=="0"')
         openfpgaloader_index = self.content.index('if "%OPENFPGALOADER_EXE%"==""')
         self.assertLess(flash_guard_index, switch_guard_index)

@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from backend.utils.burner_environment import ensure_burner_environment, restore_burner_environment
@@ -24,6 +25,18 @@ class BurnerEnvironmentTests(unittest.TestCase):
         )
         self.assertIn("Port_#0002.Hub_#0003", runner.call_args.args[1])
 
+    @patch.dict("os.environ", {"PCIDS_BUNDLED_TOOLS_DIR": r"C:\\Program Files\\PCIDS\\resources\\tools\\burners"}, clear=False)
+    @patch("backend.utils.burner_environment._run_powershell", return_value="gowin-ready")
+    def test_gowin_uses_bundled_tool_script_in_packaged_app(self, runner):
+        ensure_burner_environment(
+            "gowin_usb_cable_fpga_flash",
+            {"BURNER_NAME": "Gowin USB Cable", "BURNER_LOCATION": "registered-location"},
+        )
+        self.assertEqual(
+            runner.call_args.args[0],
+            Path(r"C:\\Program Files\\PCIDS\\resources\\tools\\burners\\GOWIN\\drivers\\switch-gowin-usb-mode.ps1"),
+        )
+
     @patch("backend.utils.burner_environment._al321_environment", return_value="al321-ready")
     def test_al321_uses_existing_environment_switcher(self, switcher):
         result = ensure_burner_environment(
@@ -33,6 +46,14 @@ class BurnerEnvironmentTests(unittest.TestCase):
         self.assertIn("目标环境：AMD/JTAG 驱动环境", result)
         self.assertIn("al321-ready", result)
         switcher.assert_called_once()
+
+    @patch("backend.utils.burner_environment._run_powershell", return_value="al321-ready")
+    def test_al321_uses_ascii_operation_mode_for_driver_switch(self, runner):
+        ensure_burner_environment(
+            "al321_fpga_mcu_flash",
+            {"BURNER_NAME": "AL321", "EXECUTION_OPERATION_MODE": "flash"},
+        )
+        self.assertIn("amd", runner.call_args.args[1])
 
     def test_fixed_environment_burner_still_runs_preflight(self):
         result = ensure_burner_environment("pwlink_v2_arm_mcu_flash", {"BURNER_NAME": "PWLINK2"})
