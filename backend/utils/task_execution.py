@@ -576,6 +576,16 @@ def build_runtime_env(
         "TARGET_PATH": str(config.get("target_path") or ""),
         "TASK_REMARK": str(config.get("remark") or ""),
     }
+    # Windows exposes a USB device's stable serial as the final segment of its
+    # PnP instance ID. Keep this independent of a particular AL321 VID/PID:
+    # the generated runner performs the hardware-specific validation and only
+    # forwards a serial selector to tools that support it.
+    is_al321_script = str(getattr(script, "name", None) or "").strip() == "al321_fpga_mcu_flash"
+    location_match = re.fullmatch(r"USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}\\([^\\]+)", env["BURNER_LOCATION"], flags=re.IGNORECASE)
+    if is_al321_script and not env["BURNER_SN"].strip() and location_match:
+        candidate_serial = location_match.group(1).strip()
+        if STRICT_BURNER_SN_PATTERN.fullmatch(candidate_serial):
+            env["BURNER_SN"] = candidate_serial
     timeout_seconds_value = get_task_timeout_seconds(config, default=120)
     env["TIMEOUT_MINUTES"] = str((timeout_seconds_value + 59) // 60 if timeout_seconds_value > 0 else "")
     return env

@@ -2195,6 +2195,13 @@ const Burning: React.FC = () => {
   }, [platform, selectedScript?.id, selectedScript?.default_config_json, supportedScriptConfigFieldsKey])
 
   useEffect(() => {
+    if ((platform !== 'board' && platform !== 'hybrid') || selectedScript?.id) return
+    setWizardData((prev: any) => (
+      Number(prev.timeoutMinutes) === 120 ? prev : { ...prev, timeoutMinutes: 120 }
+    ))
+  }, [platform, selectedScript?.id])
+
+  useEffect(() => {
     if ((platform !== 'board' && platform !== 'hybrid') || !selectedScript?.id || isSelectedScriptSystem) return
     setWizardData((prev: any) => ({
       ...prev,

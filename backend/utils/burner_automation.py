@@ -178,7 +178,7 @@ SYSTEM_SCRIPT_CATALOG = [
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
-            "timeout_minutes": 120,
+            "timeout_minutes": 600,
         },
     },
     {
@@ -715,11 +715,17 @@ def _stream_command_helper_setup() -> str:
     # when no BOM is present.  The helper includes Chinese diagnostics, so emit a
     # UTF-8 BOM to keep it valid on every supported Windows locale.
     helper_base64 = base64.b64encode(_stream_command_helper_source().encode("utf-8-sig")).decode("ascii")
+    write_command = (
+        "$bytes=[System.Convert]::FromBase64String('"
+        + helper_base64
+        + "');[System.IO.File]::WriteAllBytes($env:PCIDS_STREAM_HELPER,$bytes)"
+    )
+    encoded_write_command = base64.b64encode(write_command.encode("utf-16le")).decode("ascii")
     return dedent(
         f"""\
         set "PCIDS_STREAM_HELPER=%TEMP%\\pcids_stream_cmd_%TASK_ID%.ps1"
         if "%TASK_ID%"=="" set "PCIDS_STREAM_HELPER=%TEMP%\\pcids_stream_cmd.ps1"
-        powershell -NoProfile -Command "$bytes=[System.Convert]::FromBase64String('{helper_base64}'); [System.IO.File]::WriteAllBytes($env:PCIDS_STREAM_HELPER, $bytes)"
+        powershell -NoProfile -EncodedCommand {encoded_write_command}
         set "PCIDS_STREAM_HELPER_WRITE_EXIT=!ERRORLEVEL!"
         if not "!PCIDS_STREAM_HELPER_WRITE_EXIT!"=="0" (
           echo [ERROR] 无法生成命令实时流包装脚本。
@@ -1176,11 +1182,17 @@ def _al321_xsdb_scan_script_source() -> str:
 
 def _al321_xsdb_scan_script_setup() -> str:
     helper_base64 = base64.b64encode(_al321_xsdb_scan_script_source().encode("utf-8")).decode("ascii")
+    write_command = (
+        "$bytes=[System.Convert]::FromBase64String('"
+        + helper_base64
+        + "');[System.IO.File]::WriteAllBytes($env:AL321_XSDB_SCRIPT,$bytes)"
+    )
+    encoded_write_command = base64.b64encode(write_command.encode("utf-16le")).decode("ascii")
     return dedent(
         f"""\
         set "AL321_XSDB_SCRIPT=%TEMP%\\pcids_al321_xsdb_%TASK_ID%.tcl"
         if "%TASK_ID%"=="" set "AL321_XSDB_SCRIPT=%TEMP%\\pcids_al321_xsdb.tcl"
-        powershell -NoProfile -Command "$bytes=[System.Convert]::FromBase64String('{helper_base64}'); [System.IO.File]::WriteAllBytes($env:AL321_XSDB_SCRIPT, $bytes)"
+        powershell -NoProfile -EncodedCommand {encoded_write_command}
         set "AL321_XSDB_SCRIPT_WRITE_EXIT=!ERRORLEVEL!"
         if not "!AL321_XSDB_SCRIPT_WRITE_EXIT!"=="0" (
           echo [ERROR] 无法生成 AL321 xsdb 只读枚举脚本。
@@ -1560,18 +1572,18 @@ def _al321_openfpgaloader_runner() -> str:
             set "AL321_OPERATION=%EXECUTION_OPERATION%"
             set "AL321_OPERATION_MODE=%EXECUTION_OPERATION_MODE%"
             if /I not "%AL321_OPERATION_MODE%"=="flash" set "AL321_OPERATION_MODE=sram"
-            if not "%AL321_CMD_TEMPLATE%"=="" (
-              set "PCIDS_CMD=%AL321_CMD_TEMPLATE%"
-              set "PCIDS_CMD=!PCIDS_CMD:{firmware}=%FIRMWARE_PATH%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{target}=%TARGET_CHIP%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{probe}=%BURNER_SN%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{interface}=%INTERFACE_TYPE%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{speed}=%WRITE_SPEED_KHZ%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{address}=%START_ADDRESS%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{fsbl}=%TARGET_CONFIG_FILE%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{flash_type}=%QSPI_FLASH_MODEL%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{erase}=%ERASE_MODE%!"
-              set "PCIDS_CMD=!PCIDS_CMD:{action}=%COMPLETION_ACTION%!"
+            if "%AL321_CMD_TEMPLATE%"=="" goto :PCIDS_AL321_DEFAULT_RUNNER
+            set "PCIDS_CMD=%AL321_CMD_TEMPLATE%"
+            set "PCIDS_CMD=!PCIDS_CMD:{firmware}=%FIRMWARE_PATH%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{target}=%TARGET_CHIP%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{probe}=%BURNER_SN%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{interface}=%INTERFACE_TYPE%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{speed}=%WRITE_SPEED_KHZ%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{address}=%START_ADDRESS%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{fsbl}=%TARGET_CONFIG_FILE%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{flash_type}=%QSPI_FLASH_MODEL%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{erase}=%ERASE_MODE%!"
+            set "PCIDS_CMD=!PCIDS_CMD:{action}=%COMPLETION_ACTION%!"
             '''
         ).lstrip(),
         _stream_command_helper_setup(),
@@ -1579,11 +1591,16 @@ def _al321_openfpgaloader_runner() -> str:
         dedent(
             r'''
               exit /b !PCIDS_STREAM_EXIT!
-            )
             '''
         ).lstrip(),
         dedent(
         r'''
+        :PCIDS_AL321_DEFAULT_RUNNER
+        rem SRAM downloads must skip the ZynqMP-only Flash block entirely.  That
+        rem block contains nested cmd/PowerShell constructs which cmd.exe parses
+        rem when it reaches the opening parenthesis, even when its condition is
+        rem false.
+        if /I not "%AL321_OPERATION_MODE%"=="flash" goto :PCIDS_AL321_SRAM_RUNNER
         if /I "%AL321_OPERATION_MODE%"=="flash" (
           if "%PROGRAM_FLASH_EXE%"=="" for /f "delims=" %%I in ('where program_flash.bat 2^>nul') do if "%PROGRAM_FLASH_EXE%"=="" set "PROGRAM_FLASH_EXE=%%I"
           if "%PROGRAM_FLASH_EXE%"=="" for /f "delims=" %%I in ('where program_flash.exe 2^>nul') do if "%PROGRAM_FLASH_EXE%"=="" set "PROGRAM_FLASH_EXE=%%I"
@@ -1653,11 +1670,7 @@ def _al321_openfpgaloader_runner() -> str:
             echo [INFO] 已兼容映射 QSPI flash_type: !AL321_PROGRAM_FLASH_TYPE!
           )
           if "%START_ADDRESS%"=="" set "START_ADDRESS=0x0"
-          set "AL321_DRIVER_STATE_FILE=%TEMP%\pcids_al321_driver_state.json"
-          for %%I in ("%AL321_DRIVER_SWITCH_SCRIPT%") do set "AL321_DRIVER_SWITCH_LOG_DIR=%%~dpI..\driver-switch-logs"
           for %%I in ("%AL321_DRIVER_SWITCH_SCRIPT%") do set "AL321_PROGRAM_FLASH_STREAM_SCRIPT=%%~dpI..\run-program-flash-stream.ps1"
-          set "AL321_DRIVER_SWITCH_STDOUT_LOG=%TEMP%\pcids_al321_driver_switch_%TASK_ID%.log"
-          if "%TASK_ID%"=="" set "AL321_DRIVER_SWITCH_STDOUT_LOG=%TEMP%\pcids_al321_driver_switch.log"
           set "AL321_PROGRAM_FLASH_HELP_LOG=%TEMP%\pcids_al321_program_flash_help_%TASK_ID%.log"
           if "%TASK_ID%"=="" set "AL321_PROGRAM_FLASH_HELP_LOG=%TEMP%\pcids_al321_program_flash_help.log"
           if not exist "!AL321_PROGRAM_FLASH_STREAM_SCRIPT!" (
@@ -1681,33 +1694,6 @@ def _al321_openfpgaloader_runner() -> str:
           __PCIDS_AL321_XSDB_SETUP__
           set "AL321_XSDB_LOG=%TEMP%\pcids_al321_xsdb_%TASK_ID%.log"
           if "%TASK_ID%"=="" set "AL321_XSDB_LOG=%TEMP%\pcids_al321_xsdb.log"
-          set "AL321_DRIVER_SWITCHED=0"
-          if exist "!AL321_DRIVER_STATE_FILE!" (
-            echo [WARN] 检测到上次遗留的 AL321 驱动恢复状态文件，正在尝试恢复原驱动。
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode recover-pending -StateFile "!AL321_DRIVER_STATE_FILE!"
-            set "AL321_PREVIOUS_RECOVERY_EXIT=!ERRORLEVEL!"
-            if not "!AL321_PREVIOUS_RECOVERY_EXIT!"=="0" (
-              call :PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG
-              echo [ERROR] AL321 遗留驱动恢复失败，已拒绝继续执行 Flash固化。
-              exit /b 2
-            )
-          )
-          if not "%AL321_AUTO_DRIVER_SWITCH%"=="0" (
-            if "%AL321_DRIVER_SWITCH_SCRIPT%"=="" (
-              echo [ERROR] 未找到 AL321 自动驱动切换脚本 switch-al321-driver.ps1。
-              exit /b 127
-            )
-            echo [INFO] 正在为 ZynqMP Flash固化切换 AMD/Digilent cable 驱动，Windows 可能显示 UAC 确认。
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode amd -Serial "%BURNER_SN%" -StateFile "!AL321_DRIVER_STATE_FILE!" >"!AL321_DRIVER_SWITCH_STDOUT_LOG!" 2>&1
-            if not "!ERRORLEVEL!"=="0" (
-              type "!AL321_DRIVER_SWITCH_STDOUT_LOG!"
-              call :PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG
-              echo [ERROR] 当前 AL321 是 FTDI/WinUSB 型设备。Vitis 自带 xpcwinusb.inf 是 03FD Xilinx Cable 驱动，不能用于该设备。如 hw_server 能识别当前设备，可设置 AL321_AUTO_DRIVER_SWITCH=0 跳过切换。
-              echo [ERROR] AL321 驱动切换失败，为避免操作错误设备，已取消 Flash固化。
-              exit /b 2
-            )
-            set "AL321_DRIVER_SWITCHED=1"
-          )
           set "AL321_STARTED_HW_SERVER=0"
           set "AL321_HW_SERVER_PID="
           for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$client=New-Object System.Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1',3121); '1' } catch { '0' } finally { $client.Dispose() }"`) do set "AL321_HW_SERVER_READY=%%I"
@@ -1718,7 +1704,6 @@ def _al321_openfpgaloader_runner() -> str:
             for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$proc=Start-Process -FilePath $env:HW_SERVER_EXE -PassThru -WindowStyle Hidden; [Console]::Out.WriteLine([string]$proc.Id)"`) do set "AL321_HW_SERVER_PID=%%I"
             if "!AL321_HW_SERVER_PID!"=="" (
               echo [ERROR] 启动 hw_server 失败，未获得进程 ID。
-              if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
               exit /b 2
             )
             set "AL321_STARTED_HW_SERVER=1"
@@ -1730,7 +1715,6 @@ def _al321_openfpgaloader_runner() -> str:
             if not "!AL321_HW_SERVER_READY!"=="1" (
               echo [ERROR] hw_server 启动后仍未在 TCP:127.0.0.1:3121 就绪。
               if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-              if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
               exit /b 2
             )
             echo [INFO] 已启动并确认 hw_server 就绪: PID=!AL321_HW_SERVER_PID!
@@ -1742,7 +1726,6 @@ def _al321_openfpgaloader_runner() -> str:
             type "!AL321_XSDB_LOG!"
             echo [ERROR] xsdb 只读枚举失败，禁止执行 program_flash。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b !AL321_XSDB_EXIT!
           )
           set "AL321_ALL_CABLE_COUNT="
@@ -1754,19 +1737,16 @@ def _al321_openfpgaloader_runner() -> str:
             type "!AL321_XSDB_LOG!"
             echo [ERROR] xsdb 只读枚举输出解析失败，禁止执行 program_flash。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b !AL321_XSDB_PARSE_EXIT!
           )
           if not "!AL321_CABLE_MATCH_COUNT!"=="1" (
             echo [ERROR] AMD 官方工具只读枚举结果中，BURNER_SN=%BURNER_SN% 的 cable 精确匹配数量为 !AL321_CABLE_MATCH_COUNT!，已拒绝执行。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b 2
           )
           if not "!AL321_ALL_CABLE_COUNT!"=="1" (
             echo [ERROR] 当前 hw_server 下检测到 !AL321_ALL_CABLE_COUNT! 条 cable。由于当前 program_flash 命令未验证支持按序列号精确传参，已拒绝执行。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b 2
           )
           set "AL321_JTAGTARGETS_LOG=%TEMP%\pcids_al321_jtagtargets_%TASK_ID%.log"
@@ -1788,7 +1768,6 @@ def _al321_openfpgaloader_runner() -> str:
             type "!AL321_JTAGTARGETS_LOG!"
             echo [ERROR] program_flash 官方只读枚举失败，禁止执行 Flash固化。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b !AL321_JTAGTARGETS_EXIT!
           )
           set "AL321_PROGRAM_TARGET_COUNT="
@@ -1801,14 +1780,12 @@ def _al321_openfpgaloader_runner() -> str:
             type "!AL321_JTAGTARGETS_LOG!"
             echo [ERROR] program_flash 官方只读枚举输出解析失败，禁止执行 Flash固化。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b !AL321_JTAGTARGETS_PARSE_EXIT!
           )
           if not "!AL321_PROGRAM_TARGET_COUNT!"=="1" (
             type "!AL321_JTAGTARGETS_LOG!"
             echo [ERROR] program_flash 官方只读枚举结果中，期望 ZynqMP arm_dap 目标精确匹配数量为 !AL321_PROGRAM_TARGET_COUNT!，已拒绝执行。
             if "!AL321_STARTED_HW_SERVER!"=="1" powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-            if "!AL321_DRIVER_SWITCHED!"=="1" powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!"
             exit /b 2
           )
           echo [INFO] 已通过 AMD 官方工具只读枚举精确选择 cable: !AL321_MATCHED_CABLE_NAME!
@@ -1837,18 +1814,6 @@ def _al321_openfpgaloader_runner() -> str:
           if "!AL321_STARTED_HW_SERVER!"=="1" (
             echo [INFO] 正在停止本次启动的 hw_server ^(PID=!AL321_HW_SERVER_PID!^)
             powershell -NoProfile -Command "Stop-Process -Id !AL321_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue; Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force"
-          )
-          if "!AL321_DRIVER_SWITCHED!"=="1" (
-            echo [INFO] 正在将 AL321 恢复为 WinUSB 驱动。
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%AL321_DRIVER_SWITCH_SCRIPT%" -Mode winusb -StateFile "!AL321_DRIVER_STATE_FILE!" >"!AL321_DRIVER_SWITCH_STDOUT_LOG!" 2>&1
-            set "AL321_DRIVER_RESTORE_EXIT=!ERRORLEVEL!"
-            if not "!AL321_DRIVER_RESTORE_EXIT!"=="0" (
-              type "!AL321_DRIVER_SWITCH_STDOUT_LOG!"
-              call :PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG
-              echo [ERROR] Flash 命令已结束，但 AL321 恢复 WinUSB 驱动失败；这是收尾恢复步骤失败，不是 Flash 信息读取失败的根因。
-              echo [ERROR] 如 Windows 弹出 UAC，请允许恢复驱动；否则后续 openFPGALoader/SRAM 下载可能无法识别 AL321。
-              if "!AL321_PROGRAM_FLASH_EXIT!"=="0" set "AL321_PROGRAM_FLASH_EXIT=!AL321_DRIVER_RESTORE_EXIT!"
-            )
           )
           if not "!AL321_PROGRAM_FLASH_EXIT!"=="0" (
             findstr /I /C:"Wrong flash_type specified" "!AL321_PROGRAM_FLASH_LOG!" >nul
@@ -1885,6 +1850,7 @@ def _al321_openfpgaloader_runner() -> str:
           )
           exit /b !AL321_PROGRAM_FLASH_EXIT!
         )
+        :PCIDS_AL321_SRAM_RUNNER
         if "%OPENFPGALOADER_EXE%"=="" for /f "delims=" %%I in ('where openFPGALoader.exe 2^>nul') do if "%OPENFPGALOADER_EXE%"=="" set "OPENFPGALOADER_EXE=%%I"
         if "%OPENFPGALOADER_EXE%"=="" for /f "delims=" %%I in ('where openFPGALoader 2^>nul') do if "%OPENFPGALOADER_EXE%"=="" set "OPENFPGALOADER_EXE=%%I"
         if "%OPENFPGALOADER_EXE%"=="" (
@@ -1926,7 +1892,8 @@ def _al321_openfpgaloader_runner() -> str:
         set "AL321_MATCHED_COUNT=0"
         set "AL321_ONLY_PID="
         set "AL321_ONLY_INSTANCE="
-        for /f "usebackq delims=" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $prefixes=@('USB\VID_0403&PID_6014','USB\VID_03FD&PID_0007','USB\VID_03FD&PID_0008','USB\VID_03FD&PID_000F','USB\VID_03FD&PID_0013','USB\VID_03FD&PID_000D'); if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) { $devices=Get-PnpDevice -PresentOnly | Where-Object { $id=[string]$_.InstanceId; $id -and (($prefixes | Where-Object { $id.StartsWith($_) }).Count -gt 0) } | Select-Object -ExpandProperty InstanceId } else { $devices=Get-CimInstance Win32_PnPEntity | Where-Object { $id=[string]$_.PNPDeviceID; $id -and (($prefixes | Where-Object { $id.StartsWith($_) }).Count -gt 0) } | Select-Object -ExpandProperty PNPDeviceID }; foreach ($id in $devices | Select-Object -Unique) { if ($id -match 'PID_([0-9A-F]{4})') { Write-Output ($Matches[1] + ';' + $id) } }"`) do (
+        set "AL321_IS_FTDI=0"
+        for /f "usebackq delims=" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $location=[string]$env:BURNER_LOCATION; $locationPrefix=''; if ($location -match '^(USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4})\\') { $locationPrefix=$Matches[1].ToUpperInvariant() }; $prefixes=@('USB\VID_03FD&PID_0007','USB\VID_03FD&PID_0008','USB\VID_03FD&PID_000F','USB\VID_03FD&PID_0013','USB\VID_03FD&PID_000D'); if ($locationPrefix) { $prefixes += $locationPrefix } else { $prefixes += 'USB\VID_0403&PID_6014' }; if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) { $devices=Get-PnpDevice -PresentOnly | Where-Object { $id=[string]$_.InstanceId; $id -and (($prefixes | Where-Object { $id.StartsWith($_) }).Count -gt 0) } | Select-Object -ExpandProperty InstanceId } else { $devices=Get-CimInstance Win32_PnPEntity | Where-Object { $id=[string]$_.PNPDeviceID; $id -and (($prefixes | Where-Object { $id.StartsWith($_) }).Count -gt 0) } | Select-Object -ExpandProperty PNPDeviceID }; foreach ($id in $devices | Select-Object -Unique) { if ($id -match 'PID_([0-9A-F]{4})') { Write-Output ($Matches[1] + ';' + $id) } }"`) do (
           set /a AL321_DEVICE_COUNT+=1
           for /f "tokens=1,* delims=;" %%A in ("%%L") do (
             if "%BURNER_SN%"=="" (
@@ -1959,21 +1926,20 @@ def _al321_openfpgaloader_runner() -> str:
           )
           echo [INFO] 未配置 BURNER_SN，当前仅发现 1 个匹配设备: !AL321_ONLY_INSTANCE!
         )
+        if /I "!AL321_ONLY_INSTANCE:~0,12!"=="USB\VID_0403" set "AL321_IS_FTDI=1"
         set "AL321_CABLE="
         set "AL321_PROBE_FW_ARG="
+        set "AL321_USB_SELECTOR="
+        if "!AL321_IS_FTDI!"=="1" if not "%BURNER_SN%"=="" set "AL321_USB_SELECTOR=--usb-serial-num "%BURNER_SN%""
         set "AL321_DETECT_LOG=%TEMP%\pcids_al321_detect_%TASK_ID%.log"
         if "%TASK_ID%"=="" set "AL321_DETECT_LOG=%TEMP%\pcids_al321_detect.log"
-        if /I "!AL321_ONLY_PID!"=="6014" (
-          if not "!AL321_DEVICE_COUNT!"=="1" (
-            echo [ERROR] 检测到 !AL321_DEVICE_COUNT! 个 AL321 设备；0403:6014 场景下 openFPGALoader 不支持安全按序列号锁定，禁止执行。
-            exit /b 2
-          )
+        if "!AL321_IS_FTDI!"=="1" (
           if not "%AL321_OPENFPGALOADER_CABLE%"=="" set "AL321_CABLE=%AL321_OPENFPGALOADER_CABLE%"
           if not defined AL321_CABLE (
             echo [INFO] 检测到 FTDI 0403:6014，正在只读探测兼容 cable 类型。
-            for %%C in (digilent_hs2 digilent_hs3 digilent_ad jtag-smt2-nc gatemate_pgm) do if not defined AL321_CABLE (
+            for %%C in (ft232 digilent_hs2 digilent_hs3 digilent_ad jtag-smt2-nc gatemate_pgm) do if not defined AL321_CABLE (
               del /f /q "!AL321_DETECT_LOG!" >nul 2>nul
-              "%OPENFPGALOADER_EXE%" -c %%C !AL321_FREQ_ARG! --detect -v >"!AL321_DETECT_LOG!" 2>&1
+              "%OPENFPGALOADER_EXE%" -c %%C !AL321_USB_SELECTOR! !AL321_FREQ_ARG! --detect -v >"!AL321_DETECT_LOG!" 2>&1
               if "!ERRORLEVEL!"=="0" (
                 findstr /I /C:"found 0 devices" /C:"Error:" "!AL321_DETECT_LOG!" >nul
                 if errorlevel 1 set "AL321_CABLE=%%C"
@@ -2013,9 +1979,9 @@ def _al321_openfpgaloader_runner() -> str:
         )
         if /I "%AL321_OPERATION_MODE%"=="flash" (
           echo [INFO] 尝试检测 AL321 cable: !AL321_CABLE! 检测目标 Flash
-          echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect !AL321_DETECT_FLASH_FLAG! -v
+          echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_USB_SELECTOR! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect !AL321_DETECT_FLASH_FLAG! -v
           del /f /q "!AL321_DETECT_LOG!" >nul 2>nul
-          "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect !AL321_DETECT_FLASH_FLAG! -v >"!AL321_DETECT_LOG!" 2>&1
+          "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_USB_SELECTOR! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect !AL321_DETECT_FLASH_FLAG! -v >"!AL321_DETECT_LOG!" 2>&1
           set "AL321_DETECT_EXIT=!ERRORLEVEL!"
           type "!AL321_DETECT_LOG!"
           findstr /I /C:"SPI Flash access is only available from PSU side" /C:"can't flash non-volatile memory for ZynqMP devices" "!AL321_DETECT_LOG!" >nul
@@ -2036,9 +2002,9 @@ def _al321_openfpgaloader_runner() -> str:
           echo [INFO] 已通过 !AL321_CABLE! 检测到目标 Flash，开始执行固化。
         ) else (
           echo [INFO] 尝试检测 AL321 cable: !AL321_CABLE! 检测目标 FPGA
-          echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect -v
+          echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_USB_SELECTOR! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect -v
           del /f /q "!AL321_DETECT_LOG!" >nul 2>nul
-          "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect -v >"!AL321_DETECT_LOG!" 2>&1
+          "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_USB_SELECTOR! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! --detect -v >"!AL321_DETECT_LOG!" 2>&1
           set "AL321_DETECT_EXIT=!ERRORLEVEL!"
           type "!AL321_DETECT_LOG!"
           if not "!AL321_DETECT_EXIT!"=="0" (
@@ -2052,30 +2018,13 @@ def _al321_openfpgaloader_runner() -> str:
           )
           echo [INFO] 已通过 !AL321_CABLE! 检测到目标 FPGA，开始执行 SRAM 下载。
         )
-        echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! !AL321_ERASE_ARG! !AL321_OFFSET_ARG! !AL321_MODE_FLAG! !AL321_VERIFY_FLAG! !AL321_RESET_FLAG! "%FIRMWARE_PATH%"
-        "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! !AL321_ERASE_ARG! !AL321_OFFSET_ARG! !AL321_MODE_FLAG! !AL321_VERIFY_FLAG! !AL321_RESET_FLAG! "%FIRMWARE_PATH%"
+        echo [EXEC] "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_USB_SELECTOR! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! !AL321_ERASE_ARG! !AL321_OFFSET_ARG! !AL321_MODE_FLAG! !AL321_VERIFY_FLAG! !AL321_RESET_FLAG! "%FIRMWARE_PATH%"
+        "%OPENFPGALOADER_EXE%" -c !AL321_CABLE! !AL321_USB_SELECTOR! !AL321_PROBE_FW_ARG! !AL321_FREQ_ARG! !AL321_ERASE_ARG! !AL321_OFFSET_ARG! !AL321_MODE_FLAG! !AL321_VERIFY_FLAG! !AL321_RESET_FLAG! "%FIRMWARE_PATH%"
         exit /b !ERRORLEVEL!
         '''
         ).lstrip(),
     )
-    helper = r"""
-
-        goto :PCIDS_AL321_DRIVER_LOG_HELPER_END
-        :PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG
-        set "AL321_DRIVER_SWITCH_LAST_LOG="
-        for /f "usebackq delims=" %%L in (`powershell -NoProfile -Command "$dir=$env:AL321_DRIVER_SWITCH_LOG_DIR; if ($dir -and (Test-Path -LiteralPath $dir)) { $f=Get-ChildItem -LiteralPath $dir -Filter 'al321-driver-switch-*.log' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { [Console]::Out.WriteLine($f.FullName) } }"`) do set "AL321_DRIVER_SWITCH_LAST_LOG=%%L"
-        if not "!AL321_DRIVER_SWITCH_LAST_LOG!"=="" (
-          echo === AL321驱动切换详细日志 ===
-          echo !AL321_DRIVER_SWITCH_LAST_LOG!
-          type "!AL321_DRIVER_SWITCH_LAST_LOG!"
-          echo === AL321驱动切换详细日志结束 ===
-        ) else (
-          echo [WARN] 未找到 AL321 驱动切换详细日志。
-        )
-        exit /b 0
-        :PCIDS_AL321_DRIVER_LOG_HELPER_END
-    """
-    return (runner + helper).replace("__PCIDS_AL321_XSDB_SETUP__", _al321_xsdb_scan_script_setup().rstrip())
+    return runner.replace("__PCIDS_AL321_XSDB_SETUP__", _al321_xsdb_scan_script_setup().rstrip())
 
 
 def build_system_script_content(script_name: str, burner_name: str) -> str:

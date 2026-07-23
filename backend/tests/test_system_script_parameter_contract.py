@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from backend.utils.burner_automation import (
     SYSTEM_SCRIPT_BINDINGS,
@@ -9,6 +10,9 @@ from backend.utils.burner_automation import (
     build_system_script_content,
 )
 from backend.utils.db import DEFAULT_PRODUCT_CATALOG
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class SystemScriptParameterContractTests(unittest.TestCase):
@@ -97,8 +101,18 @@ class SystemScriptParameterContractTests(unittest.TestCase):
 
     def test_stream_helper_is_written_as_utf8_with_bom_for_windows_powershell(self):
         content = build_system_script_content("gowin_usb_cable_fpga_flash", "Gowin USB Cable")
-        self.assertIn("77u/", content)
+        self.assertIn("powershell -NoProfile -EncodedCommand", content)
         self.assertIn("ReadToEndAsync", _stream_command_helper_source())
+
+    def test_gowin_batch_is_included_in_the_cmd_ascii_safety_contract(self):
+        tasks_source = (ROOT / "backend" / "routers" / "tasks.py").read_text(encoding="utf-8")
+        self.assertIn('"gowin_usb_cable_fpga_flash"', tasks_source)
+        self.assertIn('content_to_write = content_to_write.encode("ascii", errors="replace").decode("ascii")', tasks_source)
+
+    def test_batch_execution_uses_the_windows_active_code_page_without_global_chcp(self):
+        tasks_source = (ROOT / "backend" / "routers" / "tasks.py").read_text(encoding="utf-8")
+        self.assertIn('locale.getpreferredencoding(False) if normalized_type == "bat" and os.name == "nt" else "utf-8"', tasks_source)
+        self.assertNotIn('content_to_write = "@chcp 65001 >nul', tasks_source)
 
     def test_xds510plus_runs_usb_driver_preflight_before_vendor_command(self):
         catalog_item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "xds510plus_dsp_flash")

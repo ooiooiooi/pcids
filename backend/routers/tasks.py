@@ -4891,14 +4891,69 @@ async def _execute_script_content_locally(
                 monitor.record("burner-environment", "failed", "烧录器环境检查/切换失败", reason=str(exc))
             return False, failure_reason, failure_reason
 
-        # Use one Unicode-safe contract for every local script.  A batch file
-        # first switches cmd.exe to UTF-8, then is written in UTF-8 itself.
-        # This avoids both GBK mojibake and failures when an error message
-        # contains a character outside CP936 (for example U+FFFD).
+        # cmd.exe parses a batch file through the active Windows ANSI code
+        # page, including complete parenthesized blocks before it executes the
+        # first command.  Do not prepend a global UTF-8/chcp strategy here:
+        # it can therefore break unrelated vendor batch scripts.  Keep each
+        # batch in the active code page; scripts with known parser-sensitive
+        # diagnostics are normalized locally below.
         content_to_write = script_content
-        if normalized_type == "bat" and os.name == "nt":
-            content_to_write = "@chcp 65001 >nul\r\n" + script_content
-        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding="utf-8", newline="") as temp_script:
+        # cmd.exe can parse a complete parenthesized batch block before it
+        # executes the branch condition.  AL321's Flash-only block contains
+        # diagnostic text in Chinese alongside nested cmd/PowerShell syntax;
+        # on legacy Windows code-page handling, those bytes can corrupt the
+        # parser even for an SRAM task that never executes the Flash block.
+        # Keep command structure and runtime values intact while making the
+        # generated AL321 batch source ASCII-only for cmd.exe.
+        if normalized_type == "bat" and script_name in {"al321_fpga_mcu_flash", "gowin_usb_cable_fpga_flash"}:
+            batch_burner_label = "AL321" if script_name == "al321_fpga_mcu_flash" else "Gowin"
+            al321_log_replacements = {
+                "echo [ERROR] 检测到 !AL321_DEVICE_COUNT! 个 AL321 设备但未配置 BURNER_SN，禁止猜测。": (
+                    "echo [ERROR] Found !AL321_DEVICE_COUNT! AL321-compatible devices without BURNER_SN; refusing to guess."
+                ),
+                "echo [ERROR] 在 !AL321_DEVICE_COUNT! 个 AL321 设备中，序列号 %BURNER_SN% 的精确匹配数量为 !AL321_MATCHED_COUNT!，已拒绝执行。": (
+                    "echo [ERROR] BURNER_SN=%BURNER_SN% matched !AL321_MATCHED_COUNT! of !AL321_DEVICE_COUNT! AL321-compatible devices; refusing to proceed."
+                ),
+                "echo [INFO] 未配置 BURNER_SN，当前仅发现 1 个匹配设备: !AL321_ONLY_INSTANCE!": (
+                    "echo [INFO] One AL321-compatible device found without BURNER_SN: !AL321_ONLY_INSTANCE!"
+                ),
+                "echo [INFO] 已从 !AL321_DEVICE_COUNT! 个设备中精确选择 BURNER_SN=%BURNER_SN%。": (
+                    "echo [INFO] Selected BURNER_SN=%BURNER_SN% from !AL321_DEVICE_COUNT! AL321-compatible devices."
+                ),
+                "echo [ERROR] 已发现 AL321 ^(0403:6014^)，但 openFPGALoader 未在 JTAG 链上发现任何目标器件。": (
+                    "echo [ERROR] AL321 was found, but openFPGALoader found no target on the JTAG chain."
+                ),
+                "echo [ERROR] 请检查目标板上电、JTAG 连接、拨码模式以及 FPGA 是否真实挂载在该链路上。": (
+                    "echo [ERROR] Check target power, JTAG wiring, boot-mode switches, and the FPGA JTAG chain."
+                ),
+                "echo [ERROR] 请使用 tools\\burners\\AL321\\drivers 中的工具为该设备安装 WinUSB；如已知 cable 类型，可设置 AL321_OPENFPGALOADER_CABLE。": (
+                    "echo [ERROR] Install the AL321 WinUSB driver, or set AL321_OPENFPGALOADER_CABLE when the cable type is known."
+                ),
+                "echo [ERROR] 无法检测目标 FPGA，请检查驱动、连接状态或 probe firmware。": (
+                    "echo [ERROR] Cannot detect the target FPGA; check the USB driver, connection, and probe firmware."
+                ),
+                "echo [ERROR] 预检测显示未发现目标 FPGA 或 JTAG 链为空，请检查目标板上电、JTAG 连接、拨码模式以及 FPGA 是否处于可下载状态。": (
+                    "echo [ERROR] No target FPGA was found; check target power, JTAG wiring, boot-mode switches, and download mode."
+                ),
+            }
+            for source_text, replacement_text in al321_log_replacements.items():
+                content_to_write = content_to_write.replace(source_text, replacement_text)
+            ascii_lines: list[str] = []
+            for line in content_to_write.splitlines(keepends=True):
+                if any(ord(char) > 127 for char in line) and line.lstrip().startswith("echo [ERROR]"):
+                    indent = line[: len(line) - len(line.lstrip())]
+                    line = f"{indent}echo [ERROR] {batch_burner_label} operation failed; inspect task parameters and preceding output.\n"
+                elif any(ord(char) > 127 for char in line) and line.lstrip().startswith("echo [WARN]"):
+                    indent = line[: len(line) - len(line.lstrip())]
+                    line = f"{indent}echo [WARN] {batch_burner_label} operation warning; inspect task parameters and preceding output.\n"
+                elif any(ord(char) > 127 for char in line) and line.lstrip().startswith("echo [INFO]"):
+                    indent = line[: len(line) - len(line.lstrip())]
+                    line = f"{indent}echo [INFO] {batch_burner_label} operation status.\n"
+                ascii_lines.append(line)
+            content_to_write = "".join(ascii_lines)
+            content_to_write = content_to_write.encode("ascii", errors="replace").decode("ascii")
+        script_encoding = locale.getpreferredencoding(False) if normalized_type == "bat" and os.name == "nt" else "utf-8"
+        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding=script_encoding, newline="") as temp_script:
             temp_script.write(content_to_write)
             temp_script_path = temp_script.name
 

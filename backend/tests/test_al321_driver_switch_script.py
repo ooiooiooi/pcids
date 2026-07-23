@@ -58,11 +58,27 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
         self.assertIn('throw "Automatic AL321 driver switching requires exactly one present $HardwareId device; found $($devices.Count)."', self.content)
         self.assertIn("Assert-OnlyTargetCompatibleDevicePresent $HardwareId $InstanceId | Out-Null", self.content)
 
-    def test_shared_ftdi_driver_switch_requires_a_stable_serial_and_never_restores_generic_winusb(self):
+    def test_shared_ftdi_driver_switch_requires_a_stable_serial_and_only_allows_a_recognized_gowin_peer_for_winusb(self):
         self.assertIn("function Test-IsStableUsbSerial", self.content)
         self.assertIn("BURNER_SN must be a stable hardware serial", self.content)
-        self.assertIn("Refusing to restore a generic WinUSB binding for shared FTDI VID_0403&PID_6014", self.content)
-        self.assertIn("Refusing to switch a shared FTDI VID_0403&PID_6014 device currently bound to WinUSB", self.content)
+        self.assertIn("function Assert-SharedFtdiWinUsbPair", self.content)
+        self.assertIn("Shared AL321/Gowin WinUSB mode requires exactly two present", self.content)
+        self.assertIn("is not recognized as a Gowin FT2CH cable", self.content)
+        self.assertIn("-AllowSharedFtdiWinUsb", self.content)
+
+    def test_winusb_mode_installs_winusb_when_no_pending_flash_restore_exists(self):
+        self.assertIn("function Invoke-EnsureWinUsb", self.content)
+        self.assertIn("Switching AL321 to WinUSB", self.content)
+        self.assertIn("expected 'WinUSB'", self.content)
+        self.assertIn("exit (Invoke-EnsureWinUsb $Serial)", self.content)
+
+    def test_preflight_error_fails_safe_by_requesting_elevation(self):
+        self.assertIn(
+            "preflight check could not determine whether elevation is required; requesting elevation for a safe driver operation.",
+            self.content,
+        )
+        catch_index = self.content.index("preflight check could not determine whether elevation is required")
+        self.assertIn("$requiresElevation = $true", self.content[catch_index:])
 
     def test_amd_inf_resolution_scans_d_vitis_tool_and_cable_driver_locations(self):
         self.assertIn('"D:\\vitis\\Vitis\\*"', self.content)
@@ -72,8 +88,13 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
 
     def test_ftdi_device_rejects_xpcwinusb_and_generic_winusb_candidates(self):
         self.assertIn('if ($category -eq "ftdi") {', self.content)
-        self.assertIn('xpcwinusb.inf / 03FD Xilinx cable drivers do not match 0403:6014 FTDI devices.', self.content)
+        self.assertIn("PID_[0-9A-F]{4}", self.content)
+        self.assertIn('xpcwinusb.inf / 03FD Xilinx cable drivers do not match FTDI device $TargetHardwareId.', self.content)
         self.assertIn('This INF belongs to a libwdi / WinUSB package, not an FTDI cable driver.', self.content)
+
+    def test_ftdi_detection_uses_a_dynamic_product_id(self):
+        self.assertIn("^USB\\\\VID_0403&PID_[0-9A-F]{4}$", self.content)
+        self.assertNotIn('if ($normalized -eq "USB\\VID_0403&PID_6014")', self.content)
 
     def test_resolution_error_mentions_skip_switch_and_explicit_inf_override(self):
         self.assertIn('set AL321_AUTO_DRIVER_SWITCH=0 to skip automatic switching', self.content)

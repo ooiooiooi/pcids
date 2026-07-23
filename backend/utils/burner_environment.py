@@ -118,7 +118,7 @@ def _al321_environment(env: Mapping[str, str]) -> str:
     operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
     operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
     is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
-    mode = "amd" if is_flash else "recover-pending"
+    mode = "amd" if is_flash else "winusb"
     arguments = ["-Mode", mode, "-StateFile", str(state_file)]
     serial = str(env.get("BURNER_SN") or "").strip()
     if serial:
@@ -183,5 +183,9 @@ def restore_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
     script_path = Path(configured) if configured else _burner_driver_script("AL321", "switch-al321-driver.ps1")
     task_id = str(env.get("TASK_ID") or "").strip() or "default"
     state_file = Path(tempfile.gettempdir()) / f"pcids_al321_driver_state_{task_id}.json"
-    output = _run_powershell(script_path, ["-Mode", "winusb", "-StateFile", str(state_file)], env)
+    arguments = ["-Mode", "winusb", "-StateFile", str(state_file)]
+    serial = str(env.get("BURNER_SN") or "").strip()
+    if serial:
+        arguments.extend(["-Serial", serial])
+    output = _run_powershell(script_path, arguments, env)
     return output or "[INFO] AL321 已恢复 USB 烧录环境。"

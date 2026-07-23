@@ -69,7 +69,13 @@ function Get-InstanceHardwareId([string]$InstanceId) {
 }
 
 function Test-IsCompatibleHardwareId([string]$HardwareId) {
-  return $compatibleHardwareIds -contains (ConvertTo-StringOrEmpty $HardwareId).ToUpperInvariant()
+  $normalized = (ConvertTo-StringOrEmpty $HardwareId).ToUpperInvariant()
+  # FTDI assigns different product IDs to cable variants.  AL321 selection is
+  # bound to the exact instance/serial later; do not make 6014 a global rule.
+  if ($normalized -match '^USB\\VID_0403&PID_[0-9A-F]{4}$') {
+    return $true
+  }
+  return $compatibleHardwareIds -contains $normalized
 }
 
 function Test-IsCompatibleInstanceId([string]$InstanceId) {
@@ -83,13 +89,13 @@ function Test-IsStableUsbSerial([string]$Value) {
   }
   # Windows assigns location-derived instance suffixes such as
   # "7&16B090BC&0&2" to USB devices without a stable serial number.  They are
-  # not safe identities for a driver change on the shared FTDI 0403:6014 ID.
+  # not safe identities for a driver change on a shared FTDI hardware ID.
   return $normalized -notmatch '^[0-9A-Fa-f]+(?:&[0-9A-Fa-f]+){2,}$'
 }
 
 function Get-DeviceCategory([string]$HardwareId) {
   $normalized = (ConvertTo-StringOrEmpty $HardwareId).ToUpperInvariant()
-  if ($normalized -eq "USB\VID_0403&PID_6014") {
+  if ($normalized -match '^USB\\VID_0403&PID_[0-9A-F]{4}$') {
     return "ftdi"
   }
   if ($normalized.StartsWith("USB\VID_03FD&PID_")) {
@@ -252,6 +258,24 @@ function Assert-OnlyTargetCompatibleDevicePresent([string]$HardwareId, [string]$
   return $devices[0]
 }
 
+function Assert-SharedFtdiWinUsbPair([string]$HardwareId, [string]$ExpectedInstanceId) {
+  $devices = @(Get-PresentCompatibleDevices $HardwareId)
+  if ($devices.Count -ne 2) {
+    throw "Shared AL321/Gowin WinUSB mode requires exactly two present $HardwareId devices; found $($devices.Count)."
+  }
+  $target = @($devices | Where-Object { [string]$_.InstanceId -eq $ExpectedInstanceId })
+  if ($target.Count -ne 1) {
+    throw "Shared AL321/Gowin WinUSB mode could not find the configured AL321 instance '$ExpectedInstanceId'."
+  }
+  $peer = @($devices | Where-Object { [string]$_.InstanceId -ne $ExpectedInstanceId })[0]
+  $peerName = [string]$peer.FriendlyName
+  if ($peerName -notmatch 'Gowin|FT2CH|RS232-HS') {
+    throw "Refusing shared WinUSB switch because the peer device '$peerName' is not recognized as a Gowin FT2CH cable."
+  }
+  Write-Host "[INFO] Shared FTDI WinUSB mode: AL321=$ExpectedInstanceId; Gowin peer=$($peer.InstanceId)."
+  return $devices
+}
+
 function Read-InfText([string]$InfPath) {
   try {
     return (Get-Content -LiteralPath $InfPath -Raw -ErrorAction Stop).ToLowerInvariant()
@@ -300,12 +324,12 @@ function Get-InfCandidateEvaluation([string]$InfPath, [string]$TargetHardwareId)
   }
   if ($category -eq "ftdi") {
     if (Test-IsXilinxCableInf $InfPath $text) {
-      return @{ Accepted = $false; Reason = "xpcwinusb.inf / 03FD Xilinx cable drivers do not match 0403:6014 FTDI devices."; Path = $InfPath }
+      return @{ Accepted = $false; Reason = "xpcwinusb.inf / 03FD Xilinx cable drivers do not match FTDI device $TargetHardwareId."; Path = $InfPath }
     }
     if (Test-IsWinUsbOrLibwdiInf $InfPath $text) {
       return @{ Accepted = $false; Reason = "This INF belongs to a libwdi / WinUSB package, not an FTDI cable driver."; Path = $InfPath }
     }
-    return @{ Accepted = $true; Reason = "Matches FTDI 0403:6014."; Path = $InfPath }
+    return @{ Accepted = $true; Reason = "Matches FTDI device $TargetHardwareId."; Path = $InfPath }
   }
   if ($category -eq "xilinx") {
     if (Test-IsXilinxCableInf $InfPath $text) {
@@ -545,8 +569,12 @@ namespace Pcids.Al321 {
   }
 }
 
-function Invoke-DriverUpdate([string]$InfPath, [string]$InstanceId, [string]$HardwareId) {
-  Assert-OnlyTargetCompatibleDevicePresent $HardwareId $InstanceId | Out-Null
+function Invoke-DriverUpdate([string]$InfPath, [string]$InstanceId, [string]$HardwareId, [switch]$AllowSharedFtdiWinUsb) {
+  if ($AllowSharedFtdiWinUsb -and (Get-DeviceCategory $HardwareId) -eq "ftdi") {
+    Assert-SharedFtdiWinUsbPair $HardwareId $InstanceId | Out-Null
+  } else {
+    Assert-OnlyTargetCompatibleDevicePresent $HardwareId $InstanceId | Out-Null
+  }
   Invoke-PnpUtilDriverInstall $InfPath
 
   $resolvedDevcon = Resolve-DevconPath -Optional
@@ -615,9 +643,7 @@ function Invoke-RestoreFromState($State) {
   if (-not $stateHardwareId) {
     $stateHardwareId = Get-InstanceHardwareId $instanceId
   }
-  if ((Get-DeviceCategory $stateHardwareId) -eq "ftdi" -and [string]$State.OriginalService -eq "WinUSB") {
-    throw "Refusing to restore a generic WinUSB binding for shared FTDI VID_0403&PID_6014. Restore the exact vendor driver manually after confirming the physical AL321 device."
-  }
+  $allowSharedFtdiWinUsb = (Get-DeviceCategory $stateHardwareId) -eq "ftdi" -and [string]$State.OriginalService -eq "WinUSB"
   $before = Get-DriverMetadata $instanceId
   if ($before.Service -eq [string]$State.OriginalService -and $before.Inf -eq [string]$State.OriginalInf) {
     Write-Host "[INFO] AL321 driver already matches the recorded original state; deleting stale state file."
@@ -627,7 +653,7 @@ function Invoke-RestoreFromState($State) {
   $restoreInfPath = Resolve-RestoreInfPath $State
   Write-Host "[INFO] Restoring AL321 driver for $instanceId"
   Write-Host "[INFO] Original driver: INF=$($State.OriginalInf) Service=$($State.OriginalService)"
-  Invoke-DriverUpdate $restoreInfPath $instanceId $stateHardwareId
+  Invoke-DriverUpdate $restoreInfPath $instanceId $stateHardwareId -AllowSharedFtdiWinUsb:$allowSharedFtdiWinUsb
   Restart-And-ValidateDevice $instanceId | Out-Null
   $after = Get-DriverMetadata $instanceId
   if ($State.OriginalService -and $after.Service -ne [string]$State.OriginalService) {
@@ -638,7 +664,102 @@ function Invoke-RestoreFromState($State) {
   return 0
 }
 
+function Invoke-EnsureWinUsb([string]$ExpectedSerial) {
+  $device = Get-ExactDeviceBySerial $ExpectedSerial
+  $hardwareId = Get-InstanceHardwareId $device.InstanceId
+  $current = Get-DriverMetadata $device.InstanceId
+  if ($current.Service -eq "WinUSB") {
+    Write-Host "[INFO] AL321 already uses WinUSB: INF=$($current.Inf) Service=$($current.Service)"
+    return 0
+  }
+
+  $winUsbInfPath = Resolve-WinUsbInfPath
+  Write-Host "[INFO] Switching AL321 to WinUSB: instance=$($device.InstanceId)"
+  Invoke-DriverUpdate $winUsbInfPath $device.InstanceId $hardwareId -AllowSharedFtdiWinUsb:((Get-DeviceCategory $hardwareId) -eq "ftdi")
+  Restart-And-ValidateDevice $device.InstanceId | Out-Null
+  $after = Get-DriverMetadata $device.InstanceId
+  if ($after.Service -ne "WinUSB") {
+    throw "AL321 driver service after WinUSB switch is '$($after.Service)', expected 'WinUSB'."
+  }
+  Write-Host "[INFO] AL321 WinUSB switch complete: INF=$($after.Inf) Service=$($after.Service)"
+  return 0
+}
+
+function Remove-StateFileIfPresent() {
+  if ($StateFile -and (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
+    Remove-Item -LiteralPath $StateFile -Force -ErrorAction Stop
+  }
+}
+
+function Clear-StaleStateIfAlreadyRestored($State) {
+  if (-not $State) {
+    return $false
+  }
+  $instanceId = ConvertTo-StringOrEmpty $State.InstanceId
+  if (-not $instanceId) {
+    return $false
+  }
+  $device = Get-PnpDevice -PresentOnly -InstanceId $instanceId -ErrorAction SilentlyContinue
+  if (-not $device) {
+    return $false
+  }
+  $before = Get-DriverMetadata $instanceId
+  if (
+    $before.Service -eq (ConvertTo-StringOrEmpty $State.OriginalService) -and
+    $before.Inf -eq (ConvertTo-StringOrEmpty $State.OriginalInf)
+  ) {
+    Write-Host "[INFO] AL321 driver already matches the recorded original state; deleting stale state file."
+    Remove-StateFileIfPresent
+    return $true
+  }
+  return $false
+}
+
+function Test-RequiresElevationForMode([string]$RequestedMode) {
+  if ($RequestedMode -eq "recover-pending") {
+    $state = Load-State
+    if (-not $state) {
+      return $false
+    }
+    return -not (Clear-StaleStateIfAlreadyRestored $state)
+  }
+
+  if ($RequestedMode -eq "winusb") {
+    $state = Load-State
+    if ($state -and -not (Clear-StaleStateIfAlreadyRestored $state)) {
+      return $true
+    }
+    $device = Get-ExactDeviceBySerial $Serial
+    $current = Get-DriverMetadata $device.InstanceId
+    return $current.Service -ne "WinUSB"
+  }
+
+  if ($RequestedMode -eq "amd") {
+    $state = Load-State
+    if ($state -and -not (Clear-StaleStateIfAlreadyRestored $state)) {
+      return $true
+    }
+    $device = Get-ExactDeviceBySerial $Serial
+    $targetHardwareId = Get-InstanceHardwareId $device.InstanceId
+    $current = Get-DriverMetadata $device.InstanceId
+    $resolvedAmdInfPath = Resolve-AmdInfPath $targetHardwareId $current
+    return -not ($current.Service -eq "FTDIBUS" -and $current.PublishedInfPath -eq $resolvedAmdInfPath)
+  }
+
+  return $true
+}
+
 if (-not (Test-Administrator)) {
+  $requiresElevation = $true
+  try {
+    $requiresElevation = Test-RequiresElevationForMode $Mode
+  } catch {
+    Write-Host "[WARN] AL321 preflight check could not determine whether elevation is required; requesting elevation for a safe driver operation."
+    $requiresElevation = $true
+  }
+  if (-not $requiresElevation) {
+    Write-Host "[INFO] AL321 driver mode already satisfies the request; continuing without UAC."
+  } else {
   $arguments = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Quote-Argument $MyInvocation.MyCommand.Path),
     "-Mode", $Mode
@@ -650,6 +771,7 @@ if (-not (Test-Administrator)) {
   if ($StateFile) { $arguments += @("-StateFile", (Quote-Argument $StateFile)) }
   $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join " ")
   exit $process.ExitCode
+  }
 }
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -662,18 +784,28 @@ try {
   }
 
   if ($Mode -eq "winusb") {
-    exit (Invoke-RestoreFromState (Load-State))
+    $state = Load-State
+    if ($state) {
+      exit (Invoke-RestoreFromState $state)
+    }
+    exit (Invoke-EnsureWinUsb $Serial)
   }
 
   if ($Mode -ne "amd") {
     throw "Unsupported mode: $Mode"
   }
 
+  $state = Load-State
+  if ($state) {
+    Write-Host "[WARN] Detected pending AL321 driver recovery state; restoring the recorded original driver before ensuring AMD mode."
+    Invoke-RestoreFromState $state | Out-Null
+  }
+
   $device = Get-ExactDeviceBySerial $Serial
   $targetHardwareId = Get-InstanceHardwareId $device.InstanceId
   $current = Get-DriverMetadata $device.InstanceId
-  if ((Get-DeviceCategory $targetHardwareId) -eq "ftdi" -and $current.Service -eq "WinUSB") {
-    throw "Refusing to switch a shared FTDI VID_0403&PID_6014 device currently bound to WinUSB. Verify the physical AL321 serial and restore its FTDI vendor driver before retrying."
+  if ((Get-DeviceCategory $targetHardwareId) -eq "ftdi" -and $current.Service -eq "WinUSB" -and @(Get-PresentCompatibleDevices $targetHardwareId).Count -ne 1) {
+    throw "Refusing to switch shared FTDI device $targetHardwareId currently bound to WinUSB. Disconnect other matching FTDI devices, then retry."
   }
   $resolvedWinUsbInfPath = Resolve-WinUsbInfPath
   $resolvedAmdInfPath = Resolve-AmdInfPath $targetHardwareId $current

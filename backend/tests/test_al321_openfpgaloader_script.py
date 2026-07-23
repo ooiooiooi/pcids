@@ -26,11 +26,19 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
     def test_keeps_template_override_and_logs_real_command(self):
         self.assertIn("AL321_CMD_TEMPLATE", self.content)
         self.assertIn("echo [EXEC] !PCIDS_CMD!", self.content)
+        self.assertIn('if "%AL321_CMD_TEMPLATE%"=="" goto :PCIDS_AL321_DEFAULT_RUNNER', self.content)
+        self.assertIn(":PCIDS_AL321_DEFAULT_RUNNER", self.content)
+        self.assertIn('if /I not "%AL321_OPERATION_MODE%"=="flash" goto :PCIDS_AL321_SRAM_RUNNER', self.content)
+        self.assertIn(":PCIDS_AL321_SRAM_RUNNER", self.content)
+        self.assertNotIn("exit /b !PCIDS_STREAM_EXIT!\n)\n:PCIDS_AL321_DEFAULT_RUNNER", self.content)
         self.assertIn("{probe}", self.content)
         self.assertIn("{action}", self.content)
 
-    def test_ftdi_never_uses_unsupported_serial_selectors(self):
-        self.assertNotIn("--usb-serial-num", self.content)
+    def test_ftdi_uses_openfpgaloader_usb_serial_selector(self):
+        self.assertIn("--usb-serial-num", self.content)
+        self.assertIn('set "AL321_USB_SELECTOR=--usb-serial-num "%BURNER_SN%""', self.content)
+        self.assertNotIn('AL321_USB_SELECTOR=--usb-serial-num \\"%BURNER_SN%\\"', self.content)
+        self.assertIn("!AL321_USB_SELECTOR!", self.content)
         self.assertNotIn("--ftdi-serial", self.content)
 
     def test_enforces_safe_probe_selection_and_pid_coverage(self):
@@ -117,16 +125,17 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         self.assertNotIn('--vid', self.content)
         self.assertNotIn('--pid', self.content)
 
-    def test_pid_6014_autodetects_one_compatible_ftdi_cable(self):
-        self.assertIn('if /I "!AL321_ONLY_PID!"=="6014"', self.content)
+    def test_dynamic_ftdi_pid_autodetects_one_compatible_ftdi_cable(self):
+        self.assertIn('set "AL321_IS_FTDI=0"', self.content)
+        self.assertIn('if /I "!AL321_ONLY_INSTANCE:~0,12!"=="USB\\VID_0403"', self.content)
+        self.assertIn('if "!AL321_IS_FTDI!"=="1" (', self.content)
         self.assertIn("AL321_OPENFPGALOADER_CABLE", self.content)
         self.assertIn("digilent_hs2 digilent_hs3 digilent_ad", self.content)
-        self.assertNotIn("ft232", self.content)
-        self.assertIn("正在只读探测兼容 cable 类型", self.content)
+        self.assertIn("ft232 digilent_hs2 digilent_hs3 digilent_ad", self.content)
         self.assertIn("安装 WinUSB", self.content)
         self.assertIn("AL321_MATCHED_COUNT", self.content)
-        self.assertIn("不支持安全按序列号锁定", self.content)
-        self.assertIn("禁止执行", self.content)
+        self.assertIn("--usb-serial-num", self.content)
+        self.assertIn("!AL321_USB_SELECTOR!", self.content)
         self.assertIn("found 0 devices", self.content)
 
     def test_pid_0013_uses_xilinxplatformcableusb_and_xusb_xp2(self):
@@ -155,36 +164,30 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         self.assertIn("AL321_PROGRAM_TARGET_ID", self.content)
         self.assertIn("arm_dap", self.content)
 
-    def test_flash_mode_manages_hw_server_lifecycle_and_driver_state(self):
+    def test_flash_mode_manages_hw_server_lifecycle_without_driver_switching(self):
         self.assertIn("TCP:127.0.0.1:3121", self.content)
         self.assertIn("hw_server 未运行，正在启动并等待就绪", self.content)
         self.assertIn("正在停止本次启动的 hw_server", self.content)
-        self.assertIn("pcids_al321_driver_state.json", self.content)
-        self.assertIn("-Mode recover-pending", self.content)
-        self.assertIn('-Mode amd -Serial "%BURNER_SN%" -StateFile', self.content)
-        self.assertIn('-Mode winusb -StateFile', self.content)
+        self.assertNotIn("AL321_DRIVER_SWITCHED", self.content)
+        self.assertNotIn("AL321_DRIVER_STATE_FILE", self.content)
+        self.assertNotIn("-Mode recover-pending", self.content)
+        self.assertNotIn("-Mode amd", self.content)
+        self.assertNotIn("-Mode winusb", self.content)
 
-    def test_flash_mode_prints_driver_switch_detail_log_on_failures(self):
-        self.assertIn("call :PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG", self.content)
-        self.assertIn(":PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG", self.content)
-        self.assertIn("al321-driver-switch-*.log", self.content)
-        self.assertIn("AL321驱动切换详细日志", self.content)
-        self.assertIn("AL321_DRIVER_SWITCH_STDOUT_LOG", self.content)
-        self.assertIn('type "!AL321_DRIVER_SWITCH_STDOUT_LOG!"', self.content)
-        self.assertIn("当前 AL321 是 FTDI/WinUSB 型设备。Vitis 自带 xpcwinusb.inf 是 03FD Xilinx Cable 驱动，不能用于该设备。", self.content)
+    def test_flash_mode_has_no_batch_driver_switch_log_helper(self):
+        self.assertNotIn("PCIDS_PRINT_AL321_DRIVER_SWITCH_LOG", self.content)
+        self.assertNotIn("AL321_DRIVER_SWITCH_STDOUT_LOG", self.content)
 
-    def test_flash_driver_switch_stays_inside_flash_mode_branch(self):
-        self.assertNotIn(')\n          )\n          if not "%AL321_AUTO_DRIVER_SWITCH%"=="0"', self.content)
+    def test_flash_driver_switch_is_owned_by_task_environment_hook(self):
         flash_guard_index = self.content.index('if /I "%AL321_OPERATION_MODE%"=="flash"')
-        switch_guard_index = self.content.index('if not "%AL321_AUTO_DRIVER_SWITCH%"=="0"')
         openfpgaloader_index = self.content.index('if "%OPENFPGALOADER_EXE%"==""')
-        self.assertLess(flash_guard_index, switch_guard_index)
-        self.assertLess(switch_guard_index, openfpgaloader_index)
+        self.assertLess(flash_guard_index, openfpgaloader_index)
+        self.assertNotIn('AL321_AUTO_DRIVER_SWITCH', self.content)
 
-    def test_flash_mode_keeps_cable_checks_even_when_auto_driver_switch_is_disabled(self):
-        switch_guard_index = self.content.index('if not "%AL321_AUTO_DRIVER_SWITCH%"=="0"')
+    def test_flash_mode_keeps_cable_checks_with_task_level_driver_switching(self):
         cable_check_index = self.content.index('if not "!AL321_CABLE_MATCH_COUNT!"=="1"')
-        self.assertLess(switch_guard_index, cable_check_index)
+        flash_guard_index = self.content.index('if /I "%AL321_OPERATION_MODE%"=="flash"')
+        self.assertLess(flash_guard_index, cable_check_index)
         self.assertIn('echo [ERROR] AMD 官方工具只读枚举结果中，BURNER_SN=%BURNER_SN% 的 cable 精确匹配数量为 !AL321_CABLE_MATCH_COUNT!，已拒绝执行。', self.content)
 
     def test_flash_mode_rejects_multi_cable_multi_target_and_program_flash_failures(self):
@@ -211,7 +214,6 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         self.assertIn('ZynqMP arm_dap/PS 访问目标', self.content)
         self.assertIn('常见 ZynqMP QSPI 拓扑候选', self.content)
         self.assertIn('如果 qspi-x4-single 和 qspi-x8-dual_parallel 都已在同一块板上失败', self.content)
-        self.assertIn('这是收尾恢复步骤失败，不是 Flash 信息读取失败的根因', self.content)
         self.assertIn('set "AL321_PROGRAM_FLASH_EXIT=!ERRORLEVEL!"', self.content)
         self.assertIn('echo [ERROR] ZynqMP QSPI Flash固化失败。请按上方具体错误类型处理', self.content)
 
