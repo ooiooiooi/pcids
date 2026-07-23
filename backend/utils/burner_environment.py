@@ -98,7 +98,7 @@ def _gowin_environment(env: Mapping[str, str]) -> str:
         port = ""
     arguments = [
         "-Mode",
-        "usb",
+        "auto",
         "-Serial",
         serial,
         "-InstanceAnchor",
@@ -119,8 +119,12 @@ def _al321_environment(env: Mapping[str, str]) -> str:
     operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
     is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
     mode = "amd" if is_flash else "winusb"
+    # AL321 is selected by its stable serial number.  Do not disable, restore,
+    # or otherwise alter the independently-bound Gowin FTDI device.
     arguments = ["-Mode", mode, "-StateFile", str(state_file)]
     serial = str(env.get("BURNER_SN") or "").strip()
+    if not serial and not is_flash:
+        return "[INFO] AL321 SRAM task has no BURNER_SN; preserving the current driver environment."
     if serial:
         arguments.extend(["-Serial", serial])
     output = _run_powershell(script_path, arguments, env)
@@ -141,7 +145,7 @@ def ensure_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
             [
                 "=== 烧录器环境检查 ===",
                 f"[环境检查] 烧录器：{burner_name or 'Gowin USB Cable'}",
-                "[环境检查] 目标环境：Gowin USB 模式（WinUSB）",
+                "[环境检查] 目标环境：优先 Gowin FT2CH（FTDIBUS），无 FTDI 驱动时使用 WinUSB",
                 "[环境检查] 处理结果：检查完成，环境已就绪",
                 details,
             ]
@@ -185,6 +189,8 @@ def restore_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
     state_file = Path(tempfile.gettempdir()) / f"pcids_al321_driver_state_{task_id}.json"
     arguments = ["-Mode", "winusb", "-StateFile", str(state_file)]
     serial = str(env.get("BURNER_SN") or "").strip()
+    if not serial:
+        return ""
     if serial:
         arguments.extend(["-Serial", serial])
     output = _run_powershell(script_path, arguments, env)

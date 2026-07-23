@@ -1,9 +1,10 @@
 param(
-  [ValidateSet("usb", "recover-pending")]
-  [string]$Mode = "usb",
+  [ValidateSet("auto", "ft2ch", "usb", "recover-pending")]
+  [string]$Mode = "auto",
   [string]$Serial,
   [string]$InstanceAnchor,
   [string]$DriverInfPath = $env:GOWIN_USB_DRIVER_INF,
+  [string]$FtdiDriverInfPath = $env:GOWIN_FTDI_DRIVER_INF,
   [string]$StateFile = "",
   [string]$DiagnosticLogPath = ""
 )
@@ -71,6 +72,34 @@ function Resolve-GowinUsbInf {
   return $matches[0].FullName
 }
 
+function Test-GowinFtdiInf([string]$InfPath) {
+  if (-not $InfPath -or -not (Test-Path -LiteralPath $InfPath -PathType Leaf)) { return $false }
+  $text = Get-Content -LiteralPath $InfPath -Raw -ErrorAction SilentlyContinue
+  return $text -match '(?im)^\s*CatalogFile\s*=\s*ftdibus\.cat\s*$' -and $text -match 'VID_0403&PID_6014'
+}
+
+function Resolve-GowinFtdiInf {
+  if (Test-GowinFtdiInf $FtdiDriverInfPath) { return (Resolve-Path -LiteralPath $FtdiDriverInfPath).Path }
+  $candidates = @(
+    Get-ChildItem -LiteralPath (Join-Path $env:WINDIR "INF") -Filter "oem*.inf" -File | ForEach-Object {
+      if (-not (Test-GowinFtdiInf $_.FullName)) { return }
+      $text = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop
+      $driverVersion = [version]'0.0'
+      $driverDate = [datetime]::MinValue
+      if ($text -match '(?im)^\s*DriverVer\s*=\s*([^,]+),\s*([^\r\n]+)') {
+        $driverVerMatch = $Matches
+        [void][datetime]::TryParse($driverVerMatch[1], [ref]$driverDate)
+        [void][version]::TryParse($driverVerMatch[2].Trim(), [ref]$driverVersion)
+      }
+      [pscustomobject]@{ Path = $_.FullName; Date = $driverDate; Version = $driverVersion }
+    }
+  )
+  if ($candidates.Count -eq 0) {
+    throw "Cannot resolve a compatible FTDI/FTDIBUS driver for Gowin VID_0403&PID_6014. Install the FTDI driver or set GOWIN_FTDI_DRIVER_INF."
+  }
+  return ($candidates | Sort-Object Date, Version -Descending | Select-Object -First 1).Path
+}
+
 function Invoke-DriverUpdate([string]$InfPath, [string]$InstanceId) {
   & pnputil.exe /add-driver $InfPath /install | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "pnputil failed to install Gowin USB driver $InfPath (exit code $LASTEXITCODE)." }
@@ -97,6 +126,7 @@ function Invoke-ElevatedGowinUsbMode {
   if ($Serial) { $arguments += @("-Serial", "`"$Serial`"") }
   if ($InstanceAnchor) { $arguments += @("-InstanceAnchor", "`"$InstanceAnchor`"") }
   if ($DriverInfPath) { $arguments += @("-DriverInfPath", "`"$DriverInfPath`"") }
+  if ($FtdiDriverInfPath) { $arguments += @("-FtdiDriverInfPath", "`"$FtdiDriverInfPath`"") }
   if ($StateFile) { $arguments += @("-StateFile", "`"$StateFile`"") }
   $arguments += @("-DiagnosticLogPath", "`"$elevatedLogPath`"")
 
@@ -117,12 +147,21 @@ function Set-GowinUsbMode {
   $hardwareIds = Get-DeviceHardwareIds $device.InstanceId
   $isFt2chCable = @($hardwareIds | Where-Object { [string]$_ -match "VID_0403&PID_6014" }).Count -gt 0
   Write-GowinDiagnostic "[INFO] Gowin device detected: name=$($device.FriendlyName); instance=$($device.InstanceId); location=$location; hardware_id=$($hardwareIds -join ';'); driver_inf=$($current.Inf); service=$($current.Service)."
-  if ($isFt2chCable -and $current.Service -ieq "FTDIBUS") {
-    Write-GowinDiagnostic "[INFO] Gowin FT2CH cable already uses the required FTDI driver (FTDIBUS); no WinUSB switch is required."
+  if (($Mode -eq "ft2ch" -or $Mode -eq "auto") -and $isFt2chCable -and $current.Service -ieq "FTDIBUS") {
+    Write-GowinDiagnostic "[INFO] Gowin FT2CH cable already uses the required FTDI driver (FTDIBUS); no switch is required."
     if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
     return
   }
-  if ($current.Service -ieq "WinUSB") {
+  # The Gowin CLI supports both official FTDI and WinUSB backends.  Windows may
+  # keep a signed WinUSB package selected despite pnputil installing FTDI; do
+  # not repeatedly force a shared VID/PID device or block a working programmer.
+  # The generated runner probes FT2CH first and then WinUSB, matching this state.
+  if ($Mode -eq "auto" -and $current.Service -ieq "WinUSB") {
+    Write-GowinDiagnostic "[INFO] Gowin cable uses WinUSB; retaining the active driver and selecting the WinUSB CLI backend."
+    if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
+    return
+  }
+  if ($Mode -eq "usb" -and $current.Service -ieq "WinUSB") {
     Write-GowinDiagnostic "[INFO] Gowin cable already uses USB mode (WinUSB); no switch is required."
     if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
     return
@@ -133,15 +172,32 @@ function Set-GowinUsbMode {
   }
   $stateDir = Split-Path -Parent $StateFile
   if ($stateDir) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
-  @{ State = "pending_usb"; InstanceId = [string]$device.InstanceId; OriginalInf = $current.Inf; OriginalService = $current.Service } |
+  $effectiveMode = $Mode
+  $inf = ""
+  if ($effectiveMode -eq "auto") {
+    try {
+      $inf = Resolve-GowinFtdiInf
+      $effectiveMode = "ft2ch"
+    } catch {
+      if ($current.Service -ieq "WinUSB") {
+        Write-GowinDiagnostic "[WARN] No FTDI driver package is available; retaining the verified Gowin WinUSB fallback."
+        return
+      }
+      $inf = Resolve-GowinUsbInf
+      $effectiveMode = "usb"
+      Write-GowinDiagnostic "[WARN] No FTDI driver package is available; using the bundled/installed Gowin WinUSB fallback."
+    }
+  }
+  if (-not $inf) { $inf = if ($effectiveMode -eq "ft2ch") { Resolve-GowinFtdiInf } else { Resolve-GowinUsbInf } }
+  @{ State = "pending_$effectiveMode"; InstanceId = [string]$device.InstanceId; OriginalInf = $current.Inf; OriginalService = $current.Service } |
     ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
-  $inf = Resolve-GowinUsbInf
-  Write-GowinDiagnostic "[INFO] Switching Gowin cable to USB mode: INF=$inf, previous service=$($current.Service)."
+  $expectedService = if ($effectiveMode -eq "ft2ch") { "FTDIBUS" } else { "WinUSB" }
+  Write-GowinDiagnostic "[INFO] Switching Gowin cable to $expectedService mode: INF=$inf, previous service=$($current.Service)."
   Invoke-DriverUpdate $inf $device.InstanceId
   $after = Get-DriverMetadata $device.InstanceId
-  if ($after.Service -ine "WinUSB") { throw "Gowin cable did not enter USB mode after driver update; current service is $($after.Service)." }
+  if ($after.Service -ine $expectedService) { throw "Gowin cable did not enter $expectedService mode after driver update; current service is $($after.Service)." }
   Remove-Item -LiteralPath $StateFile -Force -ErrorAction Stop
-  Write-GowinDiagnostic "[INFO] Gowin cable USB mode is ready."
+  Write-GowinDiagnostic "[INFO] Gowin cable $expectedService mode is ready."
 }
 
 try {

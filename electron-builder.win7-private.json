@@ -29,13 +29,24 @@
       "from": "tools/burners/HDSC",
       "to": "tools/burners/HDSC"
     },
-    {
-      "from": "tools/burners/GOWIN",
-      "to": "tools/burners/GOWIN",
-      "filter": [
-        "drivers/switch-gowin-usb-mode.ps1"
-      ]
-    },
+      {
+        "from": "tools/burners/GOWIN",
+        "to": "tools/burners/GOWIN",
+        "filter": [
+          "bin/**/*",
+          "driver/**/*",
+          "drivers/**/*"
+        ]
+      },
+      {
+        "from": "tools/burners/AL321",
+        "to": "tools/burners/AL321",
+        "filter": [
+          "drivers/**/*",
+          "openFPGALoader/**/*",
+          "run-program-flash-stream.ps1"
+        ]
+      },
     {
       "from": "tools/codearts_release_debugger/browser_runtime",
       "to": "tools/codearts_browser_runtime",

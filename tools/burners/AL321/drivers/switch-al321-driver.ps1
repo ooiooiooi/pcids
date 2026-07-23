@@ -5,7 +5,10 @@ param(
   [string]$DevconPath = $env:DEVCON_EXE,
   [string]$AmdInfPath = $env:AL321_AMD_DRIVER_INF,
   [string]$WinUsbInfPath = "",
-  [string]$StateFile = ""
+  [string]$StateFile = "",
+  [switch]$DisableGowinPeer,
+  [switch]$RestoreGowinPeer,
+  [string]$GowinPeerStateFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +26,7 @@ $logDir = Join-Path $al321Root "driver-switch-logs"
 if (-not $StateFile) {
   $StateFile = Join-Path $logDir "al321-driver-state.json"
 }
+if (-not $GowinPeerStateFile) { $GowinPeerStateFile = "$StateFile.gowin-peer.json" }
 
 function Test-Administrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -256,6 +260,26 @@ function Assert-OnlyTargetCompatibleDevicePresent([string]$HardwareId, [string]$
     throw "Automatic AL321 driver switching matched $HardwareId, but the present device instance '$([string]$devices[0].InstanceId)' does not equal the expected '$ExpectedInstanceId'."
   }
   return $devices[0]
+}
+
+function Get-GowinPeerDevices() {
+  @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+    (ConvertTo-StringOrEmpty $_.InstanceId) -match '^USB\\VID_0403&PID_[0-9A-F]{4}\\' -and
+      (ConvertTo-StringOrEmpty $_.FriendlyName) -match 'Gowin|FT2CH|Single RS232-HS'
+  })
+}
+function Invoke-DisableGowinPeers() {
+  $peers = @(Get-GowinPeerDevices | Where-Object { $_.Status -eq 'OK' })
+  if ($peers.Count -eq 0) { Write-Host "[INFO] No active Gowin peer device needs to be disabled."; return 0 }
+  $peers | ForEach-Object { @{ InstanceId = [string]$_.InstanceId } } | ConvertTo-Json | Set-Content -LiteralPath $GowinPeerStateFile -Encoding UTF8
+  foreach ($peer in $peers) { Write-Host "[INFO] Temporarily disabling Gowin peer: $($peer.InstanceId)"; Disable-PnpDevice -InstanceId $peer.InstanceId -Confirm:$false -ErrorAction Stop }
+  return 0
+}
+function Invoke-RestoreGowinPeers() {
+  if (-not (Test-Path -LiteralPath $GowinPeerStateFile -PathType Leaf)) { return 0 }
+  foreach ($peer in @(Get-Content -LiteralPath $GowinPeerStateFile -Raw | ConvertFrom-Json)) { Enable-PnpDevice -InstanceId ([string]$peer.InstanceId) -Confirm:$false -ErrorAction Stop }
+  Remove-Item -LiteralPath $GowinPeerStateFile -Force -ErrorAction Stop
+  return 0
 }
 
 function Assert-SharedFtdiWinUsbPair([string]$HardwareId, [string]$ExpectedInstanceId) {
@@ -716,6 +740,8 @@ function Clear-StaleStateIfAlreadyRestored($State) {
 }
 
 function Test-RequiresElevationForMode([string]$RequestedMode) {
+  if ($RestoreGowinPeer -and (Test-Path -LiteralPath $GowinPeerStateFile -PathType Leaf)) { return $true }
+  if ($DisableGowinPeer -and @(Get-GowinPeerDevices | Where-Object { $_.Status -eq 'OK' }).Count -gt 0) { return $true }
   if ($RequestedMode -eq "recover-pending") {
     $state = Load-State
     if (-not $state) {
@@ -769,6 +795,9 @@ if (-not (Test-Administrator)) {
   if ($AmdInfPath) { $arguments += @("-AmdInfPath", (Quote-Argument $AmdInfPath)) }
   if ($WinUsbInfPath) { $arguments += @("-WinUsbInfPath", (Quote-Argument $WinUsbInfPath)) }
   if ($StateFile) { $arguments += @("-StateFile", (Quote-Argument $StateFile)) }
+  if ($DisableGowinPeer) { $arguments += "-DisableGowinPeer" }
+  if ($RestoreGowinPeer) { $arguments += "-RestoreGowinPeer" }
+  if ($GowinPeerStateFile) { $arguments += @("-GowinPeerStateFile", (Quote-Argument $GowinPeerStateFile)) }
   $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join " ")
   exit $process.ExitCode
   }
@@ -779,6 +808,7 @@ $logPath = Join-Path $logDir ("al321-driver-switch-{0}.log" -f (Get-Date -Format
 Start-Transcript -Path $logPath -Force | Out-Null
 
 try {
+  if ($RestoreGowinPeer) { exit (Invoke-RestoreGowinPeers) }
   if ($Mode -eq "recover-pending") {
     exit (Invoke-RestoreFromState (Load-State))
   }
@@ -788,7 +818,9 @@ try {
     if ($state) {
       exit (Invoke-RestoreFromState $state)
     }
-    exit (Invoke-EnsureWinUsb $Serial)
+    Invoke-EnsureWinUsb $Serial | Out-Null
+    if ($DisableGowinPeer) { Invoke-DisableGowinPeers | Out-Null }
+    exit 0
   }
 
   if ($Mode -ne "amd") {

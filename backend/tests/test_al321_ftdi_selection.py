@@ -4,7 +4,7 @@ from backend.utils.task_execution import build_runtime_env
 
 
 class Al321FtdiSelectionTests(unittest.TestCase):
-    def test_location_bound_ftdi_serial_is_forwarded_to_al321_script(self):
+    def test_location_bound_ftdi_serial_is_not_inferred_for_al321_script(self):
         env = build_runtime_env(
             _Task(),
             {},
@@ -14,7 +14,7 @@ class Al321FtdiSelectionTests(unittest.TestCase):
             None,
         )
 
-        self.assertEqual(env["BURNER_SN"], "210512180081")
+        self.assertEqual(env["BURNER_SN"], "")
 
     def test_supported_usb_location_is_not_limited_to_one_vid_pid(self):
         env = build_runtime_env(

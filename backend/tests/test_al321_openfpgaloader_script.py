@@ -37,9 +37,7 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
     def test_ftdi_uses_openfpgaloader_usb_serial_selector(self):
         self.assertIn("--usb-serial-num", self.content)
         self.assertIn('set "AL321_USB_SELECTOR=--usb-serial-num "%BURNER_SN%""', self.content)
-        self.assertNotIn('AL321_USB_SELECTOR=--usb-serial-num \\"%BURNER_SN%\\"', self.content)
         self.assertIn("!AL321_USB_SELECTOR!", self.content)
-        self.assertNotIn("--ftdi-serial", self.content)
 
     def test_enforces_safe_probe_selection_and_pid_coverage(self):
         self.assertIn("USB\\VID_0403&PID_6014", self.content)
@@ -134,8 +132,9 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         self.assertIn("ft232 digilent_hs2 digilent_hs3 digilent_ad", self.content)
         self.assertIn("安装 WinUSB", self.content)
         self.assertIn("AL321_MATCHED_COUNT", self.content)
-        self.assertIn("--usb-serial-num", self.content)
-        self.assertIn("!AL321_USB_SELECTOR!", self.content)
+        self.assertIn("--scan-usb", self.content)
+        self.assertIn("--cable-index !AL321_CABLE_INDEX!", self.content)
+        self.assertIn("!AL321_CABLE_INDEX_ARG!", self.content)
         self.assertIn("found 0 devices", self.content)
 
     def test_pid_0013_uses_xilinxplatformcableusb_and_xusb_xp2(self):

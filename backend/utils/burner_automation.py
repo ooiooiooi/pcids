@@ -2413,10 +2413,19 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             if /I "%GOWIN_OPERATION_MODE%"=="flash" if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=9"
             if /I "%GOWIN_OPERATION_MODE%"=="flash" if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=9"
             set "GOWIN_CABLE_INDEX=%CABLE_INDEX%"
-            rem programmer_cli index 1 is Gowin USB Cable(FT2CH); 0 is GWU2X.
-            if "%GOWIN_CABLE_INDEX%"=="" set "GOWIN_CABLE_INDEX=1"
             set "GOWIN_FREQUENCY=%TCK_FREQUENCY%"
             if "%GOWIN_FREQUENCY%"=="" set "GOWIN_FREQUENCY=1MHz"
+            rem Prefer the historically validated FTDI/FT2CH mode (index 1).  The
+            rem environment hook restores it when installed; otherwise use the
+            rem bundled Gowin WinUSB fallback (index 5) when its JTAG probe passes.
+            if not "%GOWIN_CABLE_INDEX%"=="" goto gowin_cable_ready
+            set "GOWIN_CABLE_INDEX=1"
+            "%GOWIN_PROGRAMMER_CLI%" --scan --cable-index 1 --frequency "!GOWIN_FREQUENCY!" >nul 2>nul
+            if "!ERRORLEVEL!"=="0" goto gowin_cable_ready
+            set "GOWIN_CABLE_INDEX=5"
+            :gowin_cable_ready
+            set "GOWIN_CABLE_NAME=Gowin USB Cable(FT2CH)"
+            if "!GOWIN_CABLE_INDEX!"=="5" set "GOWIN_CABLE_NAME=Gowin USB Cable(WINUSB)"
             rem The physical package name in TARGET_CHIP is a board property, while
             rem programmer_cli requires a family alias.  Resolve that alias from the
             rem connected JTAG device instead of changing the board configuration.
@@ -2461,15 +2470,15 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               if /I "%WRITE_VERIFY%"=="true" set "GOWIN_OPERATION=6"
               echo [INFO] Gowin embedded Flash selected for !GOWIN_DEVICE!.
             )
-            echo [INFO] Gowin operation=!GOWIN_OPERATION! target=!GOWIN_DEVICE! cable=FT2CH/!GOWIN_CABLE_INDEX! frequency=!GOWIN_FREQUENCY!
+            echo [INFO] Gowin operation=!GOWIN_OPERATION! target=!GOWIN_DEVICE! cable=!GOWIN_CABLE_NAME!/!GOWIN_CABLE_INDEX! frequency=!GOWIN_FREQUENCY!
             if /I "%GOWIN_OPERATION_MODE%"=="flash" (
               echo [WARN] Flash固化将写入外接配置 Flash；请确认板卡硬件已接入对应 Flash。
             )
             rem Gowin cable name contains parentheses.  Invoke the vendor CLI directly
             rem so cmd.exe does not reinterpret it while forwarding a command string.
-            echo [EXEC] "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index !GOWIN_OPERATION! --fsFile "%FIRMWARE_PATH%" --cable "Gowin USB Cable(FT2CH)" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!"
+            echo [EXEC] "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index !GOWIN_OPERATION! --fsFile "%FIRMWARE_PATH%" --cable "!GOWIN_CABLE_NAME!" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!"
             set "GOWIN_RUN_LOG=%TEMP%\pcids_gowin_run_%TASK_ID%.log"
-            "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index !GOWIN_OPERATION! --fsFile "%FIRMWARE_PATH%" --cable "Gowin USB Cable(FT2CH)" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!" >"!GOWIN_RUN_LOG!" 2>&1
+            "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index !GOWIN_OPERATION! --fsFile "%FIRMWARE_PATH%" --cable "!GOWIN_CABLE_NAME!" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!" >"!GOWIN_RUN_LOG!" 2>&1
             set "GOWIN_EXIT=!ERRORLEVEL!"
             type "!GOWIN_RUN_LOG!"
             rem Some Programmer versions print an error but return exit code 0.

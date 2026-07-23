@@ -21,7 +21,7 @@ class BurnerEnvironmentTests(unittest.TestCase):
             {"BURNER_NAME": "Gowin USB Cable", "BURNER_LOCATION": "registered-location"},
         )
         self.assertIn("=== 烧录器环境检查 ===", result)
-        self.assertIn("目标环境：Gowin USB 模式（WinUSB）", result)
+        self.assertIn("目标环境：优先 Gowin FT2CH（FTDIBUS），无 FTDI 驱动时使用 WinUSB", result)
         self.assertIn("gowin-ready", result)
         switcher.assert_called_once()
 
@@ -84,6 +84,7 @@ class BurnerEnvironmentTests(unittest.TestCase):
         self.assertEqual(result, "restored")
         self.assertIn("winusb", runner.call_args.args[1])
         self.assertIn("210512180081", runner.call_args.args[1])
+        self.assertNotIn("-RestoreGowinPeer", runner.call_args.args[1])
 
     def test_fixed_environment_burner_needs_no_restore(self):
         self.assertEqual(restore_burner_environment("pwlink_v2_arm_mcu_flash", {"BURNER_NAME": "PWLINK2"}), "")

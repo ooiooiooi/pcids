@@ -89,7 +89,18 @@
         "from": "tools/burners/GOWIN",
         "to": "tools/burners/GOWIN",
         "filter": [
-          "drivers/switch-gowin-usb-mode.ps1"
+          "bin/**/*",
+          "driver/**/*",
+          "drivers/**/*"
+        ]
+      },
+      {
+        "from": "tools/burners/AL321",
+        "to": "tools/burners/AL321",
+        "filter": [
+          "drivers/**/*",
+          "openFPGALoader/**/*",
+          "run-program-flash-stream.ps1"
         ]
       },
       {

@@ -70,7 +70,9 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
         self.assertIn("function Invoke-EnsureWinUsb", self.content)
         self.assertIn("Switching AL321 to WinUSB", self.content)
         self.assertIn("expected 'WinUSB'", self.content)
-        self.assertIn("exit (Invoke-EnsureWinUsb $Serial)", self.content)
+        self.assertIn("Invoke-EnsureWinUsb $Serial | Out-Null", self.content)
+        self.assertIn("Invoke-DisableGowinPeers", self.content)
+        self.assertIn("Invoke-RestoreGowinPeers", self.content)
 
     def test_preflight_error_fails_safe_by_requesting_elevation(self):
         self.assertIn(
