@@ -58,7 +58,7 @@ class DeploymentReadinessTests(unittest.TestCase):
     def test_missing_burner_tools_are_reported_as_warnings(self):
         ok_check = _build_check("probe", "ok", "ok")
         burner_tools = [
-            {"burner": "ST-LINK", "status": "ok", "message": "ready", "tool_label": "STM32CubeProgrammer CLI", "configured_path": "C:/tools/st.exe", "bundled_dir": "C:/tools/ST-LINK", "bundled_dir_exists": True, "env_names": ["STM32_PROGRAMMER_CLI"]},
+            {"burner": "ST-LINK", "status": "ok", "message": "ready", "tool_label": "STM32 ST-LINK Utility CLI", "configured_path": "C:/tools/st.exe", "bundled_dir": "C:/tools/ST-LINK", "bundled_dir_exists": True, "env_names": ["STLINK_UTILITY_CLI"]},
             {"burner": "J-LINK", "status": "warn", "message": "docs only", "tool_label": "SEGGER J-Link CLI", "configured_path": "", "bundled_dir": "C:/tools/J-LINK", "bundled_dir_exists": True, "env_names": ["JLINK_EXE"]},
         ]
         with patch.dict(os.environ, {ARTIFACT_MASTER_KEY_ENV: _encode_key(b"5" * 32)}, clear=False):

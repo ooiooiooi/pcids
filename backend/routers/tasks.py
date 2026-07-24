@@ -122,6 +122,11 @@ except Exception:
 TASK_RUNTIME_PROCESSES: dict[int, asyncio.subprocess.Process] = {}
 TASK_ACTIVE_RUN_TOKENS: dict[int, str] = {}
 CURRENT_TASK_RUN_TOKEN: ContextVar[Optional[str]] = ContextVar("current_task_run_token", default=None)
+WINDOWS_BATCH_COMPAT_SCRIPT_NAMES = {
+    "stlink_stm32_mcu_flash",
+    "jlink_v4_arm_mcu_flash",
+    "gdlink_arm_mcu_flash",
+}
 
 
 def _task_status_value(status: TaskStatus | int | None, default: TaskStatus = TaskStatus.PENDING) -> int:
@@ -182,7 +187,7 @@ def _get_script_extension(script_type: str) -> str:
     return ".sh"
 
 
-def _build_script_exec_command(script_type: str, temp_script_path: str) -> list[str]:
+def _build_script_exec_command(script_type: str, temp_script_path: str, script_name: Optional[str] = None) -> list[str]:
     if script_type == "python":
         import sys
 
@@ -205,6 +210,10 @@ def _build_script_exec_command(script_type: str, temp_script_path: str) -> list[
     if script_type == "bat":
         if os.name != "nt":
             raise RuntimeError("当前系统不支持执行 .bat 脚本，请改用 shell/python 或在 Windows/兼容 Agent 上执行")
+        if str(script_name or "").strip().lower() in WINDOWS_BATCH_COMPAT_SCRIPT_NAMES:
+            # These three native debugger flows are deployed across Windows
+            # images with different Python UTF-8 and Command Processor settings.
+            return ["cmd.exe", "/d", "/s", "/c", "call", temp_script_path]
         return ["cmd", "/c", temp_script_path]
     if script_type == "shell":
         if os.name == "nt":
@@ -276,6 +285,50 @@ def _decode_subprocess_output(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _decode_mixed_subprocess_output(raw: bytes) -> str:
+    """Decode mixed-encoding Windows output line by line.
+
+    Some vendor flows mix cmd.exe echo text emitted in the active ANSI code
+    page with helper/runtime output emitted as UTF-8. Decoding the whole byte
+    stream with one codec can therefore garble only those hybrid logs. Keep
+    the default decoder unchanged for normal burners and use this path only
+    for the known mixed-output workflow.
+    """
+    if not raw:
+        return ""
+    parts = re.split(rb"(\r\n|\n|\r)", raw)
+    decoded_parts: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            decoded_parts.append(part.decode("ascii", errors="ignore"))
+            continue
+        if not part:
+            continue
+        decoded_parts.append(normalize_text(_decode_subprocess_output(part)))
+    return "".join(decoded_parts)
+
+
+def _resolve_subprocess_output_decoder(script_name: Optional[str]) -> Callable[[bytes], str]:
+    if str(script_name or "").strip() == "pwlink_v2_arm_mcu_flash":
+        return _decode_mixed_subprocess_output
+    return _decode_subprocess_output
+
+
+def _should_restore_burner_environment(script_name: Optional[str], env: Mapping[str, Any], script_succeeded: bool, script_started: bool) -> bool:
+    if str(script_name or "").strip().lower() != "al321_fpga_mcu_flash":
+        return True
+    operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
+    operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
+    is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
+    if not is_flash:
+        return True
+    if not script_started:
+        return True
+    if script_succeeded:
+        return True
+    return str(env.get("PCIDS_FINAL_ATTEMPT") or "1").strip() == "1"
+
+
 async def _run_subprocess_command(
     cmd: list[str],
     timeout_seconds: Optional[int],
@@ -286,7 +339,9 @@ async def _run_subprocess_command(
     stage_name: str = "subprocess",
     output_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     stream_output: bool = True,
+    output_decoder: Optional[Callable[[bytes], str]] = None,
 ) -> tuple[bool, str, str, str]:
+    decoder = output_decoder or _decode_subprocess_output
     env = os.environ.copy()
     if extra_env:
         env.update({str(k): "" if v is None else str(v) for k, v in extra_env.items()})
@@ -319,7 +374,7 @@ async def _run_subprocess_command(
                 break
             chunks.append(chunk)
             if output_callback:
-                text = _decode_subprocess_output(chunk)
+                text = decoder(chunk)
                 if text:
                     await output_callback(stream_name, text)
 
@@ -383,8 +438,8 @@ async def _run_subprocess_command(
                 pass
         if monitor:
             monitor.record(stage_name, "timeout", "命令执行超时", command=" ".join(cmd))
-        stdout = _decode_subprocess_output(b"".join(stdout_chunks))
-        stderr = _decode_subprocess_output(b"".join(stderr_chunks))
+        stdout = decoder(b"".join(stdout_chunks))
+        stderr = decoder(b"".join(stderr_chunks))
         return False, stdout, stderr, "脚本执行超时"
     finally:
         if task_id:
@@ -392,8 +447,8 @@ async def _run_subprocess_command(
             if current_proc is proc:
                 TASK_RUNTIME_PROCESSES.pop(task_id, None)
 
-    stdout = _decode_subprocess_output(b"".join(stdout_chunks))
-    stderr = _decode_subprocess_output(b"".join(stderr_chunks))
+    stdout = decoder(b"".join(stdout_chunks))
+    stderr = decoder(b"".join(stderr_chunks))
     if proc.returncode == 0:
         if monitor:
             monitor.record(stage_name, "success", "命令执行完成", exit_code=proc.returncode)
@@ -427,6 +482,39 @@ def _task_display_time(value: Optional[datetime]) -> Optional[datetime]:
 
 def _script_output_failure_reason(stdout: str, stderr: str) -> str:
     output = "\n".join(part for part in [stdout, stderr] if part)
+    if "STLink error" in output or "STM32 STLink" in output or "STM32 ST-LINK CLI" in output:
+        if "No target connected" in output:
+            return (
+                "ST-LINK 烧录器已识别，但未检测到目标 STM32 芯片；"
+                "请检查目标板供电、VREF（目标 3.3V）、SWDIO、SWCLK、GND 接线，"
+                "并在需要复位下连接时接好 NRST。"
+            )
+        if re.search(r"STLink error\s*\(\s*9\s*\)\s*:\s*Get IDCODE error", output, re.IGNORECASE):
+            return (
+                "ST-LINK \u65E0\u6CD5\u8BFB\u53D6\u76EE\u6807\u82AF\u7247 IDCODE\uFF1B"
+                "\u8BF7\u68C0\u67E5 SWDIO/SWCLK/NRST/GND \u63A5\u7EBF\u3001\u76EE\u6807\u4F9B\u7535\u3001"
+                "\u82AF\u7247\u578B\u53F7\u3001\u8BFB\u4FDD\u62A4\u6216\u542F\u52A8\u72B6\u6001\u3002"
+            )
+        if "Selected SWD frequency is too low" in output:
+            return "ST-LINK \u4E0D\u652F\u6301\u5F53\u524D\u8FC7\u4F4E\u7684 SWD \u65F6\u949F\uFF1B\u8BF7\u63D0\u9AD8\u70E7\u5F55\u901F\u5EA6\u540E\u91CD\u8BD5\u3002"
+        if "Unable to connect to ST-LINK!" in output:
+            return "ST-LINK Utility 无法连接烧录器；请检查 USB 连接、驱动和任务绑定的烧录器序列号。"
+    if "J-Link" in output or "J-Link>" in output:
+        vtref_match = re.search(r"\bVTref\s*=\s*([0-9.]+\s*V)", output, re.IGNORECASE)
+        vtref_detail = f"\uFF08VTref={vtref_match.group(1)}\uFF09" if vtref_match else ""
+        if "Failed to initialize DAP" in output:
+            return (
+                f"J-Link \u65E0\u6CD5\u521D\u59CB\u5316 SWD DAP{vtref_detail}\uFF0C\u672A\u8FDE\u63A5\u5230\u76EE\u6807\u82AF\u7247\uFF1B"
+                "\u8BF7\u68C0\u67E5 SWDIO/SWCLK/NRST/GND \u63A5\u7EBF\u3001\u76EE\u6807\u82AF\u7247\u578B\u53F7\u3001"
+                "\u8BFB\u4FDD\u62A4\u6216\u82AF\u7247\u542F\u52A8\u72B6\u6001\u3002"
+            )
+        if "Could not connect to the target device" in output or "Can not attach to CPU" in output:
+            return (
+                f"J-Link \u65E0\u6CD5\u8FDE\u63A5\u76EE\u6807\u82AF\u7247{vtref_detail}\uFF1B"
+                "\u8BF7\u68C0\u67E5\u76EE\u6807\u4F9B\u7535\u3001SWD/JTAG \u63A5\u7EBF\u3001\u590D\u4F4D\u811A\u548C\u82AF\u7247\u578B\u53F7\u3002"
+            )
+        if "Connecting to J-Link" in output and ("FAILED" in output or "Cannot connect" in output):
+            return "J-Link \u70E7\u5F55\u5668\u8FDE\u63A5\u5931\u8D25\uFF1B\u8BF7\u68C0\u67E5 USB \u8FDE\u63A5\u3001\u9A71\u52A8\u548C\u7ED1\u5B9A\u7684\u5E8F\u5217\u53F7\u3002"
     xds_match = re.search(r"Error\s+(-\d+)\s+@\s*0x[0-9a-fA-F]+", output)
     if xds_match:
         error_code = xds_match.group(1)
@@ -437,28 +525,72 @@ def _script_output_failure_reason(stdout: str, stderr: str) -> str:
             )
         return f"SEED XDS510Plus 目标连接失败（CCS Error {error_code}）；烧录尚未开始。"
     reasons: list[str] = []
-    for line in output.splitlines():
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
         normalized = line.strip()
-        # Tool agents return structured JSON. Do not expose its serialized
-        # representation (including literal ``\\uXXXX`` escapes) as the task
-        # failure reason; show the decoded, user-facing error instead.
-        if normalized.startswith("{") and normalized.endswith("}"):
-            try:
-                payload = json.loads(normalized)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict) and payload.get("ok") is False:
-                reason = str(payload.get("error") or "烧录工具执行失败").strip()
-            else:
-                reason = ""
-        elif normalized.startswith("[ERROR]"):
-            reason = normalized.removeprefix("[ERROR]").strip() or "脚本输出明确错误"
-        elif "__PCIDS_" in normalized and "_ERROR__" in normalized:
-            reason = normalized.split(":", 1)[-1].strip() or "脚本输出明确错误"
-        elif normalized.startswith("SEED_XDS510_WORKFLOW_FAILED:"):
-            reason = normalized.split(":", 1)[-1].strip() or "SEED XDS510Plus workflow failed"
-        else:
+        if not normalized:
             continue
+        ipecmd_raw = ""
+        if normalized.startswith("[IPECMD-RAW]"):
+            ipecmd_raw = normalized.removeprefix("[IPECMD-RAW]").strip()
+            if not ipecmd_raw:
+                continue
+            if re.search(r"地址\s*[0-9A-Fa-fx]+\s+期望数值.+收到数值", ipecmd_raw):
+                reason = f"MPLAB 写入校验失败：{ipecmd_raw}"
+            elif "受保护的引导和安全存储器" in ipecmd_raw:
+                reason = (
+                    "MPLAB 编程失败：当前固件试图修改受保护的引导/安全存储器；"
+                    "请检查调试工具安全段设置或改用不包含这些受保护区域的固件。"
+                )
+            elif "编程器件失败" in ipecmd_raw or "Programming Target Failed" in ipecmd_raw:
+                if any(existing.startswith("MPLAB ") for existing in reasons):
+                    continue
+                reason = "MPLAB 编程失败：目标器件未能正确写入。"
+            elif "Could not" in ipecmd_raw or "Unable" in ipecmd_raw or "Error" in ipecmd_raw:
+                reason = ipecmd_raw
+            else:
+                continue
+        else:
+            quartus_match = re.match(r"Error\s+\((\d+)\):\s*(.+)", normalized, re.IGNORECASE)
+            if (
+                "不是内部或外部命令" in normalized
+                or "is not recognized as an internal or external command" in normalized.lower()
+                or "unexpected at this time" in normalized.lower()
+            ):
+                reason = normalized
+                if index + 1 < len(lines):
+                    continuation = lines[index + 1].strip()
+                    if continuation in {"或批处理文件。", "operable program or batch file."}:
+                        reason = f"{reason} {continuation}"
+            elif (
+                "Unable to read device chain" in normalized
+                or "JTAG chain broken" in normalized
+                or "No JTAG devices available" in normalized
+            ):
+                reason = normalized
+            elif quartus_match:
+                reason = normalized
+            # Tool agents return structured JSON. Do not expose its serialized
+            # representation (including literal ``\\uXXXX`` escapes) as the task
+            # failure reason; show the decoded, user-facing error instead.
+            elif normalized.startswith("{") and normalized.endswith("}"):
+                try:
+                    payload = json.loads(normalized)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict) and payload.get("ok") is False:
+                    reason = str(payload.get("error") or "烧录工具执行失败").strip()
+                else:
+                    reason = ""
+            elif normalized.startswith("[ERROR]"):
+                reason = normalized.removeprefix("[ERROR]").strip() or "脚本输出明确错误"
+            elif "__PCIDS_" in normalized and "_ERROR__" in normalized:
+                reason = normalized.split(":", 1)[-1].strip() or "脚本输出明确错误"
+            elif normalized.startswith("SEED_XDS510_WORKFLOW_FAILED:"):
+                reason = normalized.split(":", 1)[-1].strip() or "SEED XDS510Plus workflow failed"
+            else:
+                continue
+        reason = normalize_text(reason)
         if not reason:
             continue
         if reason not in reasons:
@@ -475,7 +607,7 @@ def _command_failure_reason(stdout: str, stderr: str, fallback: str) -> str:
     for output in (stderr, stdout):
         lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
         if lines:
-            detail = lines[-1]
+            detail = normalize_text(lines[-1])
             if len(detail) > 300:
                 detail = detail[:297] + "..."
             return f"{fallback}：{detail}"
@@ -4859,9 +4991,12 @@ async def _execute_script_content_locally(
 
     normalized_type = _normalize_script_type(script_type)
     script_ext = _get_script_extension(normalized_type)
+    output_decoder = _resolve_subprocess_output_decoder(script_name)
 
     temp_script_path = ""
     environment_log = ""
+    script_started = False
+    script_succeeded = False
     try:
         try:
             environment_log = await asyncio.to_thread(ensure_burner_environment, script_name, env)
@@ -4905,9 +5040,27 @@ async def _execute_script_content_locally(
         # parser even for an SRAM task that never executes the Flash block.
         # Keep command structure and runtime values intact while making the
         # generated AL321 batch source ASCII-only for cmd.exe.
-        if normalized_type == "bat" and script_name in {"al321_fpga_mcu_flash", "gowin_usb_cable_fpga_flash"}:
-            batch_burner_label = "AL321" if script_name == "al321_fpga_mcu_flash" else "Gowin"
-            al321_log_replacements = {
+        if normalized_type == "bat" and script_name in {
+            "al321_fpga_mcu_flash",
+            "gowin_usb_cable_fpga_flash",
+            "pwlink_v2_arm_mcu_flash",
+            "hdsc_ccid_arm_mcu_flash",
+            "altera_blaster_ii_fpga_flash",
+            "altera_blaster_ii_cpld_flash",
+            "xds510plus_dsp_flash",
+            "mplab_icd3_pic_flash",
+        }:
+            batch_burner_label = {
+                "al321_fpga_mcu_flash": "AL321",
+                "gowin_usb_cable_fpga_flash": "Gowin",
+                "pwlink_v2_arm_mcu_flash": "PWLINK2",
+                "hdsc_ccid_arm_mcu_flash": "HDSC CCID",
+                "altera_blaster_ii_fpga_flash": "Altera Blaster II",
+                "altera_blaster_ii_cpld_flash": "Altera Blaster II",
+                "xds510plus_dsp_flash": "SEED XDS510Plus",
+                "mplab_icd3_pic_flash": "MPLAB ICD3",
+            }.get(script_name, "PCIDS")
+            batch_log_replacements = {
                 "echo [ERROR] 检测到 !AL321_DEVICE_COUNT! 个 AL321 设备但未配置 BURNER_SN，禁止猜测。": (
                     "echo [ERROR] Found !AL321_DEVICE_COUNT! AL321-compatible devices without BURNER_SN; refusing to guess."
                 ),
@@ -4936,7 +5089,132 @@ async def _execute_script_content_locally(
                     "echo [ERROR] No target FPGA was found; check target power, JTAG wiring, boot-mode switches, and download mode."
                 ),
             }
-            for source_text, replacement_text in al321_log_replacements.items():
+            if script_name == "pwlink_v2_arm_mcu_flash":
+                batch_log_replacements.update(
+                    {
+                        "echo [ERROR] 未提供固件路径，请检查任务配置中的 FIRMWARE_PATH。": (
+                            "echo [ERROR] Missing FIRMWARE_PATH. Check the task configuration."
+                        ),
+                        "echo [ERROR] 固件文件不存在: %FIRMWARE_PATH%": (
+                            "echo [ERROR] Firmware file not found: %FIRMWARE_PATH%"
+                        ),
+                        "echo [ERROR] 未配置 TARGET_CHIP，禁止猜测目标芯片。": (
+                            "echo [ERROR] TARGET_CHIP is required."
+                        ),
+                        "echo [ERROR] 未配置 BURNER_SN，禁止自动选择烧录器。": (
+                            "echo [ERROR] BURNER_SN is required."
+                        ),
+                        "echo [ERROR] .bin 固件必须提供 START_ADDRESS。": (
+                            "echo [ERROR] START_ADDRESS is required for .bin firmware."
+                        ),
+                        "echo [ERROR] pyOCD 安全预检失败，禁止进入擦除或写入。": (
+                            "echo [ERROR] pyOCD preflight failed; refusing erase/program."
+                        ),
+                        "echo [ERROR] pyOCD 安全预检输出解析失败，禁止进入擦除或写入。": (
+                            "echo [ERROR] pyOCD preflight output could not be parsed."
+                        ),
+                        "echo [ERROR] 不支持的 pyOCD target: %TARGET_CHIP%": (
+                            "echo [ERROR] Unsupported pyOCD target: %TARGET_CHIP%"
+                        ),
+                        "echo [ERROR] 未发现指定 probe: BURNER_SN=%BURNER_SN%": (
+                            "echo [ERROR] Probe not found: BURNER_SN=%BURNER_SN%"
+                        ),
+                        "echo [ERROR] BURNER_SN=%BURNER_SN% 在 pyOCD probe JSON 中的 unique_id 精确匹配数量为 !PYOCD_PROBE_MATCH_COUNT!，已拒绝执行。": (
+                            "echo [ERROR] BURNER_SN=%BURNER_SN% matched !PYOCD_PROBE_MATCH_COUNT! probes; refusing to continue."
+                        ),
+                        "echo [INFO] 已完成 pyOCD 只读预检：target Python API 校验和 probe unique_id 精确匹配均通过。": (
+                            "echo [INFO] pyOCD read-only preflight passed."
+                        ),
+                    }
+                )
+            if script_name == "hdsc_ccid_arm_mcu_flash":
+                batch_log_replacements.update(
+                    {
+                        "echo [ERROR] 未提供固件路径，请检查任务配置中的 FIRMWARE_PATH。": (
+                            "echo [ERROR] Missing FIRMWARE_PATH. Check the task configuration."
+                        ),
+                        "echo [ERROR] 固件文件不存在: %FIRMWARE_PATH%": (
+                            "echo [ERROR] Firmware file not found: %FIRMWARE_PATH%"
+                        ),
+                        "echo [WARN] 旧任务将 HC32L130 标记为 SWD；已按 V6.04 L006 算法自动改用 UART/ISP。": (
+                            "echo [WARN] Legacy HC32L130 task requested SWD; switched to UART/ISP for V6.04 L006."
+                        ),
+                        "echo [ERROR] HDSC CCID V6.04 L006 为 HC32L130 使用 UART/ISP：RXD=PA9、TXD=PA10、BOOT=BOOT。": (
+                            "echo [ERROR] HC32L130 with HDSC CCID V6.04 L006 must use UART/ISP."
+                        ),
+                        "echo [ERROR] 当前任务接口为 %INTERFACE_TYPE%，请将任务接口改为 UART 后重试。": (
+                            "echo [ERROR] Set INTERFACE_TYPE to UART and retry."
+                        ),
+                        "echo [ERROR] HDSC CCID 烧录需要 TARGET_CHIP。": (
+                            "echo [ERROR] TARGET_CHIP is required for HDSC CCID."
+                        ),
+                        "echo [ERROR] 未找到内置 HDSC CCID agent: %HDSC_CCID_AGENT%": (
+                            "echo [ERROR] HDSC CCID agent not found: %HDSC_CCID_AGENT%"
+                        ),
+                        "echo [ERROR] 请检查 PCIDS_BUNDLED_TOOLS_DIR，或设置 HDSC_CCID_AGENT。": (
+                            "echo [ERROR] Check PCIDS_BUNDLED_TOOLS_DIR or set HDSC_CCID_AGENT."
+                        ),
+                    }
+                )
+            if script_name == "xds510plus_dsp_flash":
+                batch_log_replacements.update(
+                    {
+                        "echo [ERROR] 未提供固件路径，请检查任务配置中的 FIRMWARE_PATH。": (
+                            "echo [ERROR] Missing FIRMWARE_PATH. Check the task configuration."
+                        ),
+                        "echo [ERROR] 固件文件不存在: %FIRMWARE_PATH%": (
+                            "echo [ERROR] Firmware file not found: %FIRMWARE_PATH%"
+                        ),
+                        "echo [ERROR] XDS510plus 烧录需要目标配置文件 .ccxml，请填写 TARGET_CONFIG_FILE。": (
+                            "echo [ERROR] TARGET_CONFIG_FILE with ccxml is required for XDS510plus."
+                        ),
+                        "echo [ERROR] XDS510plus 目标配置文件不存在: %TARGET_CONFIG_FILE%": (
+                            "echo [ERROR] XDS510plus target config file not found: %TARGET_CONFIG_FILE%"
+                        ),
+                        "echo [ERROR] 目标配置不是 SEED XDS510Plus 配置: %TARGET_CONFIG_FILE%": (
+                            "echo [ERROR] TARGET_CONFIG_FILE is not a SEED XDS510Plus config: %TARGET_CONFIG_FILE%"
+                        ),
+                        "echo [ERROR] 目标配置未使用 SEED C28x 驱动: %TARGET_CONFIG_FILE%": (
+                            "echo [ERROR] TARGET_CONFIG_FILE does not use the SEED C28x driver: %TARGET_CONFIG_FILE%"
+                        ),
+                        "echo [ERROR] 未找到 CCS DSS 启动器 DSS_BAT。": (
+                            "echo [ERROR] DSS_BAT was not found."
+                        ),
+                        "echo [ERROR] 请安装包含 SEED XDS510Plus 插件的 Code Composer Studio 5.5。": (
+                            "echo [ERROR] Install Code Composer Studio 5.5 with the SEED XDS510Plus plugin."
+                        ),
+                        "echo [ERROR] CCS DSS 启动器不存在: %DSS_BAT%": (
+                            "echo [ERROR] DSS launcher not found: %DSS_BAT%"
+                        ),
+                        "echo [ERROR] CCS 5.5 Legacy UniFlash not found: %XDS510_UNIFLASH%": (
+                            "echo [ERROR] CCS 5.5 Legacy UniFlash not found: %XDS510_UNIFLASH%"
+                        ),
+                    }
+                )
+            if script_name == "mplab_icd3_pic_flash":
+                batch_log_replacements.update(
+                    {
+                        "echo [ERROR] 未提供固件路径，请检查任务配置中的 FIRMWARE_PATH。": (
+                            "echo [ERROR] Missing FIRMWARE_PATH. Check the task configuration."
+                        ),
+                        "echo [ERROR] 固件文件不存在: %FIRMWARE_PATH%": (
+                            "echo [ERROR] Firmware file not found: %FIRMWARE_PATH%"
+                        ),
+                        "echo [ERROR] 未找到 MPLAB IPE ipecmd.exe，请安装 MPLAB X IPE 后配置 IPECMD_EXE。": (
+                            "echo [ERROR] MPLAB IPE ipecmd.exe was not found. Install MPLAB X IPE or set IPECMD_EXE."
+                        ),
+                        "echo [INFO] Using MPLAB bundled Java: %MPLAB_JAVA_BIN%": (
+                            "echo [INFO] Using MPLAB bundled Java: %MPLAB_JAVA_BIN%"
+                        ),
+                        "echo [ERROR] MPLAB ICD3 烧录需要 TARGET_CHIP。": (
+                            "echo [ERROR] TARGET_CHIP is required for MPLAB ICD3."
+                        ),
+                        "echo [INFO] 已按配置跳过编程步骤。": (
+                            "echo [INFO] Programming step was skipped by configuration."
+                        ),
+                    }
+                )
+            for source_text, replacement_text in batch_log_replacements.items():
                 content_to_write = content_to_write.replace(source_text, replacement_text)
             ascii_lines: list[str] = []
             for line in content_to_write.splitlines(keepends=True):
@@ -4952,15 +5230,50 @@ async def _execute_script_content_locally(
                 ascii_lines.append(line)
             content_to_write = "".join(ascii_lines)
             content_to_write = content_to_write.encode("ascii", errors="replace").decode("ascii")
-        script_encoding = locale.getpreferredencoding(False) if normalized_type == "bat" and os.name == "nt" else "utf-8"
-        with tempfile.NamedTemporaryFile(suffix=script_ext, delete=False, mode="w", encoding=script_encoding, newline="") as temp_script:
+        use_windows_batch_compat = (
+            normalized_type == "bat"
+            and os.name == "nt"
+            and str(script_name or "").strip().lower() in WINDOWS_BATCH_COMPAT_SCRIPT_NAMES
+        )
+        use_utf8_custom_batch = (
+            normalized_type == "bat"
+            and os.name == "nt"
+            and str(script_name or "").strip().lower().endswith((".bat", ".cmd"))
+        )
+        if use_windows_batch_compat:
+            # A frozen Python process can report UTF-8 as its preferred
+            # encoding even while cmd.exe still reads batch files through the
+            # active Windows ANSI code page.  ``mbcs`` always follows that
+            # actual code page.  CRLF also avoids cmd.exe's inconsistent
+            # parsing of LF-only files on older Windows images.
+            script_encoding = "mbcs"
+            content_to_write = content_to_write.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+        elif use_utf8_custom_batch:
+            # User-authored batch files are Unicode content. Keep this path
+            # separate from all built-in burner scripts, whose symbolic names
+            # do not end in .bat/.cmd and retain their established encoding.
+            script_encoding = "utf-8-sig"
+            content_to_write = content_to_write.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+            content_to_write = "@chcp 65001 >nul\r\n" + content_to_write
+        else:
+            script_encoding = locale.getpreferredencoding(False) if normalized_type == "bat" and os.name == "nt" else "utf-8"
+        temp_file_kwargs = {"errors": "replace", "newline": ""} if use_windows_batch_compat else (
+            {"newline": ""} if use_utf8_custom_batch else {}
+        )
+        with tempfile.NamedTemporaryFile(
+            suffix=script_ext,
+            delete=False,
+            mode="w",
+            encoding=script_encoding,
+            **temp_file_kwargs,
+        ) as temp_script:
             temp_script.write(content_to_write)
             temp_script_path = temp_script.name
 
         st = os.stat(temp_script_path)
         os.chmod(temp_script_path, st.st_mode | stat.S_IEXEC)
 
-        cmd = _build_script_exec_command(normalized_type, temp_script_path)
+        cmd = _build_script_exec_command(normalized_type, temp_script_path, script_name)
         logger.info(
             "task.script.local_start | %s",
             json.dumps(
@@ -4974,6 +5287,7 @@ async def _execute_script_content_locally(
                 ensure_ascii=False,
             ),
         )
+        script_started = True
         ok, stdout, stderr, failure_reason = await _run_subprocess_command(
             cmd,
             timeout_seconds=timeout_seconds,
@@ -4983,7 +5297,9 @@ async def _execute_script_content_locally(
             stage_name="local-script",
             output_callback=output_callback,
             stream_output=not (normalized_type == "bat" and output_callback is None),
+            output_decoder=output_decoder,
         )
+        script_succeeded = ok
         if environment_log:
             stdout = f"{environment_log}\n\n{stdout or ''}"
         exit_code: Optional[int] = 0 if ok else None
@@ -5035,7 +5351,9 @@ async def _execute_script_content_locally(
         return False, log_text, _command_failure_reason(stdout, stderr, failure_reason or "脚本执行失败")
     finally:
         try:
-            restore_log = await asyncio.to_thread(restore_burner_environment, script_name, env)
+            restore_log = ""
+            if _should_restore_burner_environment(script_name, env, script_succeeded, script_started):
+                restore_log = await asyncio.to_thread(restore_burner_environment, script_name, env)
             if restore_log:
                 logger.info(
                     "task.burner_environment.restored | %s",
@@ -6013,6 +6331,8 @@ async def simulate_burning_process(
         for attempt in range(retries + 1):
             _ensure_task_not_terminated(db, task.id)
             task.attempt_count = attempt + 1
+            execution_plan.runtime_env["PCIDS_ATTEMPT_INDEX"] = str(task.attempt_count)
+            execution_plan.runtime_env["PCIDS_FINAL_ATTEMPT"] = "1" if attempt >= retries else "0"
             task.status = int(TaskStatus.RUNNING)
             task.progress_percent = 20
             logger.info(
@@ -7292,6 +7612,10 @@ async def create_task(
                 config=task_config,
             )
         except HTTPException:
+            # An auto-start task is not a draft.  If its artifact cannot be
+            # prepared (for example an SSH/SFTP transfer fails), do not leave
+            # an unexecutable pending task in the task list.
+            db.delete(task)
             db.commit()
             raise
         if not repo or not repo.file_url:

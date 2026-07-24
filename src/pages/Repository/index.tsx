@@ -1154,14 +1154,22 @@ const Repository: React.FC = () => {
           }
           persistCodeartsFormDraft(values)
           await repositoryApi.setCodeartsConfig(payload)
-          // Configuration never starts a browser/session sync.  The explicit toolbar
-          // action is the only path that may synchronize a CodeArts page repository.
-          const res: any = { code: 0, data: { synced_count: 0, skipped_count: 0 } }
-          if (res?.code === 0) {
-            const syncedCount = Number(res?.data?.synced_count || 0)
-            const skippedCount = Number(res?.data?.skipped_count || 0)
-            const successText = `同步成功，已落地 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`
-            message.success(successText)
+          // A newly created project must be immediately usable.  Save the
+          // connection first, then perform the same full CodeArts sync as the
+          // toolbar action.  Do not close the dialog on a failed sync so the
+          // user can correct the configuration and retry.
+          const syncResult: any = await repositoryApi.syncCodeartsProject({
+            project_id: payload.project_id,
+            full_refresh: true,
+          })
+          if (syncResult?.code !== 0) {
+            throw new Error(String(syncResult?.message || syncResult?.detail || 'CodeArts 同步失败'))
+          }
+
+          if (payload.project_id) {
+            const syncedCount = Number(syncResult?.data?.synced_count || 0)
+            const skippedCount = Number(syncResult?.data?.skipped_count || 0)
+            message.success(`项目创建并同步成功，已拉取 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`)
             setCreateProjectError('')
             setIsCreateProjectOpen(false)
             setConfigurationModeOverride(null)

@@ -119,3 +119,11 @@ tools/burners/GOWIN/drivers/*
 tools/burners/HDSC/*
 !tools/burners/HDSC/hdsc_ccid_agent.py
 !tools/burners/HDSC/hdsc_v604_host.ps1
+!tools/burners/ST-LINK/
+tools/burners/ST-LINK/*
+!tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6/
+tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6/*
+!tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6/ST-LINK_CLI.exe
+!tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6/STLinkUSBDriver.dll
+!tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6/FlashLoader/
+!tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6/FlashLoader/*.stldr

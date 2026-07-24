@@ -7,6 +7,18 @@ from backend.utils.burner_automation import build_system_script_content
 
 
 class DatabaseInitializationSyncTests(unittest.TestCase):
+    def test_stlink_initialization_uses_utility_supported_frequency_defaults(self):
+        by_name = {item["name"]: item for item in db_utils.DEFAULT_SYSTEM_SCRIPT_CATALOG}
+        config = by_name["stlink_stm32_mcu_flash"]["default_config"]
+
+        self.assertEqual(config["write_speed_khz"], 900)
+        self.assertEqual(config["speed_options"], [125, 240, 480, 900, 1800, 4000])
+
+    def test_al321_and_xds_defaults_use_timeout_seconds_for_ui_consistency(self):
+        by_name = {item["name"]: item for item in db_utils.DEFAULT_SYSTEM_SCRIPT_CATALOG}
+        self.assertEqual(by_name["al321_fpga_mcu_flash"]["default_config"]["timeout_seconds"], 600)
+        self.assertEqual(by_name["xds510plus_dsp_flash"]["default_config"]["timeout_seconds"], 600)
+
     def test_initialization_uses_the_normal_hdsc_script_generator(self):
         script_name = "hdsc_ccid_arm_mcu_flash"
         self.assertEqual(

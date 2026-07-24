@@ -44,10 +44,16 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
         self.assertEqual(item["name"], "pwlink_v2_arm_mcu_flash")
         self.assertEqual(config["erase_mode"], "全片擦除")
         self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["ERASE_MODE"]["全片擦除"], "chip")
+        self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["ERASE_MODE"]["不擦除直接编程"], "no-erase")
         self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["COMPLETION_ACTION"]["复位运行"], "reset-run")
+        self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["COMPLETION_ACTION"]["编程复位后运行"], "reset-run")
+        self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["EEPROM_WRITE"]["否"], "no")
+        self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["BLANK_CHECK"]["是"], "yes")
+        self.assertEqual(_CODEARTS_RUNTIME_ENV_ALIASES["EXECUTE_PROGRAM"]["否"], "no")
 
     def test_xds510plus_uses_deployed_default_ccxml_when_pipeline_leaves_it_empty(self):
         item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "xds510plus_dsp_flash")
+        self.assertEqual(item["default_config"]["timeout_seconds"], 600)
         with tempfile.TemporaryDirectory() as temp_dir:
             tools_root = Path(temp_dir) / "tools" / "burners"
             ccxml = tools_root / "XDS510plus" / "targets" / "seed_xds510plus_f28335.ccxml"

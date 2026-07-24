@@ -86,6 +86,15 @@
         "to": "tools/burners/HDSC"
       },
       {
+        "from": "tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6",
+        "to": "tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6",
+        "filter": [
+          "ST-LINK_CLI.exe",
+          "STLinkUSBDriver.dll",
+          "FlashLoader/*.stldr"
+        ]
+      },
+      {
         "from": "tools/burners/GOWIN",
         "to": "tools/burners/GOWIN",
         "filter": [

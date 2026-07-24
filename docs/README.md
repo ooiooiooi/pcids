@@ -4,7 +4,7 @@
 
 ## 交付资料
 
-- `delivery/burner-environment-delivery.md`：烧录环境、驱动、离线包和现场验收清单。
+- `delivery/burner-environment-delivery.md`：新工作站一次性部署、全部烧录/通信环境、故障预防与现场验收手册。
 - `delivery/burner-tool-os-support.xlsx`：烧录工具与系统支持表。
 - `delivery/程控安装部署系统报价单.xlsx`：报价与商务资料。
 
@@ -32,4 +32,3 @@
 ## 归档资料
 
 - `archive/`：已被新文档替代、但仍可能有历史参考价值的资料。
-

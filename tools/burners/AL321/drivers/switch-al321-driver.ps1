@@ -699,7 +699,18 @@ function Invoke-EnsureWinUsb([string]$ExpectedSerial) {
 
   $winUsbInfPath = Resolve-WinUsbInfPath
   Write-Host "[INFO] Switching AL321 to WinUSB: instance=$($device.InstanceId)"
-  Invoke-DriverUpdate $winUsbInfPath $device.InstanceId $hardwareId -AllowSharedFtdiWinUsb:((Get-DeviceCategory $hardwareId) -eq "ftdi")
+  # A standalone FTDI AL321 is valid. The stricter shared-device guard is
+  # only appropriate when exactly one recognized Gowin FT2CH peer is also
+  # present; applying it unconditionally blocked every single-cable SRAM task.
+  $allowSharedFtdiWinUsb = $false
+  if ((Get-DeviceCategory $hardwareId) -eq "ftdi") {
+    $compatibleDevices = @(Get-PresentCompatibleDevices $hardwareId)
+    if ($compatibleDevices.Count -eq 2) {
+      Assert-SharedFtdiWinUsbPair $hardwareId $device.InstanceId | Out-Null
+      $allowSharedFtdiWinUsb = $true
+    }
+  }
+  Invoke-DriverUpdate $winUsbInfPath $device.InstanceId $hardwareId -AllowSharedFtdiWinUsb:$allowSharedFtdiWinUsb
   Restart-And-ValidateDevice $device.InstanceId | Out-Null
   $after = Get-DriverMetadata $device.InstanceId
   if ($after.Service -ne "WinUSB") {
@@ -829,8 +840,13 @@ try {
 
   $state = Load-State
   if ($state) {
-    Write-Host "[WARN] Detected pending AL321 driver recovery state; restoring the recorded original driver before ensuring AMD mode."
-    Invoke-RestoreFromState $state | Out-Null
+    $recordedState = ConvertTo-StringOrEmpty $state.State
+    if ($recordedState -eq "pending_restore") {
+      Write-Host "[WARN] Detected pending AL321 driver recovery state; restoring the recorded original driver before ensuring AMD mode."
+      Invoke-RestoreFromState $state | Out-Null
+    } elseif ($recordedState -eq "amd_active") {
+      Write-Host "[INFO] Existing AL321 state already records amd_active; preserving it while ensuring AMD mode."
+    }
   }
 
   $device = Get-ExactDeviceBySerial $Serial

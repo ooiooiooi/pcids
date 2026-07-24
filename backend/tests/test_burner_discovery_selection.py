@@ -1,5 +1,9 @@
 import asyncio
+import os
+import socket
+import tempfile
 import threading
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -11,6 +15,7 @@ from backend.routers.burners import (
     _compute_burner_cached_status,
     _discover_lan_agent_urls,
     _discover_scan_nodes,
+    _get_lan_agent_scan_networks,
     _normalize_agent_url,
     _probe_stlink_serials,
     _refresh_registered_burner_statuses,
@@ -325,6 +330,43 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
 
         self.assertEqual(urls, ["http://192.168.50.2:8000"])
 
+    @patch.dict("os.environ", {"PCIDS_AGENT_DISCOVERY_CIDRS": ""}, clear=False)
+    @patch("backend.routers.burners.psutil")
+    def test_lan_discovery_uses_active_physical_networks_without_override(self, psutil_mock):
+        psutil_mock.net_if_stats.return_value = {
+            "Ethernet": SimpleNamespace(isup=True),
+            "VMware Network Adapter VMnet8": SimpleNamespace(isup=True),
+            "Disconnected Wi-Fi": SimpleNamespace(isup=False),
+        }
+        psutil_mock.net_if_addrs.return_value = {
+            "Ethernet": [SimpleNamespace(family=socket.AF_INET, address="192.168.1.100", netmask="255.255.255.0")],
+            "VMware Network Adapter VMnet8": [SimpleNamespace(family=socket.AF_INET, address="192.168.182.1", netmask="255.255.255.0")],
+            "Disconnected Wi-Fi": [SimpleNamespace(family=socket.AF_INET, address="10.0.0.2", netmask="255.255.255.0")],
+        }
+        with patch("backend.routers.burners.os.environ.get", return_value=""):
+            networks = _get_lan_agent_scan_networks()
+
+        self.assertEqual(
+            {str(network) for network in networks},
+            {"192.168.1.0/24"},
+        )
+
+    def test_lan_discovery_uses_external_yaml_configuration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "agent-discovery.yaml"
+            config_path.write_text("discovery_cidrs:\n  - 192.168.1.0/24\n  - 10.20.30.0/24\nport: 8000\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "PCIDS_AGENT_DISCOVERY_CONFIG": str(config_path),
+                    "PCIDS_AGENT_DISCOVERY_CIDRS": "",
+                },
+                clear=False,
+            ):
+                networks = _get_lan_agent_scan_networks()
+
+        self.assertEqual({str(network) for network in networks}, {"192.168.1.0/24", "10.20.30.0/24"})
+
     def test_discovery_refreshes_registered_online_and_offline_statuses(self):
         online = self.burners[0]
         offline = self.burners[1]
@@ -434,13 +476,19 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
     @patch("backend.routers.burners.subprocess.run")
     def test_stlink_official_cli_serial_is_parsed_for_old_firmware(self, run_mock, _isfile_mock):
         run_mock.return_value = SimpleNamespace(
-            stdout=b"Error: Old ST-LINK firmware version\nST-LINK SN  : 51FF6F067182525607321487\n",
+            stdout=b"ST-LINK Probe 0:\n     SN: 51FF6F067182525607321487\n     FW: V2J27S6\n",
             stderr=b"",
         )
-        with patch.dict("backend.routers.burners.os.environ", {"STM32_PROGRAMMER_CLI": "STM32_Programmer_CLI.exe"}):
+        with patch.dict("backend.routers.burners.os.environ", {"STLINK_UTILITY_CLI": "ST-LINK_CLI.exe"}):
             serials = _probe_stlink_serials(cache_ttl_seconds=0)
 
         self.assertEqual(serials, ["51FF6F067182525607321487"])
+        run_mock.assert_called_once_with(
+            ["ST-LINK_CLI.exe", "-List"],
+            capture_output=True,
+            timeout=12,
+            check=False,
+        )
 
 
 class BurnerDiscoveryAsyncOffloadTests(unittest.IsolatedAsyncioTestCase):

@@ -14,7 +14,7 @@ from backend.models.repository import Repository
 from backend.models.script import Script
 from backend.models.task import BurningTask
 from backend.utils.runtime_dependencies import configure_bundled_tools, get_bundled_tools_dir, refresh_bundled_tools
-from backend.utils.text_normalization import normalize_text_payload
+from backend.utils.text_normalization import normalize_text, normalize_text_payload
 
 
 LEGACY_CONFIG_KEY_ALIASES: dict[str, tuple[str, ...]] = {
@@ -79,10 +79,56 @@ STRICT_SWD_SCRIPT_NAMES = {
     "pwlink_v2_arm_mcu_flash",
     "swd_downloader_arm_mcu_flash",
 }
+AL321_USB_INSTANCE_PATTERN = re.compile(r"^(USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4})\\([^\\]+)$", re.IGNORECASE)
+AL321_STABLE_USB_SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+AL321_LOCATION_DERIVED_SUFFIX_PATTERN = re.compile(r"^[0-9A-Fa-f]+(?:&[0-9A-Fa-f]+){2,}$")
+MPLAB_USB_INSTANCE_PATTERN = re.compile(r"^USB\\VID_04D8&PID_9009\\([^\\]+)$", re.IGNORECASE)
 
 STRICT_TARGET_CHIP_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 STRICT_BURNER_SN_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 CMD_UNSAFE_VALUE_PATTERN = re.compile(r'[\r\n"&|<>^%!()`\']')
+
+
+def _burner_usb_binding(burner: Optional[Burner]) -> dict[str, str]:
+    if burner is None:
+        return {}
+    try:
+        config = json.loads(getattr(burner, "config_json", None) or "{}") or {}
+    except Exception:
+        return {}
+    raw_binding = config.get("usb_binding")
+    if not isinstance(raw_binding, dict):
+        return {}
+    return {
+        str(key): str(value).strip()
+        for key, value in raw_binding.items()
+        if str(value or "").strip()
+    }
+
+
+def _derive_usb_instance_id_from_binding(
+    burner: Optional[Burner],
+    pattern: re.Pattern[str],
+) -> str:
+    candidates = [
+        getattr(burner, "location", None) if burner is not None else None,
+        getattr(burner, "port", None) if burner is not None else None,
+    ]
+    binding = _burner_usb_binding(burner)
+    candidates.extend(
+        [
+            binding.get("pnp_device_id"),
+            binding.get("location_path"),
+            binding.get("location_info"),
+        ]
+    )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text == "-":
+            continue
+        if text and pattern.match(text):
+            return text
+    return ""
 
 
 @dataclass
@@ -355,6 +401,121 @@ def _validate_strict_swd_runtime_requirements(
     )
 
 
+def _derive_al321_serial_from_binding(
+    burner: Optional[Burner],
+    normalized_config: Optional[dict[str, Any]] = None,
+    script: Optional[Script] = None,
+) -> str:
+    """Recover the stable AL321 hardware serial from a USB InstanceId when safe.
+
+    Some AL321 devices are persisted with a USB InstanceId such as
+    ``USB\\VID_0403&PID_6014\\210512180081`` while ``burner.sn`` is still empty.
+    The driver-switch helper needs the stable serial suffix, but we must not
+    infer Windows-assigned location-derived suffixes like ``7&16B090BC&0&2``.
+    """
+    burner_type = str(getattr(burner, "type", None) or "").strip().lower()
+    script_name = str(getattr(script, "name", None) or "").strip().lower()
+    is_al321 = burner_type == "al321" or script_name == "al321_fpga_mcu_flash"
+    # SRAM downloads do not switch the FTDI driver, but still need the stable
+    # serial for openFPGALoader to select the correct FT232.  A previously
+    # persisted USB InstanceId is the only durable source on some Windows
+    # installations, where SetupAPI leaves serial_num empty.
+    if not is_al321:
+        return ""
+
+    burner_sn = str(getattr(burner, "sn", None) or "").strip()
+    if burner_sn:
+        return burner_sn
+
+    location = _derive_usb_instance_id_from_binding(burner, AL321_USB_INSTANCE_PATTERN)
+    match = AL321_USB_INSTANCE_PATTERN.match(location)
+    if not match:
+        return ""
+
+    serial_suffix = str(match.group(2) or "").strip()
+    if not serial_suffix:
+        return ""
+    if AL321_LOCATION_DERIVED_SUFFIX_PATTERN.match(serial_suffix):
+        return ""
+    if not AL321_STABLE_USB_SERIAL_PATTERN.match(serial_suffix):
+        return ""
+    return serial_suffix
+
+
+def _derive_al321_location_from_binding(
+    burner: Optional[Burner],
+    normalized_config: Optional[dict[str, Any]] = None,
+    script: Optional[Script] = None,
+) -> str:
+    burner_type = str(getattr(burner, "type", None) or "").strip().lower()
+    script_name = str(getattr(script, "name", None) or "").strip().lower()
+    is_al321 = burner_type == "al321" or script_name == "al321_fpga_mcu_flash"
+    if not is_al321:
+        return ""
+
+    location = str(getattr(burner, "location", None) or "").strip()
+    if AL321_USB_INSTANCE_PATTERN.match(location):
+        return location
+    return _derive_usb_instance_id_from_binding(burner, AL321_USB_INSTANCE_PATTERN)
+
+
+def _derive_mplab_serial_from_binding(
+    burner: Optional[Burner],
+    script: Optional[Script] = None,
+) -> str:
+    """Recover the MPLAB ICD3 stable serial from its USB InstanceId when safe."""
+    script_name = str(getattr(script, "name", None) or "").strip().lower()
+    burner_type = str(getattr(burner, "type", None) or "").strip().lower()
+    is_mplab = script_name == "mplab_icd3_pic_flash" or burner_type == "mplab icd 3 dv164035"
+    if not is_mplab:
+        return ""
+
+    burner_sn = str(getattr(burner, "sn", None) or "").strip()
+    if burner_sn:
+        return burner_sn
+
+    location = _derive_usb_instance_id_from_binding(burner, MPLAB_USB_INSTANCE_PATTERN)
+    match = MPLAB_USB_INSTANCE_PATTERN.match(location)
+    if not match:
+        return ""
+
+    serial_suffix = str(match.group(1) or "").strip()
+    if not serial_suffix:
+        return ""
+    if not STRICT_BURNER_SN_PATTERN.match(serial_suffix):
+        return ""
+    return serial_suffix
+
+
+def _validate_al321_flash_runtime_requirements(
+    normalized: dict[str, Any],
+    script: Optional[Script],
+    burner: Optional[Burner],
+) -> None:
+    script_name = str(getattr(script, "name", None) or "").strip()
+    burner_type = str(getattr(burner, "type", None) or "").strip().lower()
+    if script_name != "al321_fpga_mcu_flash" and burner_type != "al321":
+        return
+
+    burner_sn = _derive_al321_serial_from_binding(burner, normalized, script)
+    if not burner_sn:
+        operation = str(normalized.get("execution_operation") or "").strip().lower()
+        operation_mode = str(normalized.get("execution_operation_mode") or "").strip().lower()
+        is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
+        if is_flash:
+            raise HTTPException(
+                status_code=400,
+                detail="AL321 Flash 固化必须绑定稳定的 BURNER_SN；当前仅检测到端口/位置标识，无法安全切换驱动。",
+            )
+        return
+    _validate_safe_shell_token(
+        burner_sn,
+        field_name="BURNER_SN",
+        pattern=STRICT_BURNER_SN_PATTERN,
+        allowed_hint="字母、数字、下划线、连字符",
+    )
+
+
 def is_script_field_required(
     field_key: str,
     default_config: Optional[dict[str, Any]],
@@ -489,6 +650,19 @@ def build_runtime_env(
 ) -> dict[str, str]:
     target_config_file = str(config.get("target_config_file") or "").strip()
     execution_operation = str(config.get("execution_operation") or "").strip()
+    erase_mode = str(config.get("erase_mode") or "").strip()
+    completion_action = str(config.get("completion_action") or "").strip()
+    normalized_completion_action = str(normalize_text(completion_action) or "").strip()
+    normalized_completion_action_key = normalized_completion_action.lower()
+    gowin_completion_action_mode = (
+        "reset"
+        if "\u590d\u4f4d" in normalized_completion_action
+        or normalized_completion_action_key in {"reset", "reset-run", "reprogram"}
+        else "none"
+    )
+    eeprom_write = str(config.get("eeprom_write") or "").strip()
+    blank_check = str(config.get("blank_check") or "").strip()
+    execute_program = str(config.get("execute_program") or "").strip()
     # Batch files run through cmd.exe's active code page.  Keep the user-facing
     # Chinese value for display, but provide vendor scripts an ASCII operation
     # token so their control flow never depends on console encoding.
@@ -499,6 +673,64 @@ def build_runtime_env(
             default_target_config = bundled_root / "XDS510plus" / "targets" / "seed_xds510plus_f28335.ccxml"
             if default_target_config.is_file():
                 target_config_file = str(default_target_config.resolve())
+    resolved_burner_sn = (
+        str(getattr(burner, "sn", None) or "").strip()
+        or _derive_al321_serial_from_binding(burner, config, script)
+        or _derive_mplab_serial_from_binding(burner, script)
+    )
+    raw_burner_location = str(getattr(burner, "location", None) or "").strip()
+    resolved_burner_location = (
+        ("" if raw_burner_location == "-" else raw_burner_location)
+        or _derive_al321_location_from_binding(burner, config, script)
+    )
+    hdsc_erase_mode_key = "none" if erase_mode in {"不擦除", "不擦除直接编程"} else ""
+    if not hdsc_erase_mode_key and erase_mode:
+        normalized_erase = erase_mode.strip().lower()
+        if normalized_erase in {"none", "no-erase"}:
+            hdsc_erase_mode_key = "none"
+        elif normalized_erase in {"chip", "all", "sector"}:
+            hdsc_erase_mode_key = normalized_erase
+    hdsc_completion_action_key = "none" if completion_action == "不处理" else ""
+    if not hdsc_completion_action_key and completion_action:
+        normalized_completion = completion_action.strip().lower()
+        if normalized_completion in {"none", "off"}:
+            hdsc_completion_action_key = "none"
+        elif normalized_completion in {"reset-run", "run", "reset"}:
+            hdsc_completion_action_key = normalized_completion
+    mplab_erase_mode_key = ""
+    if erase_mode == "全片擦除":
+        mplab_erase_mode_key = "chip"
+    elif erase_mode == "不擦除直接编程":
+        mplab_erase_mode_key = "no-erase"
+    elif erase_mode:
+        normalized_erase = erase_mode.strip().lower()
+        if normalized_erase in {"chip", "all"}:
+            mplab_erase_mode_key = "chip"
+        elif normalized_erase in {"none", "no-erase"}:
+            mplab_erase_mode_key = "no-erase"
+    mplab_completion_action_key = ""
+    if completion_action in {"编程复位后运行", "复位运行"}:
+        mplab_completion_action_key = "reset-run"
+    elif completion_action in {"编程后保持复位", "编程复位不运行", "不处理"}:
+        mplab_completion_action_key = "hold-reset"
+    elif completion_action:
+        normalized_completion = completion_action.strip().lower()
+        if normalized_completion in {"reset-run", "run", "reset"}:
+            mplab_completion_action_key = "reset-run"
+        elif normalized_completion in {"hold-reset", "halt", "none", "off"}:
+            mplab_completion_action_key = "hold-reset"
+
+    def _boolean_option_key(value: str) -> str:
+        normalized_value = value.strip().lower()
+        if value in {"是", "yes", "true", "1"} or normalized_value in {"yes", "true", "1"}:
+            return "yes"
+        if value in {"否", "no", "false", "0"} or normalized_value in {"no", "false", "0"}:
+            return "no"
+        return ""
+
+    mplab_eeprom_write_key = _boolean_option_key(eeprom_write)
+    mplab_blank_check_key = _boolean_option_key(blank_check)
+    mplab_execute_program_key = _boolean_option_key(execute_program)
     env = {
         "TASK_ID": str(task.id),
         "TASK_TYPE": get_task_type(task, config),
@@ -515,12 +747,12 @@ def build_runtime_env(
         "BURNER_ID": str(getattr(task, "burner_id", None) or ""),
         "BURNER_NAME": str(getattr(burner, "name", None) or ""),
         "BURNER_TYPE": str(getattr(burner, "type", None) or ""),
-        "BURNER_SN": str(getattr(burner, "sn", None) or ""),
+        "BURNER_SN": resolved_burner_sn,
         "BURNER_PORT": str(getattr(burner, "port", None) or ""),
-        "BURNER_LOCATION": str(getattr(burner, "location", None) or ""),
+        "BURNER_LOCATION": resolved_burner_location,
         "IDE_NAME": str(config.get("ide_name") or ""),
         "INTERFACE_TYPE": str(config.get("interface_type") or ""),
-        "ERASE_MODE": str(config.get("erase_mode") or ""),
+        "ERASE_MODE": erase_mode,
         "WRITE_SPEED_KHZ": str(config.get("write_speed_khz") or ""),
         "START_ADDRESS": str(config.get("start_address") or ""),
         "QSPI_FLASH_MODEL": str(config.get("qspi_flash_model") or ""),
@@ -529,7 +761,7 @@ def build_runtime_env(
         "GEL_INIT_SCRIPT": str(config.get("gel_init_script") or ""),
         "JTAG_CHAIN_INDEX": str(config.get("jtag_chain_index") or ""),
         "PROGRAM_VOLTAGE": str(config.get("program_voltage") or ""),
-        "EEPROM_WRITE": str(config.get("eeprom_write") or ""),
+        "EEPROM_WRITE": eeprom_write,
         "WRITE_CONFIG_BITS": str(config.get("write_config_bits") or ""),
         "EXECUTION_OPERATION": execution_operation,
         # ASCII-only operation token used by Windows batch control flow.  Keep
@@ -537,15 +769,27 @@ def build_runtime_env(
         "EXECUTION_OPERATION_MODE": execution_operation_mode,
         # Retained for existing generated Gowin scripts during upgrade.
         "GOWIN_OPERATION_MODE": execution_operation_mode,
+        "GOWIN_COMPLETION_ACTION_MODE": gowin_completion_action_mode,
         "BICHINA_BURN_MODE": str(config.get("bichina_burn_mode") or ""),
         "PRE_ERASE": str(config.get("pre_erase") or ""),
-        "BLANK_CHECK": str(config.get("blank_check") or ""),
-        "EXECUTE_PROGRAM": str(config.get("execute_program") or ""),
+        "BLANK_CHECK": blank_check,
+        "EXECUTE_PROGRAM": execute_program,
         "TCK_FREQUENCY": str(config.get("tck_frequency") or ""),
         "CABLE_INDEX": str(config.get("cable_index") or ""),
         "SD_TARGET_PATH": str(config.get("sd_target_path") or ""),
         "FORMAT_SD_CARD": str(config.get("format_sd_card") or ""),
-        "COMPLETION_ACTION": str(config.get("completion_action") or ""),
+        "COMPLETION_ACTION": completion_action,
+        # HDSC's batch runner needs ASCII-only control tokens so cmd.exe never
+        # depends on localized literals when it parses the full script.
+        "HDSC_ERASE_MODE_KEY": hdsc_erase_mode_key,
+        "HDSC_COMPLETION_ACTION_KEY": hdsc_completion_action_key,
+        # MPLAB's batch runner also uses ASCII-only aliases so its control
+        # flow stays stable even when localized option text is present.
+        "MPLAB_ERASE_MODE_KEY": mplab_erase_mode_key,
+        "MPLAB_COMPLETION_ACTION_KEY": mplab_completion_action_key,
+        "MPLAB_EEPROM_WRITE_KEY": mplab_eeprom_write_key,
+        "MPLAB_BLANK_CHECK_KEY": mplab_blank_check_key,
+        "MPLAB_EXECUTE_PROGRAM_KEY": mplab_execute_program_key,
         "WRITE_VERIFY": "1" if config.get("write_verify") else "0",
         "CONNECTION_PROTOCOL": str(config.get("connection_protocol") or ""),
         "AUTH_TYPE": str(config.get("auth_type") or ""),
@@ -609,6 +853,7 @@ def build_execution_plan(
         burner,
         artifact_name=used_file_path,
     )
+    _validate_al321_flash_runtime_requirements(normalized_config, script, burner)
     runtime_env = build_runtime_env(task, normalized_config, repo, burner, script, used_file_path)
     # 工具包可在服务启动后迁入项目目录；任务执行前必须重新发现一次。
     runtime_env.update(refresh_bundled_tools())

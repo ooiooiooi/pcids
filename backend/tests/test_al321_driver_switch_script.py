@@ -27,6 +27,13 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
         self.assertIn("AL321 driver already uses AMD/Digilent driver", self.content)
         self.assertIn("exit 0", self.content)
 
+    def test_amd_mode_restores_only_pending_recovery_state(self):
+        self.assertIn('$recordedState -eq "pending_restore"', self.content)
+        self.assertIn('Detected pending AL321 driver recovery state; restoring the recorded original driver before ensuring AMD mode.', self.content)
+        self.assertIn('Invoke-RestoreFromState $state | Out-Null', self.content)
+        self.assertIn('$recordedState -eq "amd_active"', self.content)
+        self.assertIn('Existing AL321 state already records amd_active; preserving it while ensuring AMD mode.', self.content)
+
     def test_recovery_deletes_state_file_only_after_successful_validation(self):
         self.assertIn("Restart-And-ValidateDevice $instanceId | Out-Null", self.content)
         self.assertIn("if ($State.OriginalService -and $after.Service -ne [string]$State.OriginalService)", self.content)
@@ -73,6 +80,12 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
         self.assertIn("Invoke-EnsureWinUsb $Serial | Out-Null", self.content)
         self.assertIn("Invoke-DisableGowinPeers", self.content)
         self.assertIn("Invoke-RestoreGowinPeers", self.content)
+
+    def test_standalone_ftdi_al321_does_not_require_a_gowin_peer(self):
+        self.assertIn("A standalone FTDI AL321 is valid.", self.content)
+        self.assertIn("$compatibleDevices.Count -eq 2", self.content)
+        self.assertIn("$allowSharedFtdiWinUsb = $false", self.content)
+        self.assertIn("-AllowSharedFtdiWinUsb:$allowSharedFtdiWinUsb", self.content)
 
     def test_preflight_error_fails_safe_by_requesting_elevation(self):
         self.assertIn(

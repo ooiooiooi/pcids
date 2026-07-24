@@ -58,13 +58,42 @@ class StrictPyocdRuntimeTests(unittest.TestCase):
         return helper_path
 
     def _run_batch(self, script_path: Path, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess:
-        return self._run_process(["cmd.exe", "/d", "/c", str(script_path)], cwd=cwd, env=env)
+        return self._run_process(
+            ["cmd.exe", "/d", "/s", "/c", "call", str(script_path)],
+            cwd=cwd,
+            env=env,
+        )
 
     def test_bundled_pyocd_reports_expected_version(self):
         result = self._run_process([str(self.pyocd_exe), "--version"])
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "0.44.1")
+
+    def test_preflight_helper_strips_only_probe_nul_padding_before_exact_match(self):
+        helper_source = _pyocd_preflight_helper_source()
+
+        self.assertIn('rstrip("\\x00").strip()', helper_source)
+        self.assertIn("if trim_probe_nul else normalized", helper_source)
+        self.assertIn('parser.add_argument("--trim-probe-nul", action="store_true")', helper_source)
+        self.assertIn('"unique_id": normalize_unique_id(getattr(probe, "unique_id", ""))', helper_source)
+        self.assertIn('probe["unique_id"] == expected_unique_id', helper_source)
+
+    def test_probe_nul_compatibility_is_limited_to_pyocd_debugger_scripts(self):
+        for script_name, burner_name in (
+            ("jlink_v4_arm_mcu_flash", "J-LINK"),
+            ("gdlink_arm_mcu_flash", "GDLINK"),
+        ):
+            with self.subTest(script_name=script_name):
+                self.assertIn("--trim-probe-nul", build_system_script_content(script_name, burner_name))
+
+        for script_name, burner_name in (
+            ("stlink_stm32_mcu_flash", "ST-LINK"),
+            ("pwlink_v2_arm_mcu_flash", "PWLINK2"),
+            ("swd_downloader_arm_mcu_flash", "SWD Downloader"),
+        ):
+            with self.subTest(script_name=script_name):
+                self.assertNotIn("--trim-probe-nul", build_system_script_content(script_name, burner_name))
 
     def test_bundled_pyocd_list_help_shows_supported_flags_and_rejects_json_probe_flag(self):
         help_result = self._run_process([str(self.pyocd_exe), "list", "--help"])
@@ -83,7 +112,7 @@ class StrictPyocdRuntimeTests(unittest.TestCase):
     def test_strict_batches_stop_at_missing_probe_without_cli_parameter_error(self):
         supported_target_chip = "STM32H743ZIT6"
         scripts = [
-            ("stlink_stm32_mcu_flash", "ST-LINK"),
+            ("jlink_v4_arm_mcu_flash", "J-LINK"),
             ("pwlink_v2_arm_mcu_flash", "PWLINK2"),
             ("swd_downloader_arm_mcu_flash", "SWD Downloader"),
         ]
@@ -100,7 +129,8 @@ class StrictPyocdRuntimeTests(unittest.TestCase):
                     {
                         "PYOCD_EXE": str(self.pyocd_exe),
                         "PYOCD_PYTHON": str(self.python_exe),
-                        "STM32_PROGRAMMER_CLI": str(temp_dir / "missing_stm32_programmer.exe"),
+                        "ProgramFiles": str(temp_dir),
+                        "JLINK_EXE": str(temp_dir / "missing_jlink.exe"),
                         "TASK_ID": f"runtime-{script_name}",
                         "FIRMWARE_PATH": str(firmware_path),
                         "TARGET_CHIP": supported_target_chip,
@@ -150,6 +180,42 @@ class StrictPyocdRuntimeTests(unittest.TestCase):
             self.assertIn("pyOCD runtime version: 0.44.1", output)
             self.assertIn("未发现指定 probe", output)
             self.assertNotIn("不支持的 pyOCD target", output)
+
+    def test_stlink_utility_zero_exit_without_connection_is_still_a_failure(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            script_path = self._write_batch_script(temp_dir, "stlink_stm32_mcu_flash", "ST-LINK")
+            firmware_path = temp_dir / "firmware.hex"
+            firmware_path.write_text(":00000001FF\n", encoding="utf-8")
+            fake_cli = temp_dir / "fake_stlink_utility.cmd"
+            fake_cli.write_text(
+                "@echo off\r\necho No ST-LINK [ID=NO_SUCH_PROBE_001] Found!\r\nexit /b 0\r\n",
+                encoding="ascii",
+            )
+
+            result = self._run_batch(
+                script_path,
+                {
+                    "STLINK_UTILITY_CLI": str(fake_cli),
+                    "TASK_ID": "runtime-stlink-utility-missing-probe",
+                    "FIRMWARE_PATH": str(firmware_path),
+                    "TARGET_CHIP": "STM32F107VCT6",
+                    "BURNER_SN": "NO_SUCH_PROBE_001",
+                    "INTERFACE_TYPE": "SWD",
+                    "ERASE_MODE": "sector",
+                    "WRITE_SPEED_KHZ": "1000",
+                    "COMPLETION_ACTION": "none",
+                },
+                temp_dir,
+            )
+
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, output)
+            self.assertIn("No ST-LINK", output)
+            self.assertIn("retrying the same ST-LINK under reset", output)
+            self.assertIn("NO_SUCH_PROBE_001", output)
+            self.assertNotIn("pyOCD", output)
+            self.assertNotIn("STM32CubeProgrammer", output)
 
     def test_preflight_helper_maps_supported_stm32_series_to_bundled_targets(self):
         with tempfile.TemporaryDirectory() as temp_name:

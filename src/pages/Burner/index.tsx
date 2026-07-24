@@ -328,6 +328,8 @@ const Burner: React.FC = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const [isDiscoveryModalOpen, setIsDiscoveryModalOpen] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [updating, setUpdating] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [listError, setListError] = useState('')
@@ -514,6 +516,7 @@ const Burner: React.FC = () => {
 
   const handleCreate = async (values: any) => {
     const payload = buildBurnerPayload(values, createStrategy)
+    setCreating(true)
     try {
       await burnerApi.create(payload, { skipAutoErrorMessage: true } as any)
       finishCreateSuccess()
@@ -528,11 +531,14 @@ const Burner: React.FC = () => {
         return
       }
       message.error(getBurnerSubmitErrorDetail(e, '创建失败'))
+    } finally {
+      setCreating(false)
     }
   }
 
   const handleUpdate = async (values: any) => {
     const payload = buildBurnerPayload(values, editStrategy)
+    setUpdating(true)
     try {
       await burnerApi.update(editingBurner.id, payload, { skipAutoErrorMessage: true } as any)
       finishUpdateSuccess()
@@ -547,6 +553,8 @@ const Burner: React.FC = () => {
         return
       }
       message.error(getBurnerSubmitErrorDetail(e, '更新失败'))
+    } finally {
+      setUpdating(false)
     }
   }
 
@@ -1344,10 +1352,10 @@ const Burner: React.FC = () => {
           <div className="pcids-modal__footer-split">
             <Checkbox className="pcids-modal__continue" name="keepAdding" checked={keepAdding} onChange={(e) => setKeepAdding(e.target.checked)}>继续新增</Checkbox>
             <Space className="pcids-modal__footer-actions">
-              <PageSecondaryButton onClick={closeCreateModal}>
+              <PageSecondaryButton onClick={closeCreateModal} disabled={creating}>
                 取消
               </PageSecondaryButton>
-              <PagePrimaryButton onClick={() => createForm.submit()}>
+              <PagePrimaryButton loading={creating} onClick={() => createForm.submit()}>
                 新增
               </PagePrimaryButton>
             </Space>
@@ -1357,10 +1365,10 @@ const Burner: React.FC = () => {
         {formBody('create', createForm, createStrategy, setCreateStrategy, createDeviceCategory, createDeviceModel, createHostType, createLockedHostType, handleCreate)}
       </Modal>
 
-      <Modal title="编辑设备" open={isEditModalOpen} onOk={() => editForm.submit()}
+      <Modal title="编辑设备" open={isEditModalOpen} onOk={() => editForm.submit()} confirmLoading={updating}
         className="pcids-modal pcids-modal--form device-form-modal"
         okText="保存" cancelText="取消"
-        onCancel={closeEditModal}>
+        onCancel={closeEditModal} cancelButtonProps={{ disabled: updating }}>
         {formBody('edit', editForm, editStrategy, setEditStrategy, editDeviceCategory, editDeviceModel, editHostType, editLockedHostType, handleUpdate)}
       </Modal>
 

@@ -18,6 +18,16 @@
   WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_FLASH_ADAPTER" "$INSTDIR\resources\flash-adapter\pcids-flash.cmd"
   DetailPrint "Configured PCIDS_FLASH_ADAPTER for CodeArts Agent."
 
+  ; The LAN Agent discovery configuration is deliberately external to the
+  ; application package.  Preserve an operator-edited file on upgrades.
+  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" "Common AppData"
+  StrCpy $1 "$0\PCIDS"
+  CreateDirectory "$1"
+  IfFileExists "$1\agent-discovery.yaml" +3 0
+    SetOutPath "$1"
+    File /oname=agent-discovery.yaml "${PROJECT_DIR}\backend\config\agent-discovery.yaml"
+  DetailPrint "LAN Agent discovery config: $1\agent-discovery.yaml"
+
   StrCpy $0 "$INSTDIR\logs"
 
   CreateDirectory "$0"

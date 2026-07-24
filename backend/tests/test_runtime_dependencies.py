@@ -22,8 +22,8 @@ class RuntimeDependenciesTest(unittest.TestCase):
     def test_bundled_tool_overrides_inherited_external_tool_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            bundled = root / "bundled" / "STM32_Programmer_CLI.exe"
-            external = root / "external" / "STM32_Programmer_CLI.exe"
+            bundled = root / "bundled" / "ST-LINK_CLI.exe"
+            external = root / "external" / "ST-LINK_CLI.exe"
             bundled.parent.mkdir(parents=True)
             external.parent.mkdir(parents=True)
             bundled.touch()
@@ -33,15 +33,15 @@ class RuntimeDependenciesTest(unittest.TestCase):
                 os.environ,
                 {
                     "PCIDS_BUNDLED_TOOLS_DIR": str(root / "bundled"),
-                    "STM32_PROGRAMMER_CLI": str(external),
+                    "STLINK_UTILITY_CLI": str(external),
                 },
                 clear=False,
             ):
                 configure_bundled_tools.cache_clear()
                 configured = configure_bundled_tools()
 
-                self.assertEqual(configured["STM32_PROGRAMMER_CLI"], str(external.resolve()))
-                self.assertEqual(os.environ["STM32_PROGRAMMER_CLI"], str(external.resolve()))
+                self.assertEqual(configured["STLINK_UTILITY_CLI"], str(external.resolve()))
+                self.assertEqual(os.environ["STLINK_UTILITY_CLI"], str(external.resolve()))
 
     def test_bundled_hdc_tool_is_discovered(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -96,7 +96,7 @@ class RuntimeDependenciesTest(unittest.TestCase):
             jlink_dir = bundled_root / "J-LINK"
             stlink_dir.mkdir(parents=True)
             jlink_dir.mkdir(parents=True)
-            (stlink_dir / "STM32_Programmer_CLI.exe").touch()
+            (stlink_dir / "ST-LINK_CLI.exe").touch()
             (jlink_dir / "README.md").write_text("docs only", encoding="utf-8")
 
             with patch.dict(
@@ -111,7 +111,7 @@ class RuntimeDependenciesTest(unittest.TestCase):
 
             readiness_by_name = {str(item["burner"]): item for item in readiness}
             self.assertEqual(readiness_by_name["ST-LINK"]["status"], "ok")
-            self.assertTrue(str(readiness_by_name["ST-LINK"]["configured_path"]).endswith("STM32_Programmer_CLI.exe"))
+            self.assertTrue(str(readiness_by_name["ST-LINK"]["configured_path"]).endswith("ST-LINK_CLI.exe"))
             self.assertEqual(readiness_by_name["J-LINK"]["status"], "warn")
             self.assertTrue(readiness_by_name["J-LINK"]["bundled_dir_exists"])
 

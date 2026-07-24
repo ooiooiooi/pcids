@@ -11,6 +11,7 @@ from typing import Optional
 import json
 import os
 import re
+from threading import Lock
 from backend.utils.app_paths import get_app_data_root
 from backend.utils.text_normalization import normalize_text, normalize_text_payload
 
@@ -66,6 +67,13 @@ SessionLocal = sessionmaker(
 
 # 创建线程安全的会话
 db_session = scoped_session(lambda: SessionLocal())
+
+# Schema compatibility checks are intentionally kept for upgrades, but running
+# dozens of PRAGMA/CREATE statements before every request is very expensive on
+# a WAL database.  Cache only a completed check; a failed migration is never
+# cached and will be retried by the next request.
+_schema_ready = False
+_schema_ready_lock = Lock()
 
 
 DEFAULT_BURNER_CATALOG = [
@@ -352,9 +360,9 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
             "erase_mode": "全片擦除",
             "erase_mode_label": "擦除方式",
             "erase_mode_options": ["全片擦除", "扇区擦除"],
-            "write_speed_khz": 1000,
+            "write_speed_khz": 900,
             "speed_label": "频率(kHz)",
-            "speed_options": [500, 1000, 2000, 4000, 5000, 10000],
+            "speed_options": [125, 240, 480, 900, 1800, 4000],
             "start_address": "",
             "start_address_label": "起始地址",
             "completion_action": "复位运行",
@@ -482,7 +490,7 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
-            "timeout_minutes": 120,
+            "timeout_seconds": 600,
         },
     },
     {
@@ -496,9 +504,9 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
             "erase_mode": "全片擦除",
             "erase_mode_label": "擦除方式",
             "erase_mode_options": ["全片擦除", "扇区擦除"],
-            "write_speed_khz": 1000,
+            "write_speed_khz": 900,
             "speed_label": "频率(kHz)",
-            "speed_options": [500, 1000, 2000, 4000, 5000, 10000],
+            "speed_options": [125, 240, 480, 900, 1800, 4000],
             "start_address": "",
             "start_address_label": "起始地址",
             "completion_action": "复位运行",
@@ -557,7 +565,7 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
             "options": ["local", "integrity", "writeVerify"],
             "required_fields": ["target_config_file"],
             "retry_count": 1,
-            "timeout_minutes": 120,
+            "timeout_seconds": 600,
         },
     },
     {
@@ -640,9 +648,9 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
             "erase_mode": "全片擦除",
             "erase_mode_label": "擦除方式",
             "erase_mode_options": ["全片擦除", "扇区擦除"],
-            "completion_action": "复位运行",
+            "completion_action": "\u4e0d\u5904\u7406",
             "completion_action_label": "完成后动作",
-            "completion_action_options": ["复位运行", "仅复位", "不处理"],
+            "completion_action_options": ["\u4e0d\u5904\u7406", "\u590d\u4f4d"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
             "timeout_minutes": 120,
@@ -2263,7 +2271,7 @@ exit 0''',
         db.close()
 
 
-def ensure_schema():
+def _ensure_schema_uncached():
     if engine.dialect.name != "sqlite":
         return
 
@@ -2389,6 +2397,23 @@ def ensure_schema():
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_sync_uuid ON repository_sync_states (sync_uuid)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_revision ON repository_sync_states (revision)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_deleted ON repository_sync_states (deleted)")
+
+
+def ensure_schema():
+    """Run SQLite upgrade checks once per backend process.
+
+    The lock ensures concurrent first requests share one migration pass.  The
+    ready flag is set only after the pass returns successfully, so a transient
+    database error remains recoverable on the next request.
+    """
+    global _schema_ready
+    if _schema_ready or engine.dialect.name != "sqlite":
+        return
+    with _schema_ready_lock:
+        if _schema_ready:
+            return
+        _ensure_schema_uncached()
+        _schema_ready = True
 
 
 def _is_valid_task_no(value: str) -> bool:

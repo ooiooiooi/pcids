@@ -12,7 +12,7 @@ import subprocess
 
 
 TOOL_EXECUTABLES = {
-    "STM32_PROGRAMMER_CLI": ["STM32_Programmer_CLI.exe", "STM32_Programmer_CLI"],
+    "STLINK_UTILITY_CLI": ["ST-LINK_CLI.exe", "ST-LINK_CLI"],
     "JLINK_EXE": ["JLink.exe", "JLinkExe.exe", "JLinkExe"],
     "PYOCD_EXE": ["pyocd.exe", "pyocd"],
     "OPENOCD_EXE": ["openocd.exe", "openocd"],
@@ -57,9 +57,9 @@ AL321_VITIS_SEARCH_PATTERNS = [
 ]
 
 COMMON_TOOL_SEARCH_PATHS = {
-    "STM32_PROGRAMMER_CLI": [
-        r"%ProgramFiles%\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin",
-        r"%ProgramFiles(x86)%\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin",
+    "STLINK_UTILITY_CLI": [
+        r"%ProgramFiles%\STMicroelectronics\STM32 ST-LINK Utility\ST-LINK Utility",
+        r"%ProgramFiles(x86)%\STMicroelectronics\STM32 ST-LINK Utility\ST-LINK Utility",
     ],
     "JLINK_EXE": [
         r"%ProgramFiles%\SEGGER\JLink",
@@ -114,6 +114,8 @@ logger = logging.getLogger(__name__)
 
 BURNER_DRIVER_SEARCH_PATHS = {
     "ST-LINK": [
+        r"%ProgramFiles%\STMicroelectronics\STM32 ST-LINK Utility",
+        r"%ProgramFiles(x86)%\STMicroelectronics\STM32 ST-LINK Utility",
         r"%ProgramFiles%\STMicroelectronics\STM32Cube\STM32CubeProgrammer\Drivers",
         r"%ProgramFiles(x86)%\STMicroelectronics\STM32Cube\STM32CubeProgrammer\Drivers",
     ],
@@ -154,9 +156,9 @@ DRIVER_FILE_PATTERNS = [
 BURNER_TOOL_GROUPS = [
     {
         "burner": "ST-LINK",
-        "env_names": ["STM32_PROGRAMMER_CLI", "PYOCD_EXE"],
+        "env_names": ["STLINK_UTILITY_CLI"],
         "bundled_dir": "ST-LINK",
-        "tool_label": "STM32CubeProgrammer CLI / pyOCD",
+        "tool_label": "STM32 ST-LINK Utility CLI",
     },
     {
         "burner": "J-LINK",
@@ -354,6 +356,13 @@ def configure_bundled_tools() -> dict[str, str]:
         if existing and Path(existing).is_file():
             configured[env_name] = existing
             continue
+        if env_name == "STLINK_UTILITY_CLI" and root:
+            preferred_stlink_cli = root / "ST-LINK" / "ST-LINK-Utility-CLI-3.6" / "ST-LINK_CLI.exe"
+            if preferred_stlink_cli.is_file():
+                resolved_stlink_cli = str(preferred_stlink_cli.resolve())
+                os.environ[env_name] = resolved_stlink_cli
+                configured[env_name] = resolved_stlink_cli
+                continue
         executable = _find_system_executable(env_name, patterns)
         if executable:
             os.environ[env_name] = str(executable)

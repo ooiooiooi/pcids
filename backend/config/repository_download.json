@@ -1,7 +1,7 @@
 {
   "server_download_root": "",
   "download_root": "",
-  "server_transport": "ssh",
+  "server_transport": "local",
   "server_os": "windows",
   "server_ip": "",
   "server_ssh_port": 22,

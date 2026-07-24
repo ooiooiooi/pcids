@@ -28,12 +28,21 @@ def build_task() -> BurningTask:
     )
 
 
-def build_burner(sn: str = "ST123456") -> Burner:
+def build_burner(
+    sn: str = "ST123456",
+    burner_type: str = "ST-LINK",
+    location: str | None = None,
+    port: str | None = None,
+    config_json: str | None = None,
+) -> Burner:
     return Burner(
         id=1,
         name="demo-burner",
-        type="ST-LINK",
+        type=burner_type,
         sn=sn,
+        location=location,
+        port=port,
+        config_json=config_json,
     )
 
 
@@ -287,6 +296,72 @@ class TaskExecutionRuleTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("BURNER_SN", context.exception.detail)
+
+    def test_build_execution_plan_infers_al321_flash_serial_from_usb_instance(self):
+        script = build_script({}, name="al321_fpga_mcu_flash")
+
+        plan = build_execution_plan(
+            build_task(),
+            {"execution_operation": "Flash固化"},
+            None,
+            build_burner(
+                sn="",
+                burner_type="AL321",
+                location=r"USB\VID_0403&PID_6014\210512180081",
+            ),
+            script,
+            used_file_path="firmware.bin",
+        )
+
+        self.assertEqual(plan.runtime_env["BURNER_SN"], "210512180081")
+
+    def test_build_execution_plan_rejects_al321_flash_without_stable_serial(self):
+        script = build_script({}, name="al321_fpga_mcu_flash")
+
+        with self.assertRaises(HTTPException) as context:
+            build_execution_plan(
+                build_task(),
+                {"execution_operation": "Flash固化"},
+                None,
+                build_burner(
+                    sn="",
+                    burner_type="AL321",
+                    location=r"USB\VID_0403&PID_6014\7&16B090BC&0&2",
+                ),
+                script,
+                used_file_path="firmware.bin",
+            )
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("AL321 Flash 固化必须绑定稳定的 BURNER_SN", context.exception.detail)
+
+    def test_build_execution_plan_infers_al321_flash_serial_from_usb_binding_pnp_device_id(self):
+        script = build_script({}, name="al321_fpga_mcu_flash")
+
+        plan = build_execution_plan(
+            build_task(),
+            {"execution_operation": "Flash固化"},
+            None,
+            build_burner(
+                sn="",
+                burner_type="AL321",
+                location="",
+                config_json=json.dumps(
+                    {
+                        "usb_binding": {
+                            "pnp_device_id": r"USB\VID_0403&PID_6014\210512180081",
+                            "location_info": "Port_#0011.Hub_#0001",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            script,
+            used_file_path="firmware.bin",
+        )
+
+        self.assertEqual(plan.runtime_env["BURNER_SN"], "210512180081")
+        self.assertEqual(plan.runtime_env["BURNER_LOCATION"], r"USB\VID_0403&PID_6014\210512180081")
 
 
 if __name__ == "__main__":

@@ -1054,7 +1054,7 @@ class CanProtocolBackendTests(unittest.TestCase):
             stack.enter_context(patch.dict(CAN_ADAPTER_BACKENDS, {"fake_can": backend}, clear=True))
             stack.enter_context(patch("backend.routers.protocol_tests.SessionLocal", self.Session))
             protocol_tests._store_can_session_connection(stale_session.id, stale_connection)
-            _, new_connection, _, config = protocol_tests._open_protocol_channel_resources(
+            _, new_connection, _, _, config = protocol_tests._open_protocol_channel_resources(
                 "can",
                 {"adapter_key": "fake_can:abc", "physical_channel": "CAN0", "baud_rate": "500kbps"},
                 [],

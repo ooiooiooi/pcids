@@ -19,9 +19,6 @@ class _FakeDB:
 
 
 class BurnerServerNodeDisplayTests(unittest.TestCase):
-    def tearDown(self):
-        burners._get_configured_server_addresses.cache_clear()
-
     def test_resolve_node_display_marks_configured_server_as_server(self):
         burner = SimpleNamespace(
             host_type="local",
@@ -35,7 +32,6 @@ class BurnerServerNodeDisplayTests(unittest.TestCase):
             "backend.routers.burners._get_repository_server_transport_config",
             return_value={"host": "192.168.0.117"},
         ):
-            burners._get_configured_server_addresses.cache_clear()
             display = burners._resolve_node_display(burner, request)
 
         self.assertEqual(display["label"], "服务器")
@@ -52,7 +48,6 @@ class BurnerServerNodeDisplayTests(unittest.TestCase):
             patch("backend.routers.burners._get_service_node_address", return_value="192.168.0.117"),
             patch("backend.routers.burners._discover_lan_agent_urls", return_value=[]),
         ):
-            burners._get_configured_server_addresses.cache_clear()
             nodes = burners._discover_scan_nodes(fake_db, "all")
 
         self.assertEqual(nodes[0]["node_type"], "server")
@@ -84,11 +79,45 @@ class BurnerServerNodeDisplayTests(unittest.TestCase):
             "backend.routers.burners._get_repository_server_transport_config",
             return_value={"host": "192.168.0.117"},
         ):
-            burners._get_configured_server_addresses.cache_clear()
             payload = burners.burner_to_dict(burner)
 
         self.assertEqual(payload["host_type"], "server")
         self.assertEqual(payload["node_display_label"], "服务器")
+
+    def test_resolve_node_display_uses_non_server_ip_even_for_agent(self):
+        burner = SimpleNamespace(
+            host_type="agent",
+            agent_url="http://192.168.0.50:8000",
+            host_name="旧节点名称",
+            host_address="192.168.0.50",
+        )
+        request = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.0.10"))
+
+        with patch(
+            "backend.routers.burners._get_repository_server_transport_config",
+            return_value={"host": "192.168.0.117"},
+        ):
+            display = burners._resolve_node_display(burner, request)
+
+        self.assertEqual(display["label"], "192.168.0.50")
+
+    def test_resolve_node_display_marks_current_machine_as_local_before_server_label(self):
+        burner = SimpleNamespace(
+            host_type="server",
+            agent_url=None,
+            host_name=None,
+            host_address="192.168.0.117",
+        )
+        request = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.0.117"))
+
+        with patch(
+            "backend.routers.burners._get_repository_server_transport_config",
+            return_value={"host": "192.168.0.117"},
+        ):
+            display = burners._resolve_node_display(burner, request)
+
+        self.assertEqual(display["label"], "本地")
+        self.assertTrue(display["is_local"])
 
 
 if __name__ == "__main__":

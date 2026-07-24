@@ -19,7 +19,15 @@ import subprocess
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlparse
+
+import yaml
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - packaged runtime includes psutil
+    psutil = None
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
@@ -41,6 +49,7 @@ _USB_PROBE_CACHE: dict[str, object] = {"expires_at": 0.0, "devices": []}
 _STLINK_SERIAL_CACHE: dict[str, object] = {"expires_at": 0.0, "serials": []}
 _LAN_AGENT_CACHE_LOCK = threading.Lock()
 _LAN_AGENT_CACHE: dict[str, object] = {"expires_at": 0.0, "urls": []}
+_AGENT_DISCOVERY_CONFIG_ENV = "PCIDS_AGENT_DISCOVERY_CONFIG"
 
 
 # #region debug-point G:report-helper
@@ -360,18 +369,22 @@ def _probe_stlink_serials(cache_ttl_seconds: float = 5.0) -> list[str]:
     now = time.monotonic()
     if now < float(_STLINK_SERIAL_CACHE.get("expires_at") or 0):
         return list(_STLINK_SERIAL_CACHE.get("serials") or [])
-    cli_path = str(os.environ.get("STM32_PROGRAMMER_CLI") or "").strip()
+    cli_path = str(os.environ.get("STLINK_UTILITY_CLI") or "").strip()
     if not cli_path or not os.path.isfile(cli_path):
         return []
     try:
         completed = subprocess.run(
-            [cli_path, "-l"],
+            [cli_path, "-List"],
             capture_output=True,
             timeout=12,
             check=False,
         )
         output = ((completed.stdout or b"") + b"\n" + (completed.stderr or b"")).decode("utf-8", errors="ignore")
-        serials = list(dict.fromkeys(re.findall(r"ST-LINK\s+SN\s*:\s*([0-9A-Za-z_-]+)", output, re.IGNORECASE)))
+        serials = list(
+            dict.fromkeys(
+                re.findall(r"(?:ST-LINK\s+)?SN\s*:\s*([0-9A-Za-z_-]+)", output, re.IGNORECASE)
+            )
+        )
     except Exception as exc:
         logger.warning("burner.stlink_serial_probe.failed | %s", str(exc))
         serials = []
@@ -603,8 +616,13 @@ def _collect_node_address_aliases(value: Optional[str]) -> set[str]:
     return {item for item in aliases if item}
 
 
-@lru_cache(maxsize=1)
 def _get_configured_server_addresses() -> frozenset[str]:
+    """Resolve the configured server on every request.
+
+    The server address is externally configurable at runtime.  Caching it made
+    the device list continue to show the old IP after an administrator changed
+    the YAML configuration.
+    """
     host = str(_get_repository_server_transport_config().get("host") or "").strip()
     return frozenset(_collect_node_address_aliases(host))
 
@@ -677,32 +695,32 @@ def _resolve_node_display(burner: Burner, request: Optional[Request]) -> dict:
     host_address = str(getattr(burner, "host_address", None) or "").strip()
     owner_address = host_address or (urlparse(agent_url).hostname if agent_url else "") or _get_service_node_address()
     current_address = _get_request_node_address(request)
-    if agent_url or host_type == "agent":
-        label = host_name or owner_address or "代理节点"
-        return {"label": label, "owner_address": owner_address, "current_address": current_address, "is_local": False}
-    if host_type == "server" or _is_configured_server_node(owner_address):
-        label = host_name or "服务器"
-        return {"label": label, "owner_address": owner_address, "current_address": current_address, "is_local": False}
     is_local = _is_same_node_address(owner_address, current_address)
+    if is_local:
+        return {"label": "本地", "owner_address": owner_address, "current_address": current_address, "is_local": True}
+    if host_type == "server" or _is_configured_server_node(owner_address):
+        return {"label": "服务器", "owner_address": owner_address, "current_address": current_address, "is_local": False}
+    if owner_address:
+        # Node positions identify a machine.  For all non-server machines show
+        # their address consistently, including an Agent node.
+        return {"label": owner_address, "owner_address": owner_address, "current_address": current_address, "is_local": False}
     return {
-        "label": "本地" if is_local else (host_name or owner_address or "本地节点"),
+        "label": host_name or "本地节点",
         "owner_address": owner_address,
         "current_address": current_address,
-        "is_local": is_local,
+        "is_local": False,
     }
 
 
 def _derive_node_label(agent_url: Optional[str], host_name: Optional[str] = None, host_address: Optional[str] = None) -> str:
-    if str(host_name or "").strip():
-        return str(host_name).strip()
-    if not str(agent_url or "").strip():
-        if _is_configured_server_node(host_address):
-            return "服务器"
+    address = str(host_address or "").strip() or (urlparse(str(agent_url or "")).hostname or "").strip()
+    if _is_same_node_address(address, _get_service_node_address()):
         return "本地"
-    if str(host_address or "").strip():
-        return str(host_address).strip()
-    hostname = urlparse(str(agent_url)).hostname or ""
-    return hostname.strip() or "局域网节点"
+    if _is_configured_server_node(address):
+        return "服务器"
+    if address:
+        return address
+    return "本地"
 
 
 USB_BINDING_FIELDS = (
@@ -929,6 +947,17 @@ def _get_real_usb_serial(item: dict, usb_devices: Optional[list[dict]] = None, d
     source = str(item.get("source") or "").strip().lower()
     vendor_id = str(item.get("vendor_id") or "").strip().lower()
     product_id = str(item.get("product_id") or "").strip().lower()
+
+    # FTDI's Windows PnP entry often exposes a blank serial_num even though
+    # its InstanceId contains the immutable FT232 serial.  Preserve that
+    # identity for AL321 registration/rebinding, while rejecting Windows'
+    # location-derived instance suffixes in _extract_usb_instance_serial.
+    if not serial and _normalize_device_token(device_type) == _normalize_device_token("AL321"):
+        serial = _extract_usb_instance_serial(
+            str(item.get("pnp_device_id") or item.get("device_id") or ""),
+            "0403",
+            "6014",
+        )
 
     if _normalize_device_token(device_type) == _normalize_device_token("PWLINK2") and usb_devices:
         parent_serial = _extract_usb_instance_serial(str(item.get("parent_id") or ""), vendor_id, product_id)
@@ -1396,27 +1425,99 @@ def _normalize_agent_url(value: Optional[str]) -> str:
     return agent_url
 
 
+def _get_agent_discovery_config_path() -> Path:
+    configured = str(os.environ.get(_AGENT_DISCOVERY_CONFIG_ENV) or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        program_data = os.environ.get("PROGRAMDATA") or r"C:\\ProgramData"
+        return Path(program_data) / "PCIDS" / "agent-discovery.yaml"
+    return Path.home() / ".config" / "pcids" / "agent-discovery.yaml"
+
+
+def _load_agent_discovery_config() -> dict:
+    path = _get_agent_discovery_config_path()
+    if not path.is_file():
+        return {}
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        logger.warning("burner.agent_discovery.config_invalid | path=%s error=%s", path, exc)
+        return {}
+
+
+def _get_agent_discovery_port(config: Optional[dict] = None) -> int:
+    payload = config or {}
+    port_raw = str(
+        os.environ.get("PCIDS_AGENT_DISCOVERY_PORT")
+        or payload.get("port")
+        or "8000"
+    ).strip()
+    try:
+        port = int(port_raw)
+    except ValueError:
+        return 8000
+    return port if 1 <= port <= 65535 else 8000
+
+
 def _get_lan_agent_scan_networks() -> list[ipaddress.IPv4Network]:
+    config = _load_agent_discovery_config()
     configured = str(os.environ.get("PCIDS_AGENT_DISCOVERY_CIDRS") or "").strip()
-    raw_networks = [item.strip() for item in configured.split(",") if item.strip()]
+    configured_networks = config.get("discovery_cidrs") if not configured else configured
+    if isinstance(configured_networks, (list, tuple)):
+        raw_networks = [str(item).strip() for item in configured_networks if str(item).strip()]
+    else:
+        raw_networks = [item.strip() for item in str(configured_networks or "").split(",") if item.strip()]
     if not raw_networks:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.connect(("8.8.8.8", 80))
-                primary_ip = sock.getsockname()[0]
-            raw_networks = [f"{primary_ip}/24"]
-        except Exception:
-            return []
+        # Scan every active physical LAN adapter, not merely the adapter used
+        # for the Internet default route.  Virtual/VPN adapters are excluded:
+        # otherwise each extra adapter adds another 254-host timeout window.
+        virtual_markers = ("vmware", "virtual", "vbox", "hyper-v", "docker", "wsl", "vpn", "tunnel", "teredo")
+        if psutil is not None:
+            try:
+                interface_stats = psutil.net_if_stats()
+                for interface_name, addresses in psutil.net_if_addrs().items():
+                    stats = interface_stats.get(interface_name)
+                    normalized_name = interface_name.lower()
+                    if not stats or not stats.isup or any(marker in normalized_name for marker in virtual_markers):
+                        continue
+                    for item in addresses:
+                        if item.family != socket.AF_INET or not item.address or not item.netmask:
+                            continue
+                        try:
+                            interface = ipaddress.ip_interface(f"{item.address}/{item.netmask}")
+                        except ValueError:
+                            continue
+                        if interface.ip.is_private and not interface.ip.is_loopback:
+                            raw_networks.append(str(interface.network))
+            except Exception:
+                logger.warning("burner.agent_discovery.interface_enumeration_failed", exc_info=True)
+        if not raw_networks:
+            # Keep a small fallback for constrained runtimes without psutil.
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect(("8.8.8.8", 80))
+                    raw_networks.append(f"{sock.getsockname()[0]}/24")
+            except Exception:
+                return []
 
     networks: list[ipaddress.IPv4Network] = []
+    seen_networks: set[str] = set()
     for raw_network in raw_networks:
         try:
             network = ipaddress.ip_network(raw_network, strict=False)
         except ValueError:
             logger.warning("burner.agent_discovery.invalid_cidr | %s", raw_network)
             continue
-        if isinstance(network, ipaddress.IPv4Network) and network.num_addresses <= 1024:
+        network_key = str(network)
+        if (
+            isinstance(network, ipaddress.IPv4Network)
+            and network.num_addresses <= 1024
+            and network_key not in seen_networks
+        ):
             networks.append(network)
+            seen_networks.add(network_key)
     return networks
 
 
@@ -1446,11 +1547,7 @@ def _discover_lan_agent_urls(cache_ttl_seconds: float = 15.0) -> list[str]:
         if now < float(_LAN_AGENT_CACHE.get("expires_at") or 0.0):
             return list(_LAN_AGENT_CACHE.get("urls") or [])
 
-    port_raw = str(os.environ.get("PCIDS_AGENT_DISCOVERY_PORT") or "8000").strip()
-    try:
-        port = int(port_raw)
-    except ValueError:
-        port = 8000
+    port = _get_agent_discovery_port(_load_agent_discovery_config())
     local_addresses = _get_service_node_addresses()
     targets: list[str] = []
     for network in _get_lan_agent_scan_networks():
@@ -1501,7 +1598,7 @@ def _discover_scan_nodes(
         explicit_host = urlparse(normalized_explicit_url).hostname or ""
         agent_map[normalized_explicit_url] = {
             "node_key": normalized_explicit_url,
-            "node_label": explicit_host or "下位机节点",
+            "node_label": _derive_node_label(normalized_explicit_url, host_address=explicit_host),
             "node_type": "agent",
             "agent_url": normalized_explicit_url,
             "host_name": None,
@@ -1515,7 +1612,7 @@ def _discover_scan_nodes(
         discovered_host = urlparse(discovered_url).hostname or ""
         agent_map[discovered_url] = {
             "node_key": discovered_url,
-            "node_label": discovered_host or "局域网节点",
+            "node_label": _derive_node_label(discovered_url, host_address=discovered_host),
             "node_type": "agent",
             "agent_url": discovered_url,
             "host_name": None,
@@ -2099,6 +2196,23 @@ def _burner_requires_physical_port(device_model: Optional[str]) -> bool:
     return _normalize_burner_model_key(device_model) == "XDS510PLUS"
 
 
+def _backfill_al321_binding_from_usb_binding(normalized: dict, config: dict, resolved_type: str) -> None:
+    if _normalize_burner_model_key(resolved_type) != "AL321":
+        return
+    usb_binding = _normalize_usb_binding(config.get("usb_binding"))
+    if not usb_binding:
+        return
+    pnp_device_id = str(usb_binding.get("pnp_device_id") or "").strip()
+    current_location = str(normalized.get("location") or "").strip()
+    if (not current_location or current_location == "-") and pnp_device_id:
+        normalized["location"] = pnp_device_id
+    if normalized.get("sn"):
+        return
+    serial = _extract_usb_instance_serial(pnp_device_id, "0403", "6014")
+    if serial:
+        normalized["sn"] = serial
+
+
 def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) -> dict:
     normalized = dict(payload)
     resolved_type = str(normalized.get("type") or getattr(existing, "type", None) or "").strip()
@@ -2135,6 +2249,7 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
         if _burner_requires_physical_port(resolved_type):
             normalized["strategy"] = 2
             normalized["sn"] = ""
+        _backfill_al321_binding_from_usb_binding(normalized, config, resolved_type)
 
     normalized["config_json"] = json.dumps(config, ensure_ascii=False)
     return normalized

@@ -5,6 +5,7 @@ from __future__ import annotations
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Query
 import ast
+import base64
 import ntpath
 import os
 import shutil
@@ -723,6 +724,8 @@ def _get_repository_codearts_service_config() -> dict:
 def _get_repository_server_transport_config() -> dict:
     cfg = _get_repository_download_config()
     transport = str(cfg.get("server_transport") or "http").strip().lower()
+    if transport not in {"ssh", "http", "local"}:
+        transport = "local"
     return {
         "transport": transport,
         "host": str(cfg.get("server_ip") or "").strip(),
@@ -789,10 +792,14 @@ def _powershell_quote(value: str) -> str:
 
 def _ensure_remote_directory_via_ssh(session: SSHClientSession, remote_root: str, server_os: str) -> None:
     if _normalize_server_os(server_os) == "windows":
-        command = (
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
-            + _powershell_quote(f"New-Item -ItemType Directory -Force -Path { _powershell_quote(remote_root) } | Out-Null")
-        )
+        # Do not nest single-quoted PowerShell fragments.  A Windows path is
+        # quoted inside the command and used to break the outer -Command
+        # argument (the server then reports a cryptic `Out-Null` error).
+        # EncodedCommand preserves the complete script and works for paths
+        # containing spaces or non-ASCII characters.
+        script = f"New-Item -ItemType Directory -Force -Path {_powershell_quote(remote_root)} | Out-Null"
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded_script
         result = session.run(command, timeout=30)
     else:
         result = session.run(remote_shell_command(f"mkdir -p -- {shlex.quote(remote_root)}"), timeout=30)
@@ -4348,6 +4355,18 @@ async def download_codearts_artifact_to_server(
     server_transport = server_config["transport"]
     server_api_path = str(cfg.get("server_api_path") or "/upload").strip()
     server_storage_root = _get_repository_server_storage_root()
+
+    # A workstation without an explicitly configured transfer server must keep
+    # the encrypted CodeArts artifact locally.  Previously the default SSH
+    # mode tried to connect with blank host/user values and failed after the
+    # download had already completed.
+    if target == "server" and (
+        server_transport == "local"
+        or not server_ip
+        or (server_transport == "ssh" and not server_config["username"])
+    ):
+        target = "local"
+
     target_server = f"{server_ip}:{server_port}" if (target == "server" and server_ip and server_port) else ("local" if target == "server" else "")
     server_saved_path = None
 

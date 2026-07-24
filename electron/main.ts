@@ -4,11 +4,27 @@ import * as net from 'net'
 import * as path from 'path'
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
-import * as os from 'os'
 
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: childProcess.ChildProcess | null = null
 let backendPort: number | null = null
+
+// A second desktop instance used to race the first one for port 8000.  Each
+// instance could then terminate the other's backend while it was starting,
+// leaving the UI on the startup/error page and making the SQLite WAL files
+// look suspicious even though the database itself was healthy.
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+
+if (!hasSingleInstanceLock) {
+  app.quit()
+}
+
+app.on('second-instance', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
 
 function getRuntimeRoot(): string {
   return app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '../../')
@@ -63,50 +79,8 @@ function getEphemeralPort(): Promise<number> {
   })
 }
 
-function killProcessOnPort(port: number): void {
-  if (process.platform !== 'win32') return
-
-  const psScript = [
-    '$ErrorActionPreference = "Stop"',
-    `$port = ${port}`,
-    '$connections = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)',
-    'if (-not $connections -or $connections.Count -eq 0) { exit 0 }',
-    '$currentPid = [int]$PID',
-    'foreach ($pid in $connections) {',
-    '  if (-not $pid -or [int]$pid -eq $currentPid) { continue }',
-    '  try {',
-    '    Stop-Process -Id $pid -Force -ErrorAction Stop',
-    '    Write-Output ("KILLED_PID=" + $pid)',
-    '  } catch {',
-    '    Write-Output ("KILL_FAILED_PID=" + $pid + ";REASON=" + $_.Exception.Message)',
-    '  }',
-    '}',
-  ].join('; ')
-
-  const completed = childProcess.spawnSync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-    {
-      windowsHide: true,
-      encoding: 'utf-8',
-      timeout: 5000,
-    },
-  )
-
-  if (completed.error) {
-    console.warn(`Failed to clear backend port ${port}:`, completed.error)
-    return
-  }
-
-  const combinedOutput = [completed.stdout, completed.stderr].filter(Boolean).join(os.EOL).trim()
-  if (combinedOutput) {
-    console.log(`Backend port cleanup (${port}): ${combinedOutput}`)
-  }
-}
-
 async function resolveBackendPort(): Promise<number> {
   const preferredPort = getPreferredBackendPort()
-  killProcessOnPort(preferredPort)
   if (await isPortAvailable(preferredPort)) return preferredPort
   return getEphemeralPort()
 }
@@ -318,7 +292,11 @@ function getErrorPageUrl(detail: string): string {
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
 }
 
-function waitForBackend(baseUrl: string, timeoutMs = 60000): Promise<void> {
+// Fully equipped burner workstations can spend several minutes probing legacy
+// vendor runtimes during backend startup. Keep the startup page visible while
+// that work completes instead of turning a healthy-but-slow initialization
+// into a permanent desktop error page after only 60 seconds.
+function waitForBackend(baseUrl: string, timeoutMs = 300000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   const healthUrl = new URL('/health', baseUrl)
 

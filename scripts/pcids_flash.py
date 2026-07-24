@@ -157,11 +157,27 @@ _CODEARTS_RUNTIME_ENV_ALIASES = {
         "全片擦除": "chip",
         "扇区擦除": "sector",
         "不擦除": "none",
+        "不擦除直接编程": "no-erase",
     },
     "COMPLETION_ACTION": {
         "复位运行": "reset-run",
         "仅复位": "reset",
         "不处理": "none",
+        "编程复位后运行": "reset-run",
+        "编程后保持复位": "hold-reset",
+        "编程复位不运行": "hold-reset",
+    },
+    "EEPROM_WRITE": {
+        "是": "yes",
+        "否": "no",
+    },
+    "BLANK_CHECK": {
+        "是": "yes",
+        "否": "no",
+    },
+    "EXECUTE_PROGRAM": {
+        "是": "yes",
+        "否": "no",
     },
 }
 

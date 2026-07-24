@@ -9,6 +9,9 @@ COMMON_ACTIONS = ["复位运行", "仅复位", "不处理"]
 ERASE_OPTIONS = ["全片擦除", "扇区擦除", "不擦除"]
 FPGA_ERASE_OPTIONS = ["默认自动擦除", "全片擦除", "扇区擦除", "不擦除"]
 SPEED_OPTIONS = [500, 1000, 2000, 4000, 5000, 10000]
+STLINK_SPEED_OPTIONS = [125, 240, 480, 900, 1800, 4000]
+JLINK_SPEED_OPTIONS = [50, 100, 125, 200, 400, 500, 1000, 2000, 4000]
+GDLINK_SPEED_OPTIONS = [50, 100, 125, 250, 500, 1000, 2000, 4000]
 HDSC_BAUD_OPTIONS = [115200, 128000, 230400, 256000, 1000000]
 PYOCD_TARGET_ALIASES = {
     "LPC55S69": "lpc55s69",
@@ -92,7 +95,13 @@ PYOCD_TARGET_REGEX_RULES = [
 ]
 
 
-def arm_config(ide_name: str, interface_options: list[str] | None = None, interface_type: str = "SWD") -> dict:
+def arm_config(
+    ide_name: str,
+    interface_options: list[str] | None = None,
+    interface_type: str = "SWD",
+    speed_options: list[int] | None = None,
+    write_speed_khz: int = 1000,
+) -> dict:
     return {
         "ide_name": ide_name,
         "interface_type": interface_type,
@@ -101,9 +110,9 @@ def arm_config(ide_name: str, interface_options: list[str] | None = None, interf
         "erase_mode": "全片擦除",
         "erase_mode_label": "擦除方式",
         "erase_mode_options": ERASE_OPTIONS,
-        "write_speed_khz": 1000,
+        "write_speed_khz": write_speed_khz,
         "speed_label": "频率(kHz)",
-        "speed_options": SPEED_OPTIONS,
+        "speed_options": speed_options or SPEED_OPTIONS,
         "start_address": "",
         "start_address_label": "起始地址",
         "completion_action": "复位运行",
@@ -117,7 +126,11 @@ def arm_config(ide_name: str, interface_options: list[str] | None = None, interf
 
 def stlink_config() -> dict:
     return {
-        **arm_config("STM32CubeIDE"),
+        **arm_config(
+            "STM32CubeIDE",
+            speed_options=STLINK_SPEED_OPTIONS,
+            write_speed_khz=900,
+        ),
         "qspi_flash_model": "W25Q128",
         "qspi_flash_model_label": "QSPI Flash",
         "qspi_flash_model_options": ["W25Q64", "W25Q128", "W25Q256"],
@@ -129,14 +142,23 @@ def stlink_config() -> dict:
 
 SYSTEM_SCRIPT_CATALOG = [
     {"name": "stlink_stm32_mcu_flash", "burner": "ST-LINK", "type": "bat", "default_config": stlink_config()},
-    {"name": "jlink_v4_arm_mcu_flash", "burner": "J-LINK", "type": "bat", "default_config": arm_config("Keil uVision")},
+    {
+        "name": "jlink_v4_arm_mcu_flash",
+        "burner": "J-LINK",
+        "type": "bat",
+        "default_config": arm_config("Keil uVision", speed_options=JLINK_SPEED_OPTIONS),
+    },
     {"name": "pwlink_v2_arm_mcu_flash", "burner": "PWLINK2", "type": "bat", "default_config": arm_config("Keil uVision", ["SWD", "JTAG"])},
     {
         "name": "gdlink_arm_mcu_flash",
         "burner": "GDLINK",
         "type": "bat",
         "default_config": {
-            **arm_config("Keil uVision", ["SWD", "JTAG"]),
+            **arm_config(
+                "Keil uVision",
+                ["SWD", "JTAG"],
+                speed_options=GDLINK_SPEED_OPTIONS,
+            ),
             "bichina_burn_mode": "单烧",
             "bichina_burn_mode_label": "Bichina烧录参数",
             "bichina_burn_mode_options": ["单烧", "量产烧录", "擦除后烧录"],
@@ -178,7 +200,7 @@ SYSTEM_SCRIPT_CATALOG = [
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
-            "timeout_minutes": 600,
+            "timeout_seconds": 600,
         },
     },
     {
@@ -215,7 +237,7 @@ SYSTEM_SCRIPT_CATALOG = [
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
-            "timeout_minutes": 120,
+            "timeout_seconds": 600,
         },
     },
     {
@@ -305,9 +327,9 @@ SYSTEM_SCRIPT_CATALOG = [
             "erase_mode": "全片擦除",
             "erase_mode_label": "擦除方式",
             "erase_mode_options": ERASE_OPTIONS,
-            "completion_action": "不处理",
+            "completion_action": "\u4e0d\u5904\u7406",
             "completion_action_label": "完成后动作",
-            "completion_action_options": ["不处理"],
+            "completion_action_options": ["\u4e0d\u5904\u7406", "\u590d\u4f4d"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
             "timeout_minutes": 120,
@@ -384,7 +406,7 @@ SYSTEM_SCRIPT_BINDINGS = {
 
 
 TOOL_REQUIREMENTS = [
-    {"burner": "ST-LINK", "tool": "STM32CubeProgrammer CLI", "env": "STM32_PROGRAMMER_CLI", "download": "https://www.st.com/en/development-tools/stm32cubeprog.html"},
+    {"burner": "ST-LINK", "tool": "STM32 ST-LINK Utility CLI", "env": "STLINK_UTILITY_CLI", "download": "https://www.st.com/en/development-tools/stsw-link004.html"},
     {"burner": "J-LINK", "tool": "SEGGER J-Link Software", "env": "JLINK_EXE", "download": "https://www.segger.com/downloads/jlink/"},
     {"burner": "PWLINK2", "tool": "PowerWriter/PWLINK 官方工具", "env": "PWLINK2_CMD_TEMPLATE 或 POWERWRITER_CLI", "download": "https://docs.powerwriter.com/"},
     {"burner": "GDLINK", "tool": "GigaDevice/GD-Link Programmer", "env": "GDLINK_CMD_TEMPLATE 或 GDLINK_CLI", "download": "https://www.gigadevice.com/"},
@@ -414,38 +436,38 @@ def _batch_header(script_name: str, burner_name: str) -> str:
         echo [INFO] PCIDS burner script started: %SCRIPT_NAME%
         echo [INFO] Associated burner type: %BURNER_NAME%
         echo [CONFIG] ===== Effective script parameters =====
-        echo [CONFIG] TASK_ID=%TASK_ID%
-        echo [CONFIG] TASK_TYPE=%TASK_TYPE%
-        echo [CONFIG] SCRIPT_NAME=%SCRIPT_NAME%
-        echo [CONFIG] BURNER_NAME=%BURNER_NAME%
-        echo [CONFIG] BURNER_SN=%BURNER_SN%
-        rem USB instance paths may contain cmd metacharacters such as '&'. Keep the
-        rem expanded values quoted so diagnostic output cannot be executed as a command.
-        echo [CONFIG] BURNER_PORT="%BURNER_PORT%"
-        echo [CONFIG] BURNER_LOCATION="%BURNER_LOCATION%"
-        echo [CONFIG] TARGET_CHIP=%TARGET_CHIP%
-        echo [CONFIG] FIRMWARE_PATH=%FIRMWARE_PATH%
-        echo [CONFIG] IDE_NAME=%IDE_NAME%
-        echo [CONFIG] INTERFACE_TYPE=%INTERFACE_TYPE%
-        echo [CONFIG] TCK_FREQUENCY=%TCK_FREQUENCY%
-        echo [CONFIG] WRITE_SPEED_KHZ=%WRITE_SPEED_KHZ%
-        echo [CONFIG] START_ADDRESS=%START_ADDRESS%
-        echo [CONFIG] ERASE_MODE=%ERASE_MODE%
-        echo [CONFIG] WRITE_VERIFY=%WRITE_VERIFY%
-        echo [CONFIG] COMPLETION_ACTION=%COMPLETION_ACTION%
-        echo [CONFIG] CABLE_INDEX=%CABLE_INDEX%
-        echo [CONFIG] QSPI_FLASH_MODEL=%QSPI_FLASH_MODEL%
-        echo [CONFIG] TARGET_CONFIG_FILE=%TARGET_CONFIG_FILE%
-        echo [CONFIG] GEL_INIT_SCRIPT=%GEL_INIT_SCRIPT%
-        echo [CONFIG] JTAG_CHAIN_INDEX=%JTAG_CHAIN_INDEX%
-        echo [CONFIG] PROGRAM_VOLTAGE=%PROGRAM_VOLTAGE%
-        echo [CONFIG] EEPROM_WRITE=%EEPROM_WRITE%
-        echo [CONFIG] WRITE_CONFIG_BITS=%WRITE_CONFIG_BITS%
-        echo [CONFIG] PRE_ERASE=%PRE_ERASE%
-        echo [CONFIG] BLANK_CHECK=%BLANK_CHECK%
-        echo [CONFIG] EXECUTE_PROGRAM=%EXECUTE_PROGRAM%
-        echo [CONFIG] SD_TARGET_PATH=%SD_TARGET_PATH%
-        echo [CONFIG] TIMEOUT_SECONDS=%TIMEOUT_SECONDS%
+        rem Print runtime variables through delayed expansion so USB instance
+        rem paths containing cmd metacharacters cannot break batch parsing.
+        echo [CONFIG] TASK_ID=!TASK_ID!
+        echo [CONFIG] TASK_TYPE=!TASK_TYPE!
+        echo [CONFIG] SCRIPT_NAME=!SCRIPT_NAME!
+        echo [CONFIG] BURNER_NAME=!BURNER_NAME!
+        echo [CONFIG] BURNER_SN=!BURNER_SN!
+        echo [CONFIG] BURNER_PORT="!BURNER_PORT!"
+        echo [CONFIG] BURNER_LOCATION="!BURNER_LOCATION!"
+        echo [CONFIG] TARGET_CHIP=!TARGET_CHIP!
+        echo [CONFIG] FIRMWARE_PATH=!FIRMWARE_PATH!
+        echo [CONFIG] IDE_NAME=!IDE_NAME!
+        echo [CONFIG] INTERFACE_TYPE=!INTERFACE_TYPE!
+        echo [CONFIG] TCK_FREQUENCY=!TCK_FREQUENCY!
+        echo [CONFIG] WRITE_SPEED_KHZ=!WRITE_SPEED_KHZ!
+        echo [CONFIG] START_ADDRESS=!START_ADDRESS!
+        echo [CONFIG] ERASE_MODE=!ERASE_MODE!
+        echo [CONFIG] WRITE_VERIFY=!WRITE_VERIFY!
+        echo [CONFIG] COMPLETION_ACTION=!COMPLETION_ACTION!
+        echo [CONFIG] CABLE_INDEX=!CABLE_INDEX!
+        echo [CONFIG] QSPI_FLASH_MODEL=!QSPI_FLASH_MODEL!
+        echo [CONFIG] TARGET_CONFIG_FILE=!TARGET_CONFIG_FILE!
+        echo [CONFIG] GEL_INIT_SCRIPT=!GEL_INIT_SCRIPT!
+        echo [CONFIG] JTAG_CHAIN_INDEX=!JTAG_CHAIN_INDEX!
+        echo [CONFIG] PROGRAM_VOLTAGE=!PROGRAM_VOLTAGE!
+        echo [CONFIG] EEPROM_WRITE=!EEPROM_WRITE!
+        echo [CONFIG] WRITE_CONFIG_BITS=!WRITE_CONFIG_BITS!
+        echo [CONFIG] PRE_ERASE=!PRE_ERASE!
+        echo [CONFIG] BLANK_CHECK=!BLANK_CHECK!
+        echo [CONFIG] EXECUTE_PROGRAM=!EXECUTE_PROGRAM!
+        echo [CONFIG] SD_TARGET_PATH=!SD_TARGET_PATH!
+        echo [CONFIG] TIMEOUT_SECONDS=!TIMEOUT_SECONDS!
         echo [CONFIG] =======================================
         if "%FIRMWARE_PATH%"=="" (
           echo [ERROR] 未提供固件路径，请检查任务配置中的 FIRMWARE_PATH。
@@ -534,12 +556,20 @@ def _pyocd_preflight_helper_source() -> str:
             }}
 
 
-        def _collect_probes(expected_unique_id):
+        def _collect_probes(expected_unique_id, trim_probe_nul=False):
+            def normalize_unique_id(value):
+                # Some CMSIS-DAP firmwares (notably GDLinker_V3) expose a
+                # fixed-width USB serial descriptor padded with NUL bytes.
+                # Remove padding only; matching remains exact afterwards.
+                normalized = str(value or "").strip()
+                return normalized.rstrip("\\x00").strip() if trim_probe_nul else normalized
+
+            expected_unique_id = normalize_unique_id(expected_unique_id)
             probes = []
             for probe in ConnectHelper.get_all_connected_probes(blocking=False):
                 probes.append(
                     {{
-                        "unique_id": str(getattr(probe, "unique_id", "") or ""),
+                        "unique_id": normalize_unique_id(getattr(probe, "unique_id", "")),
                         "description": str(getattr(probe, "description", "") or ""),
                         "vendor_name": str(getattr(probe, "vendor_name", "") or ""),
                         "product_name": str(getattr(probe, "product_name", "") or ""),
@@ -554,10 +584,14 @@ def _pyocd_preflight_helper_source() -> str:
             parser.add_argument("command", choices=["preflight"])
             parser.add_argument("--target-chip", required=True)
             parser.add_argument("--probe-unique-id", required=True)
+            parser.add_argument("--trim-probe-nul", action="store_true")
             args = parser.parse_args()
 
             target_info = _resolve_target(args.target_chip)
-            probes, matches = _collect_probes(str(args.probe_unique_id or ""))
+            probes, matches = _collect_probes(
+                str(args.probe_unique_id or ""),
+                trim_probe_nul=bool(args.trim_probe_nul),
+            )
             payload = {{
                 "pyocd_version": pyocd_version,
                 "target": target_info,
@@ -1225,6 +1259,8 @@ def _strict_flash_parameter_guards() -> str:
     )
 
 def _strict_pyocd_runner(probe_label: str) -> str:
+    trim_probe_nul_arg = " --trim-probe-nul" if probe_label in {"ST-LINK", "J-LINK", "GDLINK"} else ""
+    retry_frequency = "125k" if probe_label == "ST-LINK" else "50k"
     return dedent(
         f"""\
         if "%PYOCD_EXE%"=="" for /f "delims=" %%I in ('where pyocd.exe 2^>nul') do if "%PYOCD_EXE%"=="" set "PYOCD_EXE=%%I"
@@ -1237,8 +1273,8 @@ def _strict_pyocd_runner(probe_label: str) -> str:
         {_pyocd_preflight_script_setup().rstrip()}
         set "PYOCD_PREFLIGHT_LOG=%TEMP%\\pcids_pyocd_preflight_%TASK_ID%.json"
         if "%TASK_ID%"=="" set "PYOCD_PREFLIGHT_LOG=%TEMP%\\pcids_pyocd_preflight.json"
-        echo [EXEC] "%PYOCD_PYTHON%" "%PYOCD_HELPER%" preflight --target-chip "%TARGET_CHIP%" --probe-unique-id "%BURNER_SN%"
-        call "%PYOCD_PYTHON%" "%PYOCD_HELPER%" preflight --target-chip "%TARGET_CHIP%" --probe-unique-id "%BURNER_SN%" >"!PYOCD_PREFLIGHT_LOG!" 2>&1
+        echo [EXEC] "%PYOCD_PYTHON%" "%PYOCD_HELPER%" preflight --target-chip "%TARGET_CHIP%" --probe-unique-id "%BURNER_SN%"{trim_probe_nul_arg}
+        call "%PYOCD_PYTHON%" "%PYOCD_HELPER%" preflight --target-chip "%TARGET_CHIP%" --probe-unique-id "%BURNER_SN%"{trim_probe_nul_arg} >"!PYOCD_PREFLIGHT_LOG!" 2>&1
         set "PYOCD_PREFLIGHT_EXIT=!ERRORLEVEL!"
         if not "!PYOCD_PREFLIGHT_EXIT!"=="0" (
           type "!PYOCD_PREFLIGHT_LOG!"
@@ -1281,7 +1317,7 @@ def _strict_pyocd_runner(probe_label: str) -> str:
         if /I "%ERASE_MODE%"=="sector" set "PYOCD_ERASE=sector"
         set "PYOCD_FREQ=%WRITE_SPEED_KHZ%k"
         if "%WRITE_SPEED_KHZ%"=="" set "PYOCD_FREQ=1000k"
-        set "PYOCD_RETRY_FREQ=50k"
+        set "PYOCD_RETRY_FREQ={retry_frequency}"
         set "PYOCD_OPTIONS="
         if /I "%INTERFACE_TYPE%"=="JTAG" set "PYOCD_OPTIONS=-O dap_protocol=jtag"
         set "PYOCD_STABILITY_OPTIONS=-O reset_type=hardware -O cmsis_dap.limit_packets=true -O jlink.non_interactive=false"
@@ -1291,62 +1327,66 @@ def _strict_pyocd_runner(probe_label: str) -> str:
         if /I "%COMPLETION_ACTION%"=="off" set "PYOCD_FLASH_RESET_OPTION=--no-reset"
         set "PYOCD_ADDRESS_ARG="
         if /I "!PCIDS_FIRMWARE_EXT!"==".bin" set "PYOCD_ADDRESS_ARG=-a %START_ADDRESS%"
-        call "%PYOCD_EXE%" flash -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_FREQ% -M halt -e %PYOCD_ERASE% %PYOCD_OPTIONS% %PYOCD_STABILITY_OPTIONS% %PYOCD_FLASH_RESET_OPTION% %PYOCD_ADDRESS_ARG% "%FIRMWARE_PATH%"
+        rem Do not invoke the pip-generated pyocd.exe launcher.  It can exit with
+        rem code 1 and no diagnostics on machines where the venv was copied or
+        rem its base Python was installed after deployment.  The bundled Python
+        rem module is the same pyOCD version and is stable in both cases.
+        call "%PYOCD_PYTHON%" -m pyocd flash -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_FREQ% -M halt -e %PYOCD_ERASE% %PYOCD_OPTIONS% %PYOCD_STABILITY_OPTIONS% %PYOCD_FLASH_RESET_OPTION% %PYOCD_ADDRESS_ARG% "%FIRMWARE_PATH%"
         set "PYOCD_FLASH_EXIT=!ERRORLEVEL!"
         if not "!PYOCD_FLASH_EXIT!"=="0" (
           echo [WARN] pyOCD flash failed with !PYOCD_FLASH_EXIT!, retrying same target and BURNER_SN under-reset at %PYOCD_RETRY_FREQ%.
-          call "%PYOCD_EXE%" flash -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset -e %PYOCD_ERASE% %PYOCD_OPTIONS% %PYOCD_STABILITY_OPTIONS% %PYOCD_FLASH_RESET_OPTION% %PYOCD_ADDRESS_ARG% "%FIRMWARE_PATH%"
+          call "%PYOCD_PYTHON%" -m pyocd flash -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset -e %PYOCD_ERASE% %PYOCD_OPTIONS% %PYOCD_STABILITY_OPTIONS% %PYOCD_FLASH_RESET_OPTION% %PYOCD_ADDRESS_ARG% "%FIRMWARE_PATH%"
           set "PYOCD_FLASH_EXIT=!ERRORLEVEL!"
         )
         if not "!PYOCD_FLASH_EXIT!"=="0" exit /b !PYOCD_FLASH_EXIT!
         set "PYOCD_COMPLETE_EXIT=0"
         if "%COMPLETION_ACTION%"=="复位运行" (
           echo [INFO] Completion action: reset and run.
-          call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
+          call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
           set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           if not "!PYOCD_COMPLETE_EXIT!"=="0" (
             echo [WARN] pyOCD reset-run failed, retrying same target and BURNER_SN with under-reset.
-            call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
+            call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
             set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           )
         )
         if /I "%COMPLETION_ACTION%"=="reset-run" (
           echo [INFO] Completion action: reset and run.
-          call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
+          call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
           set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           if not "!PYOCD_COMPLETE_EXIT!"=="0" (
             echo [WARN] pyOCD reset-run failed, retrying same target and BURNER_SN with under-reset.
-            call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
+            call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
             set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           )
         )
         if /I "%COMPLETION_ACTION%"=="run" (
           echo [INFO] Completion action: reset and run.
-          call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
+          call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
           set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           if not "!PYOCD_COMPLETE_EXIT!"=="0" (
             echo [WARN] pyOCD reset-run failed, retrying same target and BURNER_SN with under-reset.
-            call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
+            call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset" -c "sleep 100" -c "go" -c "exit"
             set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           )
         )
         if "%COMPLETION_ACTION%"=="仅复位" (
           echo [INFO] Completion action: reset and halt.
-          call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset halt" -c "exit"
+          call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset halt" -c "exit"
           set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           if not "!PYOCD_COMPLETE_EXIT!"=="0" (
             echo [WARN] pyOCD reset-halt failed, retrying same target and BURNER_SN with under-reset.
-            call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset halt" -c "exit"
+            call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset halt" -c "exit"
             set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           )
         )
         if /I "%COMPLETION_ACTION%"=="reset-halt" (
           echo [INFO] Completion action: reset and halt.
-          call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset halt" -c "exit"
+          call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M attach %PYOCD_OPTIONS% -c "reset halt" -c "exit"
           set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           if not "!PYOCD_COMPLETE_EXIT!"=="0" (
             echo [WARN] pyOCD reset-halt failed, retrying same target and BURNER_SN with under-reset.
-            call "%PYOCD_EXE%" commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset halt" -c "exit"
+            call "%PYOCD_PYTHON%" -m pyocd commander -u "%BURNER_SN%" -t "%PYOCD_TARGET%" -f %PYOCD_RETRY_FREQ% -M under-reset %PYOCD_OPTIONS% -c "reset halt" -c "exit"
             set "PYOCD_COMPLETE_EXIT=!ERRORLEVEL!"
           )
         )
@@ -1513,7 +1553,8 @@ def _legacy_pyocd_runner(probe_label: str, require_probe: bool = True) -> str:
 
 def _pyocd_runner(probe_label: str, require_probe: bool = True, strict: bool = False) -> str:
     if strict:
-        return _strict_pyocd_runner(probe_label)
+        runner = _strict_pyocd_runner(probe_label)
+        return _compose_batch_script(runner) if probe_label in {"J-LINK", "GDLINK"} else runner
     return _legacy_pyocd_runner(probe_label, require_probe=require_probe)
 
 
@@ -2035,33 +2076,61 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             _strict_flash_parameter_guards(),
             dedent(
                 r"""\
-                if "%STM32_PROGRAMMER_CLI%"=="" set "STM32_PROGRAMMER_CLI=%ProgramFiles%\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe"
-                if not exist "%STM32_PROGRAMMER_CLI%" for /f "delims=" %%I in ('where STM32_Programmer_CLI.exe 2^>nul') do if "%STM32_PROGRAMMER_CLI%"=="" set "STM32_PROGRAMMER_CLI=%%I"
-                if exist "%STM32_PROGRAMMER_CLI%" goto stlink_official
-                echo [INFO] STM32CubeProgrammer CLI not found, falling back to pyOCD.
-                """
-            ),
-            _pyocd_runner("ST-LINK", strict=True),
-            dedent(
-                """\
-                exit /b !ERRORLEVEL!
-                :stlink_official
-                set "CONNECT=port=%INTERFACE_TYPE% freq=%WRITE_SPEED_KHZ% sn=%BURNER_SN%"
+                if "%STLINK_UTILITY_CLI%"=="" if not "%PCIDS_BUNDLED_TOOLS_DIR%"=="" if exist "%PCIDS_BUNDLED_TOOLS_DIR%\ST-LINK\ST-LINK-Utility-CLI-3.6\ST-LINK_CLI.exe" set "STLINK_UTILITY_CLI=%PCIDS_BUNDLED_TOOLS_DIR%\ST-LINK\ST-LINK-Utility-CLI-3.6\ST-LINK_CLI.exe"
+                if "%STLINK_UTILITY_CLI%"=="" set "STLINK_UTILITY_CLI=%ProgramFiles(x86)%\STMicroelectronics\STM32 ST-LINK Utility\ST-LINK Utility\ST-LINK_CLI.exe"
+                if not exist "%STLINK_UTILITY_CLI%" if exist "%ProgramFiles%\STMicroelectronics\STM32 ST-LINK Utility\ST-LINK Utility\ST-LINK_CLI.exe" set "STLINK_UTILITY_CLI=%ProgramFiles%\STMicroelectronics\STM32 ST-LINK Utility\ST-LINK Utility\ST-LINK_CLI.exe"
+                if not exist "%STLINK_UTILITY_CLI%" for /f "delims=" %%I in ('where ST-LINK_CLI.exe 2^>nul') do if not exist "!STLINK_UTILITY_CLI!" set "STLINK_UTILITY_CLI=%%I"
+                if not exist "%STLINK_UTILITY_CLI%" (
+                  echo [ERROR] STM32 ST-LINK Utility CLI not found. Check PCIDS_BUNDLED_TOOLS_DIR or configure STLINK_UTILITY_CLI.
+                  exit /b 2
+                )
+                set "STLINK_FREQ_KHZ=%WRITE_SPEED_KHZ%"
+                if "%STLINK_FREQ_KHZ%"=="950" set "STLINK_FREQ_KHZ=900"
+                set "CONNECT=SN=%BURNER_SN% %INTERFACE_TYPE% FREQ=%STLINK_FREQ_KHZ%"
+                set "STLINK_CONNECT_MODE="
+                set "STLINK_PREFLIGHT_LOG=%TEMP%\\pcids_stlink_preflight_%TASK_ID%.log"
+                if "%TASK_ID%"=="" set "STLINK_PREFLIGHT_LOG=%TEMP%\\pcids_stlink_preflight.log"
+                echo [INFO] Using STM32 ST-LINK Utility CLI: %STLINK_UTILITY_CLI%
+                echo [EXEC] "%STLINK_UTILITY_CLI%" -c %CONNECT% -TVolt
+                call "%STLINK_UTILITY_CLI%" -c %CONNECT% -TVolt >"!STLINK_PREFLIGHT_LOG!" 2>&1
+                set "STLINK_PREFLIGHT_EXIT=!ERRORLEVEL!"
+                type "!STLINK_PREFLIGHT_LOG!"
+                findstr /I /C:"Connected via SWD" /C:"Connected via JTAG" "!STLINK_PREFLIGHT_LOG!" >nul
+                if errorlevel 1 set "STLINK_PREFLIGHT_EXIT=2"
+                if not "!STLINK_PREFLIGHT_EXIT!"=="0" (
+                  echo [WARN] Normal SWD connection failed; retrying the same ST-LINK under reset.
+                  echo [EXEC] "%STLINK_UTILITY_CLI%" -c %CONNECT% UR -TVolt
+                  call "%STLINK_UTILITY_CLI%" -c %CONNECT% UR -TVolt >"!STLINK_PREFLIGHT_LOG!" 2>&1
+                  set "STLINK_PREFLIGHT_EXIT=!ERRORLEVEL!"
+                  type "!STLINK_PREFLIGHT_LOG!"
+                  findstr /I /C:"Connected via SWD" /C:"Connected via JTAG" "!STLINK_PREFLIGHT_LOG!" >nul
+                  if errorlevel 1 set "STLINK_PREFLIGHT_EXIT=2"
+                  if not "!STLINK_PREFLIGHT_EXIT!"=="0" (
+                    del /f /q "!STLINK_PREFLIGHT_LOG!" >nul 2>nul
+                    exit /b 2
+                  )
+                  set "STLINK_CONNECT_MODE=UR"
+                )
+                del /f /q "!STLINK_PREFLIGHT_LOG!" >nul 2>nul
                 if "%ERASE_MODE%"=="全片擦除" (
-                  "%STM32_PROGRAMMER_CLI%" -c %CONNECT% -e all
+                  echo [EXEC] "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -ME
+                  "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -ME
                   set "STLINK_ERASE_EXIT=!ERRORLEVEL!"
                   if not "!STLINK_ERASE_EXIT!"=="0" exit /b !STLINK_ERASE_EXIT!
                 )
                 if /I "!PCIDS_FIRMWARE_EXT!"==".bin" (
-                  "%STM32_PROGRAMMER_CLI%" -c %CONNECT% -w "%FIRMWARE_PATH%" %START_ADDRESS% -v
+                  echo [EXEC] "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -P "%FIRMWARE_PATH%" %START_ADDRESS% -V after_programming
+                  "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -P "%FIRMWARE_PATH%" %START_ADDRESS% -V after_programming
                   set "STLINK_FLASH_EXIT=!ERRORLEVEL!"
                 ) else (
-                  "%STM32_PROGRAMMER_CLI%" -c %CONNECT% -w "%FIRMWARE_PATH%" -v
+                  echo [EXEC] "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -P "%FIRMWARE_PATH%" -V after_programming
+                  "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -P "%FIRMWARE_PATH%" -V after_programming
                   set "STLINK_FLASH_EXIT=!ERRORLEVEL!"
                 )
                 if not "!STLINK_FLASH_EXIT!"=="0" exit /b !STLINK_FLASH_EXIT!
                 if not "%COMPLETION_ACTION%"=="不处理" (
-                  "%STM32_PROGRAMMER_CLI%" -c %CONNECT% -rst
+                  echo [EXEC] "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -Rst
+                  "%STLINK_UTILITY_CLI%" -c %CONNECT% !STLINK_CONNECT_MODE! -Rst
                   set "STLINK_RESET_EXIT=!ERRORLEVEL!"
                   exit /b !STLINK_RESET_EXIT!
                 )
@@ -2070,17 +2139,19 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             ),
         )
     if script_name == "jlink_v4_arm_mcu_flash":
-        return header + dedent(
+        return _compose_batch_script(header, dedent(
             r"""
             if "%JLINK_EXE%"=="" set "JLINK_EXE=%ProgramFiles%\SEGGER\JLink\JLink.exe"
             if not exist "%JLINK_EXE%" if exist "%ProgramFiles%\SEGGER\JLink\JLinkExe.exe" set "JLINK_EXE=%ProgramFiles%\SEGGER\JLink\JLinkExe.exe"
             if not exist "%JLINK_EXE%" for /f "delims=" %%I in ('where JLink.exe 2^>nul') do if "%JLINK_EXE%"=="" set "JLINK_EXE=%%I"
-            if not exist "%JLINK_EXE%" (
-              echo [INFO] SEGGER J-Link CLI not found, falling back to pyOCD.
+            if not exist "%JLINK_EXE%" for /f "delims=" %%I in ('dir /b /s /a-d "%ProgramFiles%\SEGGER\JLink*\JLink.exe" 2^>nul') do if not exist "!JLINK_EXE!" set "JLINK_EXE=%%I"
+            if exist "%JLINK_EXE%" goto PCIDS_JLINK_OFFICIAL
+            echo [INFO] SEGGER J-Link CLI not found, falling back to pyOCD.
             """
-        ) + _pyocd_runner("J-LINK", strict=True) + dedent(
+        ), _pyocd_runner("J-LINK", strict=True), dedent(
             r"""
-            )
+            exit /b !ERRORLEVEL!
+            :PCIDS_JLINK_OFFICIAL
             set "JLINK_DEVICE=%TARGET_CHIP%"
             if "%JLINK_DEVICE%"=="" set "JLINK_DEVICE=%BOARD_NAME%"
             echo %JLINK_DEVICE%| findstr /R /I "^STM32[A-Z][0-9][0-9][0-9][A-Z][0-9A-Z][A-Z][0-9]$" >nul
@@ -2127,7 +2198,7 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             del "%JLINK_CMD%" >nul 2>nul
             exit /b !EXIT_CODE!
             """
-        )
+        ))
     if script_name == "pwlink_v2_arm_mcu_flash":
         return _compose_batch_script(header, _pyocd_runner("PWLINK2", strict=True))
     if script_name == "gdlink_arm_mcu_flash":
@@ -2228,15 +2299,18 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               exit /b 127
             )
             if "%HDSC_CCID_PYTHON%"=="" set "HDSC_CCID_PYTHON=python"
-            set "HDSC_BAUD_ARGS=--baud-rate "%WRITE_SPEED_KHZ%""
+            set "HDSC_BAUD_ARGS="
+            if not "%WRITE_SPEED_KHZ%"=="" set "HDSC_BAUD_ARGS=--baud-rate %WRITE_SPEED_KHZ%"
+            set "HDSC_ERASE_MODE_KEY=%HDSC_ERASE_MODE_KEY%"
+            if "%HDSC_ERASE_MODE_KEY%"=="" set "HDSC_ERASE_MODE_KEY=%ERASE_MODE%"
             set "HDSC_ERASE_MODE=chip"
-            if /I "%ERASE_MODE%"=="none" set "HDSC_ERASE_MODE=none"
-            if /I "%ERASE_MODE%"=="no-erase" set "HDSC_ERASE_MODE=none"
-            if "%ERASE_MODE%"=="不擦除直接编程" set "HDSC_ERASE_MODE=none"
+            if /I "%HDSC_ERASE_MODE_KEY%"=="none" set "HDSC_ERASE_MODE=none"
+            if /I "%HDSC_ERASE_MODE_KEY%"=="no-erase" set "HDSC_ERASE_MODE=none"
+            set "HDSC_COMPLETION_ACTION_KEY=%HDSC_COMPLETION_ACTION_KEY%"
+            if "%HDSC_COMPLETION_ACTION_KEY%"=="" set "HDSC_COMPLETION_ACTION_KEY=%COMPLETION_ACTION%"
             set "HDSC_COMPLETION_ACTION=reset-run"
-            if /I "%COMPLETION_ACTION%"=="none" set "HDSC_COMPLETION_ACTION=none"
-            if /I "%COMPLETION_ACTION%"=="off" set "HDSC_COMPLETION_ACTION=none"
-            if "%COMPLETION_ACTION%"=="不处理" set "HDSC_COMPLETION_ACTION=none"
+            if /I "%HDSC_COMPLETION_ACTION_KEY%"=="none" set "HDSC_COMPLETION_ACTION=none"
+            if /I "%HDSC_COMPLETION_ACTION_KEY%"=="off" set "HDSC_COMPLETION_ACTION=none"
             echo [EXEC] "%HDSC_CCID_PYTHON%" "%HDSC_CCID_AGENT%" flash --target-chip "%TARGET_CHIP%" --firmware "%FIRMWARE_PATH%" --erase-mode !HDSC_ERASE_MODE! --completion-action !HDSC_COMPLETION_ACTION! !HDSC_BAUD_ARGS!
             "%HDSC_CCID_PYTHON%" "%HDSC_CCID_AGENT%" flash --target-chip "%TARGET_CHIP%" --firmware "%FIRMWARE_PATH%" --erase-mode !HDSC_ERASE_MODE! --completion-action !HDSC_COMPLETION_ACTION! !HDSC_BAUD_ARGS!
             exit /b !ERRORLEVEL!
@@ -2268,54 +2342,81 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
             if "%TASK_ID%"=="" set "IPECMD_LOG=%TEMP%\pcids_ipecmd.log"
             del /f /q "%IPECMD_LOG%" >nul 2>nul
 
+            set "MPLAB_ERASE_MODE_KEY=%MPLAB_ERASE_MODE_KEY%"
+            if "%MPLAB_ERASE_MODE_KEY%"=="" if "%ERASE_MODE%"=="全片擦除" set "MPLAB_ERASE_MODE_KEY=chip"
+            if "%MPLAB_ERASE_MODE_KEY%"=="" if "%ERASE_MODE%"=="不擦除直接编程" set "MPLAB_ERASE_MODE_KEY=no-erase"
+            if "%MPLAB_ERASE_MODE_KEY%"=="" if /I "%ERASE_MODE%"=="chip" set "MPLAB_ERASE_MODE_KEY=chip"
+            if "%MPLAB_ERASE_MODE_KEY%"=="" if /I "%ERASE_MODE%"=="all" set "MPLAB_ERASE_MODE_KEY=chip"
+            if "%MPLAB_ERASE_MODE_KEY%"=="" if /I "%ERASE_MODE%"=="no-erase" set "MPLAB_ERASE_MODE_KEY=no-erase"
+            set "MPLAB_EEPROM_WRITE_KEY=%MPLAB_EEPROM_WRITE_KEY%"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if "%EEPROM_WRITE%"=="是" set "MPLAB_EEPROM_WRITE_KEY=yes"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if "%EEPROM_WRITE%"=="否" set "MPLAB_EEPROM_WRITE_KEY=no"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if /I "%EEPROM_WRITE%"=="yes" set "MPLAB_EEPROM_WRITE_KEY=yes"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if /I "%EEPROM_WRITE%"=="true" set "MPLAB_EEPROM_WRITE_KEY=yes"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if "%EEPROM_WRITE%"=="1" set "MPLAB_EEPROM_WRITE_KEY=yes"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if /I "%EEPROM_WRITE%"=="no" set "MPLAB_EEPROM_WRITE_KEY=no"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if /I "%EEPROM_WRITE%"=="false" set "MPLAB_EEPROM_WRITE_KEY=no"
+            if "%MPLAB_EEPROM_WRITE_KEY%"=="" if "%EEPROM_WRITE%"=="0" set "MPLAB_EEPROM_WRITE_KEY=no"
+            set "MPLAB_COMPLETION_ACTION_KEY=%MPLAB_COMPLETION_ACTION_KEY%"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if "%COMPLETION_ACTION%"=="编程复位后运行" set "MPLAB_COMPLETION_ACTION_KEY=reset-run"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if "%COMPLETION_ACTION%"=="编程后保持复位" set "MPLAB_COMPLETION_ACTION_KEY=hold-reset"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if /I "%COMPLETION_ACTION%"=="reset-run" set "MPLAB_COMPLETION_ACTION_KEY=reset-run"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if /I "%COMPLETION_ACTION%"=="run" set "MPLAB_COMPLETION_ACTION_KEY=reset-run"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if /I "%COMPLETION_ACTION%"=="hold-reset" set "MPLAB_COMPLETION_ACTION_KEY=hold-reset"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if /I "%COMPLETION_ACTION%"=="none" set "MPLAB_COMPLETION_ACTION_KEY=hold-reset"
+            if "%MPLAB_COMPLETION_ACTION_KEY%"=="" if /I "%COMPLETION_ACTION%"=="off" set "MPLAB_COMPLETION_ACTION_KEY=hold-reset"
+            set "MPLAB_BLANK_CHECK_KEY=%MPLAB_BLANK_CHECK_KEY%"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if "%BLANK_CHECK%"=="是" set "MPLAB_BLANK_CHECK_KEY=yes"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if "%BLANK_CHECK%"=="否" set "MPLAB_BLANK_CHECK_KEY=no"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if /I "%BLANK_CHECK%"=="yes" set "MPLAB_BLANK_CHECK_KEY=yes"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if /I "%BLANK_CHECK%"=="true" set "MPLAB_BLANK_CHECK_KEY=yes"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if "%BLANK_CHECK%"=="1" set "MPLAB_BLANK_CHECK_KEY=yes"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if /I "%BLANK_CHECK%"=="no" set "MPLAB_BLANK_CHECK_KEY=no"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if /I "%BLANK_CHECK%"=="false" set "MPLAB_BLANK_CHECK_KEY=no"
+            if "%MPLAB_BLANK_CHECK_KEY%"=="" if "%BLANK_CHECK%"=="0" set "MPLAB_BLANK_CHECK_KEY=no"
+            set "MPLAB_EXECUTE_PROGRAM_KEY=%MPLAB_EXECUTE_PROGRAM_KEY%"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if "%EXECUTE_PROGRAM%"=="是" set "MPLAB_EXECUTE_PROGRAM_KEY=yes"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if "%EXECUTE_PROGRAM%"=="否" set "MPLAB_EXECUTE_PROGRAM_KEY=no"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if /I "%EXECUTE_PROGRAM%"=="yes" set "MPLAB_EXECUTE_PROGRAM_KEY=yes"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if /I "%EXECUTE_PROGRAM%"=="true" set "MPLAB_EXECUTE_PROGRAM_KEY=yes"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if "%EXECUTE_PROGRAM%"=="1" set "MPLAB_EXECUTE_PROGRAM_KEY=yes"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if /I "%EXECUTE_PROGRAM%"=="no" set "MPLAB_EXECUTE_PROGRAM_KEY=no"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if /I "%EXECUTE_PROGRAM%"=="false" set "MPLAB_EXECUTE_PROGRAM_KEY=no"
+            if "%MPLAB_EXECUTE_PROGRAM_KEY%"=="" if "%EXECUTE_PROGRAM%"=="0" set "MPLAB_EXECUTE_PROGRAM_KEY=no"
+
             set "IPECMD_NO_ERASE_ARG="
-            if "%ERASE_MODE%"=="不擦除直接编程" set "IPECMD_NO_ERASE_ARG=-OH"
-            if /I "%ERASE_MODE%"=="no-erase" set "IPECMD_NO_ERASE_ARG=-OH"
+            if /I "%MPLAB_ERASE_MODE_KEY%"=="no-erase" set "IPECMD_NO_ERASE_ARG=-OH"
+
 
             set "IPECMD_PRESERVE_EE_ARG="
-            if "%EEPROM_WRITE%"=="否" set "IPECMD_PRESERVE_EE_ARG=-Z"
-            if /I "%EEPROM_WRITE%"=="no" set "IPECMD_PRESERVE_EE_ARG=-Z"
-            if /I "%EEPROM_WRITE%"=="false" set "IPECMD_PRESERVE_EE_ARG=-Z"
-            if "%EEPROM_WRITE%"=="0" set "IPECMD_PRESERVE_EE_ARG=-Z"
+            if /I "%MPLAB_EEPROM_WRITE_KEY%"=="no" set "IPECMD_PRESERVE_EE_ARG=-Z"
+            rem dsPIC30 CodeGuard requires the Boot, Secure and General segments to be
+            rem handled together.  Do not preserve EEPROM (-Z) for this family; the
+            rem known-good ICD3 command is direct -M and lets IPECMD erase/program it.
+            if /I "%TARGET_CHIP:~0,3%"=="30F" set "IPECMD_PRESERVE_EE_ARG="
+            if /I "%TARGET_CHIP:~0,7%"=="dsPIC30" set "IPECMD_PRESERVE_EE_ARG="
 
             set "IPECMD_VERIFY_ARG="
             if "%WRITE_VERIFY%"=="1" set "IPECMD_VERIFY_ARG=-YP -YC"
             if /I "%WRITE_VERIFY%"=="true" set "IPECMD_VERIFY_ARG=-YP -YC"
             if /I "%WRITE_VERIFY%"=="yes" set "IPECMD_VERIFY_ARG=-YP -YC"
             if not "%IPECMD_VERIFY_ARG%"=="" (
-              if "%EEPROM_WRITE%"=="是" set "IPECMD_VERIFY_ARG=!IPECMD_VERIFY_ARG! -YE"
-              if /I "%EEPROM_WRITE%"=="yes" set "IPECMD_VERIFY_ARG=!IPECMD_VERIFY_ARG! -YE"
-              if /I "%EEPROM_WRITE%"=="true" set "IPECMD_VERIFY_ARG=!IPECMD_VERIFY_ARG! -YE"
-              if "%EEPROM_WRITE%"=="1" set "IPECMD_VERIFY_ARG=!IPECMD_VERIFY_ARG! -YE"
+              if /I "%MPLAB_EEPROM_WRITE_KEY%"=="yes" set "IPECMD_VERIFY_ARG=!IPECMD_VERIFY_ARG! -YE"
             )
 
             set "IPECMD_RUN_ARG="
-            if "%COMPLETION_ACTION%"=="编程复位后运行" set "IPECMD_RUN_ARG=-OL"
-            if "%COMPLETION_ACTION%"=="复位运行" set "IPECMD_RUN_ARG=-OL"
-            if /I "%COMPLETION_ACTION%"=="reset-run" set "IPECMD_RUN_ARG=-OL"
-            if /I "%COMPLETION_ACTION%"=="run" set "IPECMD_RUN_ARG=-OL"
+            if /I "%MPLAB_COMPLETION_ACTION_KEY%"=="reset-run" set "IPECMD_RUN_ARG=-OL"
 
             set "IPECMD_DO_BLANK=0"
-            if "%BLANK_CHECK%"=="是" set "IPECMD_DO_BLANK=1"
-            if /I "%BLANK_CHECK%"=="yes" set "IPECMD_DO_BLANK=1"
-            if /I "%BLANK_CHECK%"=="true" set "IPECMD_DO_BLANK=1"
-            if "%BLANK_CHECK%"=="1" set "IPECMD_DO_BLANK=1"
+            if /I "%MPLAB_BLANK_CHECK_KEY%"=="yes" set "IPECMD_DO_BLANK=1"
 
             set "IPECMD_DO_PROGRAM=1"
-            if "%EXECUTE_PROGRAM%"=="否" set "IPECMD_DO_PROGRAM=0"
-            if /I "%EXECUTE_PROGRAM%"=="no" set "IPECMD_DO_PROGRAM=0"
-            if /I "%EXECUTE_PROGRAM%"=="false" set "IPECMD_DO_PROGRAM=0"
-            if "%EXECUTE_PROGRAM%"=="0" set "IPECMD_DO_PROGRAM=0"
+            if /I "%MPLAB_EXECUTE_PROGRAM_KEY%"=="no" set "IPECMD_DO_PROGRAM=0"
 
             set "IPECMD_EXIT=0"
-            if "%ERASE_MODE%"=="全片擦除" (
-              echo [EXEC] "%IPECMD_EXE%" -TPICD3 -P%TARGET_CHIP% -E
-              "%IPECMD_EXE%" -TPICD3 -P%TARGET_CHIP% -E >>"%IPECMD_LOG%" 2>&1
-              set "IPECMD_EXIT=!ERRORLEVEL!"
-              if not "!IPECMD_EXIT!"=="0" goto PCIDS_IPECMD_DONE
-              set "IPECMD_NO_ERASE_ARG=-OH"
-            )
-
+            rem ICD3/dsPIC30 performs the full erase as part of -M.  A standalone
+            rem -E is rejected by this target, while the proven direct program flow
+            rem emits "Device Erased" and then writes the image successfully.
             if "!IPECMD_DO_BLANK!"=="1" (
               echo [EXEC] "%IPECMD_EXE%" -TPICD3 -P%TARGET_CHIP% -C
               "%IPECMD_EXE%" -TPICD3 -P%TARGET_CHIP% -C >>"%IPECMD_LOG%" 2>&1
@@ -2341,6 +2442,7 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
 
             :PCIDS_IPECMD_DONE
             powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $path=$env:IPECMD_LOG; if (-not (Test-Path -LiteralPath $path)) { Write-Output '[WARN] IPECMD 未生成输出日志。'; exit 0 }; $bytes=[IO.File]::ReadAllBytes($path); $encodings=@([Text.Encoding]::GetEncoding('GB18030'),[Text.Encoding]::UTF8,[Text.Encoding]::Default); $text=''; $bestScore=[int]::MaxValue; foreach ($enc in $encodings) { $candidate=$enc.GetString($bytes); $score=([regex]::Matches($candidate,'\uFFFD|锟斤拷')).Count; if ($candidate -match 'Target device|DFP Version|连接到MPLAB|编程|核实|擦除') { $score -= 10 }; if ($score -lt $bestScore) { $bestScore=$score; $text=$candidate } }; $lines=$text -split \"`r?`n\"; Write-Output '--- IPECMD 关键日志摘要 ---'; $patterns=@('Currently loaded firmware','Target device .* found','Device Erased','Erase Succeeded','擦除成功','Programming','Programmed','Program Succeeded','编程/验证完成','Verify','Verified','核实中','核实失败','The operation completed','Operation Succeeded','passed','failed','Error','Could not','Unable','地址'); $matched=@(); foreach ($line in $lines) { $clean=($line -replace '[^\u0009\u000A\u000D\u0020-\u007E\u4E00-\u9FFF]', '').Trim(); if (-not $clean) { continue }; foreach ($pattern in $patterns) { if ($clean -match $pattern) { $matched += $clean; break } } }; $matched | Select-Object -Unique | ForEach-Object { Write-Output ('[IPECMD] ' + $_) }; if ($matched.Count -eq 0) { Write-Output '[IPECMD] 未匹配到关键阶段日志，下面显示最后 40 行。'; $lines | Select-Object -Last 40 | ForEach-Object { $clean=($_ -replace '[^\u0009\u000A\u000D\u0020-\u007E\u4E00-\u9FFF]', '').Trim(); if ($clean) { Write-Output ('[IPECMD] ' + $clean) } } }"
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; if ($env:IPECMD_EXIT -eq '0') { exit 0 }; $path=$env:IPECMD_LOG; if (-not (Test-Path -LiteralPath $path)) { exit 0 }; $bytes=[IO.File]::ReadAllBytes($path); $encodings=@([Text.Encoding]::GetEncoding('GB18030'),[Text.Encoding]::UTF8,[Text.Encoding]::Default); $text=''; $bestScore=[int]::MaxValue; foreach ($enc in $encodings) { $candidate=$enc.GetString($bytes); $score=([regex]::Matches($candidate,'\uFFFD|锟斤拷')).Count; if ($candidate -match 'Target device|DFP Version|连接到MPLAB|编程|核实|擦除') { $score -= 10 }; if ($score -lt $bestScore) { $bestScore=$score; $text=$candidate } }; $cleanLines=@(); foreach ($line in ($text -split \"`r?`n\")) { $clean=($line -replace '[^\u0009\u000A\u000D\u0020-\u007E\u4E00-\u9FFF]', '').Trim(); if ($clean) { $cleanLines += $clean } }; if ($cleanLines.Count -gt 0) { Write-Output '--- IPECMD 原始尾日志 ---'; $cleanLines | Select-Object -Last 80 | ForEach-Object { Write-Output ('[IPECMD-RAW] ' + $_) } }"
             exit /b !IPECMD_EXIT!
             """
         )
@@ -2404,6 +2506,22 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               echo [ERROR] 当前 Gowin 脚本仅支持 JTAG 接口。
               exit /b 2
             )
+            rem Some Gowin Programmer releases load MAINCMD and related
+            rem runtime modules through the CLI directory.  Task batches run
+            rem from a temporary directory, so make this independent of the
+            rem PCIDS application's inherited working directory and PATH.
+            for %%I in ("%GOWIN_PROGRAMMER_CLI%") do set "GOWIN_CLI_DIR=%%~dpI"
+            if "%GOWIN_CLI_DIR%"=="" (
+              echo [ERROR] Unable to resolve the Gowin Programmer CLI directory.
+              exit /b 127
+            )
+            set "PATH=%GOWIN_CLI_DIR%;%PATH%"
+            pushd "%GOWIN_CLI_DIR%" >nul 2>nul
+            if errorlevel 1 (
+              echo [ERROR] Unable to enter the Gowin Programmer CLI directory: %GOWIN_CLI_DIR%
+              exit /b 127
+            )
+            echo [INFO] Gowin Programmer runtime directory: %GOWIN_CLI_DIR%
             set "GOWIN_OPERATION=2"
             if "%WRITE_VERIFY%"=="1" set "GOWIN_OPERATION=4"
             if /I "%WRITE_VERIFY%"=="yes" set "GOWIN_OPERATION=4"
@@ -2488,7 +2606,21 @@ def build_system_script_content(script_name: str, burner_name: str) -> str:
               set "GOWIN_EXIT=64"
             )
             del /f /q "!GOWIN_RUN_LOG!" >nul 2>nul
-            exit /b !GOWIN_EXIT!
+            if not "!GOWIN_EXIT!"=="0" exit /b !GOWIN_EXIT!
+            if /I not "%GOWIN_COMPLETION_ACTION_MODE%"=="reset" exit /b 0
+            echo [INFO] Gowin completion action: reset/reprogram.
+            echo [EXEC] "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index 1 --cable "!GOWIN_CABLE_NAME!" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!"
+            set "GOWIN_RESET_LOG=%TEMP%\pcids_gowin_reset_%TASK_ID%.log"
+            "%GOWIN_PROGRAMMER_CLI%" --device "!GOWIN_DEVICE!" --operation_index 1 --cable "!GOWIN_CABLE_NAME!" --cable-index !GOWIN_CABLE_INDEX! --frequency "!GOWIN_FREQUENCY!" >"!GOWIN_RESET_LOG!" 2>&1
+            set "GOWIN_RESET_EXIT=!ERRORLEVEL!"
+            type "!GOWIN_RESET_LOG!"
+            findstr /I /C:"Error:" "!GOWIN_RESET_LOG!" >nul
+            if not errorlevel 1 (
+              for /F "usebackq delims=" %%L in (`findstr /I /C:"Error:" "!GOWIN_RESET_LOG!"`) do echo [ERROR] Gowin reset/reprogram: %%L
+              set "GOWIN_RESET_EXIT=65"
+            )
+            del /f /q "!GOWIN_RESET_LOG!" >nul 2>nul
+            exit /b !GOWIN_RESET_EXIT!
             """
         )
     if script_name == "sd_card_zynq7000_boot_update":
