@@ -118,7 +118,19 @@ def _al321_environment(env: Mapping[str, str]) -> str:
     operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
     operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
     is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
-    mode = "amd" if is_flash else "winusb"
+    location = str(env.get("BURNER_LOCATION") or "").strip()
+    is_ftdi = location.upper().startswith(r"USB\VID_0403")
+    xsdb_path = str(env.get("XSDB_EXE") or "").strip()
+    hw_server_path = str(env.get("HW_SERVER_EXE") or "").strip()
+    use_amd_sram = (
+        not is_flash
+        and is_ftdi
+        and bool(xsdb_path)
+        and bool(hw_server_path)
+        and Path(xsdb_path).is_file()
+        and Path(hw_server_path).is_file()
+    )
+    mode = "amd" if is_flash or use_amd_sram else "winusb"
     # AL321 is selected by its stable serial number.  Do not disable, restore,
     # or otherwise alter the independently-bound Gowin FTDI device.
     arguments = ["-Mode", mode, "-StateFile", str(state_file)]
@@ -154,7 +166,18 @@ def ensure_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
         operation = str(env.get("EXECUTION_OPERATION") or "").strip().lower()
         operation_mode = str(env.get("EXECUTION_OPERATION_MODE") or "").strip().lower()
         is_flash = operation_mode == "flash" or "flash" in operation or "固化" in operation
-        target_mode = "AMD/JTAG 驱动环境" if is_flash else "任务要求的 USB 环境"
+        location = str(env.get("BURNER_LOCATION") or "").strip()
+        xsdb_path = str(env.get("XSDB_EXE") or "").strip()
+        hw_server_path = str(env.get("HW_SERVER_EXE") or "").strip()
+        use_amd_sram = (
+            not is_flash
+            and location.upper().startswith(r"USB\VID_0403")
+            and bool(xsdb_path)
+            and bool(hw_server_path)
+            and Path(xsdb_path).is_file()
+            and Path(hw_server_path).is_file()
+        )
+        target_mode = "AMD/JTAG 驱动环境" if is_flash or use_amd_sram else "任务要求的 USB 环境"
         details = _al321_environment(env)
         return "\n".join(
             [
@@ -187,6 +210,8 @@ def restore_burner_environment(script_name: str, env: Mapping[str, str]) -> str:
     script_path = Path(configured) if configured else _burner_driver_script("AL321", "switch-al321-driver.ps1")
     task_id = str(env.get("TASK_ID") or "").strip() or "default"
     state_file = Path(tempfile.gettempdir()) / f"pcids_al321_driver_state_{task_id}.json"
+    if not state_file.is_file():
+        return ""
     arguments = ["-Mode", "winusb", "-StateFile", str(state_file)]
     serial = str(env.get("BURNER_SN") or "").strip()
     if not serial:

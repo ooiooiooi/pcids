@@ -490,7 +490,7 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
-            "timeout_seconds": 600,
+            "timeout_seconds": 1200,
         },
     },
     {

@@ -87,11 +87,13 @@ if ($Phase -eq 'Configure') {
     STM32_PROGRAMMER_CLI         = Find-ExactFile (Join-Path $burners 'ST-LINK') 'STM32_Programmer_CLI.exe'
     JLINK_EXE                    = Find-ExactFile (Join-Path $burners 'J-LINK') 'JLink.exe'
     PYOCD_EXE                    = Find-ExactFile (Join-Path $burners 'SWD_Downloader') 'pyocd.exe'
+    PYOCD_PYTHON                 = Find-ExactFile (Join-Path $burners 'SWD_Downloader\pyocd-runtime') 'python.exe'
     GDLINK_CLI                   = Find-ExactFile (Join-Path $burners 'GDLINK') 'GDLink_CLI.exe'
     OPENFPGALOADER_EXE           = Find-ExactFile (Join-Path $burners 'AL321') 'openFPGALoader.exe'
     AL321_DRIVER_SWITCH_SCRIPT   = Find-ExactFile (Join-Path $burners 'AL321') 'switch-al321-driver.ps1'
     GOWIN_PROGRAMMER_CLI         = Find-ExactFile (Join-Path $burners 'GOWIN') 'programmer_cli.exe'
     HDSC_CCID_AGENT              = Join-Path $burners 'HDSC\hdsc_ccid_agent.py'
+    HDSC_CCID_PYTHON             = Find-ExactFile (Join-Path $burners 'SWD_Downloader\pyocd-runtime') 'python.exe'
     HDC_EXE                      = Find-ExactFile (Join-Path $burners 'HDC') 'hdc.exe'
     XDS510_DRIVER_INSTALL_SCRIPT = Find-ExactFile (Join-Path $burners 'XDS510plus') 'install-xds510plus-driver.ps1'
     PROGRAM_FLASH_EXE            = Find-FirstFromRoots @('D:\Xilinx', 'C:\Xilinx', 'C:\AMDDesignTools') 'program_flash.bat'
@@ -142,10 +144,12 @@ if ($Phase -eq 'Validate') {
     STM32_PROGRAMMER_CLI = [Environment]::GetEnvironmentVariable('STM32_PROGRAMMER_CLI', 'Machine')
     JLINK_EXE = [Environment]::GetEnvironmentVariable('JLINK_EXE', 'Machine')
     PYOCD_EXE = [Environment]::GetEnvironmentVariable('PYOCD_EXE', 'Machine')
+    PYOCD_PYTHON = [Environment]::GetEnvironmentVariable('PYOCD_PYTHON', 'Machine')
     GDLINK_CLI = [Environment]::GetEnvironmentVariable('GDLINK_CLI', 'Machine')
     OPENFPGALOADER_EXE = [Environment]::GetEnvironmentVariable('OPENFPGALOADER_EXE', 'Machine')
     GOWIN_PROGRAMMER_CLI = [Environment]::GetEnvironmentVariable('GOWIN_PROGRAMMER_CLI', 'Machine')
     HDSC_CCID_AGENT = [Environment]::GetEnvironmentVariable('HDSC_CCID_AGENT', 'Machine')
+    HDSC_CCID_PYTHON = [Environment]::GetEnvironmentVariable('HDSC_CCID_PYTHON', 'Machine')
     PROGRAM_FLASH_EXE = [Environment]::GetEnvironmentVariable('PROGRAM_FLASH_EXE', 'Machine')
     XSDB_EXE = [Environment]::GetEnvironmentVariable('XSDB_EXE', 'Machine')
     HW_SERVER_EXE = [Environment]::GetEnvironmentVariable('HW_SERVER_EXE', 'Machine')

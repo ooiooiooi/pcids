@@ -1,8 +1,11 @@
 import unittest
+from pathlib import Path
+from pathlib import Path
 
 from backend.utils.burner_automation import (
     SYSTEM_SCRIPT_CATALOG,
     _al321_openfpgaloader_runner,
+    _al321_xsdb_sram_script_source,
     build_system_script_content,
 )
 
@@ -70,9 +73,47 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         self.assertIn("--detect -v", self.content)
         self.assertIn("预检测显示未发现目标 FPGA", self.content)
 
+    def test_ftdi_sram_prefers_amd_xsdb_and_keeps_openfpgaloader_as_fallback(self):
+        self.assertIn('if /I "%BURNER_LOCATION:~0,12%"=="USB\\VID_0403"', self.content)
+        self.assertIn("FTDI AL321 SRAM 使用 AMD 官方 xsdb/hw_server", self.content)
+        self.assertIn('echo [EXEC] "%XSDB_EXE%" "!AL321_SRAM_XSDB_SCRIPT!"', self.content)
+        self.assertIn(":PCIDS_AL321_OPENFPGALOADER_SRAM", self.content)
+        self.assertIn("回退 openFPGALoader SRAM 路径", self.content)
+        self.assertNotIn("__PCIDS_AL321_SRAM_XSDB_SETUP__", self.content)
+
+    def test_xsdb_sram_script_selects_exact_bound_fpga_target_without_model_allowlist(self):
+        source = _al321_xsdb_sram_script_source()
+        self.assertIn("set expectedSerial $::env(BURNER_SN)", source)
+        self.assertIn("$serial eq $expectedSerial", source)
+        self.assertIn('$targetIsFpga eq "1" || $targetName eq "pl"', source)
+        self.assertIn("set detectedFpgaContext", source)
+        self.assertIn("$targetDeviceContext eq $detectedFpgaContext", source)
+        self.assertIn("never by a model-name allowlist", source)
+        self.assertIn("if {[llength $detectedFpgaTargets] != 1}", source)
+        self.assertIn("if {[llength $matchedTargets] != 1}", source)
+        self.assertIn("targets $selectedId", source)
+        self.assertIn("fpga -file $firmwarePath", source)
+        self.assertIn("Bitstream target part: $bitstreamPart", source)
+        self.assertIn("Configured target chip: $configuredTarget", source)
+        self.assertIn("jtag targets -target-properties", source)
+        self.assertIn("__PCIDS_AL321_ERROR__:", source)
+        self.assertIn("JTAG detected $detectedFpgaName (IDCODE=$detectedFpgaIdcode)", source)
+        self.assertIn("Programming stopped before writing.", source)
+        self.assertIn("Compatibility checks will not be bypassed.", source)
+        self.assertIn("catch {fpga -file $firmwarePath}", source)
+        self.assertNotIn("-skip-compatibility-check", source)
+        self.assertNotIn("xczu9", source.lower())
+        self.assertNotIn("xczu15", source.lower())
+        self.assertLess(source.index("targets $selectedId"), source.index("fpga -file $firmwarePath"))
+
+    def test_flash_readiness_does_not_require_an_xczu_model_name(self):
+        self.assertIn('findstr /R /I /C:"(name [^ ][^ ]* idcode [^ ][^ ]*)"', self.content)
+        self.assertIn("带 IDCODE 的 JTAG 器件", self.content)
+        self.assertNotIn('findstr /I /C:"name xczu"', self.content)
+
     def test_flash_mode_parameters_are_declared(self):
         default_config = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "al321_fpga_mcu_flash")["default_config"]
-        self.assertEqual(default_config["timeout_seconds"], 600)
+        self.assertEqual(default_config["timeout_seconds"], 1200)
         self.assertEqual(
             default_config["qspi_flash_model_options"],
             [
@@ -107,6 +148,39 @@ class Al321OpenFPGALoaderScriptTests(unittest.TestCase):
         self.assertIn('if /I "!AL321_PROGRAM_FLASH_TYPE!"=="qspi-x4-dual-stacked" set "AL321_PROGRAM_FLASH_TYPE=qspi-x4-dual_stacked"', self.content)
         self.assertNotIn("__PCIDS_AL321_XSDB_SETUP__", self.content)
         self.assertNotIn("_al321_xsdb_scan_script_setup().rstrip()", self.content)
+
+    def test_program_flash_wrapper_uses_writable_temp_working_directory(self):
+        wrapper_path = (
+            Path(__file__).resolve().parents[2]
+            / "tools"
+            / "burners"
+            / "AL321"
+            / "run-program-flash-stream.ps1"
+        )
+        wrapper = wrapper_path.read_text(encoding="utf-8")
+
+        self.assertIn("$originalWorkingDirectory = (Get-Location).Path", wrapper)
+        self.assertIn("Set-Location -LiteralPath $logParent", wrapper)
+        self.assertIn("[INFO] program_flash working directory:", wrapper)
+        self.assertIn("Set-Location -LiteralPath $originalWorkingDirectory", wrapper)
+        self.assertLess(
+            wrapper.index("Set-Location -LiteralPath $logParent"),
+            wrapper.index("& $ProgramFlashExe @programArgs"),
+        )
+
+    def test_program_flash_stream_wrapper_keeps_one_log_handle_open(self):
+        wrapper_path = (
+            Path(__file__).resolve().parents[2]
+            / "tools"
+            / "burners"
+            / "AL321"
+            / "run-program-flash-stream.ps1"
+        )
+        wrapper = wrapper_path.read_text(encoding="utf-8")
+
+        self.assertIn("System.IO.StreamWriter", wrapper)
+        self.assertIn("$logWriter.AutoFlush = $true", wrapper)
+        self.assertNotIn("Add-Content", wrapper)
 
     def test_reports_zynqmp_psu_side_flash_limitation(self):
         self.assertIn("SPI Flash access is only available from PSU side", self.content)

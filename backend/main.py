@@ -15,6 +15,7 @@ from logging.handlers import TimedRotatingFileHandler
 import json
 import os
 from pathlib import Path
+import tempfile
 import time
 from urllib.parse import parse_qs
 import uvicorn
@@ -56,7 +57,10 @@ def _resolve_log_dir() -> Path:
         except OSError:
             continue
 
-    fallback = Path.cwd() / "logs"
+    # Never fall back to the process working directory: packaged builds may
+    # run from Program Files. If both configured and persistent log locations
+    # are unavailable, use a writable OS temp location.
+    fallback = Path(tempfile.gettempdir()) / "PCIDS" / "logs"
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback.resolve(strict=False)
 

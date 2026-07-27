@@ -11,6 +11,7 @@ from backend.routers.tasks import (
     _build_task_exception_log,
     _decode_mixed_subprocess_output,
     _decode_subprocess_output,
+    _decode_stlink_subprocess_output,
     _execute_script_content_locally,
     _resolve_subprocess_output_decoder,
     _run_subprocess_command,
@@ -307,6 +308,30 @@ class TaskSubprocessStreamingTests(unittest.IsolatedAsyncioTestCase):
 
     def test_only_pwlink_uses_mixed_output_decoder(self):
         self.assertIs(_resolve_subprocess_output_decoder("pwlink_v2_arm_mcu_flash"), _decode_mixed_subprocess_output)
+        self.assertIs(_resolve_subprocess_output_decoder("stlink_arm_mcu_flash"), _decode_subprocess_output)
+
+    def test_stlink_decoder_replaces_legacy_progress_glyphs_with_plain_progress(self):
+        raw = (
+            "Memory programming...\r\n"
+            "北北北北北北北北北北北北\r\n"
+            "0% 坜坜坜坜坜坜 100%\r\n"
+            "Reading and verifying device memory...\r\n"
+            "北北北北北北北北北北北北\r\n"
+            "0% 坜坜坜坜坜坜 100%\r\n"
+            "Verification...OK\r\n"
+        ).encode("gb18030")
+
+        decoded = _decode_stlink_subprocess_output(raw)
+
+        self.assertIn("Memory programming...", decoded)
+        self.assertIn("Reading and verifying device memory...", decoded)
+        self.assertEqual(decoded.count("[ST-LINK] Progress: 0% -> 100%"), 2)
+        self.assertIn("Verification...OK", decoded)
+        self.assertNotIn("北北", decoded)
+        self.assertNotIn("坜坜", decoded)
+
+    def test_only_stlink_utility_uses_stlink_output_decoder(self):
+        self.assertIs(_resolve_subprocess_output_decoder("stlink_stm32_mcu_flash"), _decode_stlink_subprocess_output)
         self.assertIs(_resolve_subprocess_output_decoder("stlink_arm_mcu_flash"), _decode_subprocess_output)
 
     def test_al321_flash_retry_keeps_driver_mode_between_attempts(self):

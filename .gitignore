@@ -71,6 +71,7 @@ pnpm-debug.log*
 dist-electron/
 out/
 release/
+release-*/
 release-test*/
 .package-*.pid
 .rebuild-*.pid
@@ -95,7 +96,16 @@ backend/app_data.db*
 uploads/
 .local-data/
 .runtime/
+.runtime-appdata/
+.codex-temp/
 .trae/
+
+# Vendor/debug scratch files accidentally emitted at repository root
+/$out/
+/MPLABXLog.xml*
+/xicom_zynq_bin*
+/!AL321_DRIVER_SWITCH_STDOUT_LOG!
+/!GOWIN_SCAN_LOG!
 
 # Generated exports
 frontend_source*.docx

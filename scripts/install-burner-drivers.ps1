@@ -134,6 +134,9 @@ function Configure-ToolEnvironment {
     Set-MachineEnvValue "STM32_PROGRAMMER_CLI" (Find-FirstFile (Join-Path $Root "ST-LINK") @("STM32_Programmer_CLI.exe", "STM32_Programmer_CLI"))
     Set-MachineEnvValue "JLINK_EXE" (Find-FirstFile (Join-Path $Root "J-LINK") @("JLink.exe", "JLinkExe.exe", "JLinkExe"))
     Set-MachineEnvValue "PYOCD_EXE" (Find-FirstFile (Join-Path $Root "SWD_Downloader") @("pyocd.exe", "pyocd"))
+    $bundledPython = Find-FirstFile (Join-Path $Root "SWD_Downloader\pyocd-runtime") @("python.exe")
+    Set-MachineEnvValue "PYOCD_PYTHON" $bundledPython
+    Set-MachineEnvValue "HDSC_CCID_PYTHON" $bundledPython
     Set-MachineEnvValue "OPENOCD_EXE" (Find-FirstFile (Join-Path $Root "SWD_Downloader") @("openocd.exe", "openocd"))
     Set-MachineEnvValue "POWERWRITER_CLI" (Find-FirstFile (Join-Path $Root "PWLINK2") @("*powerwriter*.exe", "*PowerWriter*.exe", "*pwlink*.exe", "*PWLINK*.exe"))
     Set-MachineEnvValue "GDLINK_CLI" (Find-FirstFile (Join-Path $Root "GDLINK") @("GDLink_CLI.exe", "GDLink_CLI", "*gdlink_cli*.exe"))

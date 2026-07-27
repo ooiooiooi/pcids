@@ -315,6 +315,48 @@ class TaskExecutionRuleTests(unittest.TestCase):
 
         self.assertEqual(plan.runtime_env["BURNER_SN"], "210512180081")
 
+    def test_build_execution_plan_upgrades_legacy_al321_flash_timeout_only(self):
+        al321_script = build_script({}, name="al321_fpga_mcu_flash")
+        burner = build_burner(
+            sn="210512180081",
+            burner_type="AL321",
+            location=r"USB\VID_0403&PID_6014\210512180081",
+        )
+
+        flash_plan = build_execution_plan(
+            build_task(),
+            {"execution_operation": "Flash固化", "timeout_seconds": 600},
+            None,
+            burner,
+            al321_script,
+            used_file_path="BOOT.bin",
+        )
+        sram_plan = build_execution_plan(
+            build_task(),
+            {"execution_operation": "SRAM下载", "timeout_seconds": 600},
+            None,
+            burner,
+            al321_script,
+            used_file_path="design.bit",
+        )
+        other_plan = build_execution_plan(
+            build_task(),
+            {
+                "timeout_seconds": 600,
+                "target_chip": "STM32F407VGT6",
+                "start_address": "0x08000000",
+            },
+            None,
+            build_burner(sn="STLINK-1", burner_type="ST-LINK"),
+            build_script({}, name="stlink_stm32_mcu_flash"),
+            used_file_path="firmware.bin",
+        )
+
+        self.assertEqual(flash_plan.timeout_seconds, 1200)
+        self.assertEqual(flash_plan.runtime_env["TIMEOUT_SECONDS"], "1200")
+        self.assertEqual(sram_plan.timeout_seconds, 600)
+        self.assertEqual(other_plan.timeout_seconds, 600)
+
     def test_build_execution_plan_rejects_al321_flash_without_stable_serial(self):
         script = build_script({}, name="al321_fpga_mcu_flash")
 

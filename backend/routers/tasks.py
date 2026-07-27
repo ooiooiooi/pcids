@@ -308,9 +308,42 @@ def _decode_mixed_subprocess_output(raw: bytes) -> str:
     return "".join(decoded_parts)
 
 
+def _decode_stlink_subprocess_output(raw: bytes) -> str:
+    """Remove ST-LINK Utility's non-text progress bar glyphs from its log.
+
+    ST-LINK Utility 3.x writes its progress bar using legacy console drawing
+    bytes.  When captured through ``cmd.exe`` those bytes are decoded as CJK
+    characters, producing long unreadable rows in the task detail drawer.
+    Keep the meaningful 0%/100% state, but only apply this cleanup to the
+    ST-LINK workflow so output from other vendor tools remains untouched.
+    """
+    decoded = _decode_subprocess_output(raw)
+    parts = re.split(r"(\r\n|\n|\r)", decoded)
+    cleaned_parts: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2:
+            cleaned_parts.append(part)
+            continue
+
+        percent_values = re.findall(r"(?<!\d)(?:0|100)%", part)
+        non_ascii_count = sum(not char.isascii() and not char.isspace() for char in part)
+        if len(percent_values) >= 2 and non_ascii_count >= 4:
+            cleaned_parts.append(f"[ST-LINK] Progress: {percent_values[0]} -> {percent_values[-1]}")
+            continue
+
+        non_whitespace = [char for char in part if not char.isspace()]
+        if len(non_whitespace) >= 12 and len(non_whitespace) == non_ascii_count:
+            # This is the standalone drawing-glyph row before a progress line.
+            continue
+        cleaned_parts.append(part)
+    return "".join(cleaned_parts)
+
+
 def _resolve_subprocess_output_decoder(script_name: Optional[str]) -> Callable[[bytes], str]:
     if str(script_name or "").strip() == "pwlink_v2_arm_mcu_flash":
         return _decode_mixed_subprocess_output
+    if str(script_name or "").strip() == "stlink_stm32_mcu_flash":
+        return _decode_stlink_subprocess_output
     return _decode_subprocess_output
 
 
@@ -482,6 +515,12 @@ def _task_display_time(value: Optional[datetime]) -> Optional[datetime]:
 
 def _script_output_failure_reason(stdout: str, stderr: str) -> str:
     output = "\n".join(part for part in [stdout, stderr] if part)
+    if "Could not create temporary file" in output and "xicom_zynq_bin" in output:
+        return (
+            "AL321 Flash 固化已完成连接、FSBL 初始化和擦除，但 Vitis program_flash "
+            "无法创建 xicom 临时文件；请将 program_flash 工作目录设置为用户可写的临时目录，"
+            "不要从 Program Files 下的只读目录执行。"
+        )
     if "STLink error" in output or "STM32 STLink" in output or "STM32 ST-LINK CLI" in output:
         if "No target connected" in output:
             return (
@@ -1109,51 +1148,82 @@ async def _taskkill_process_tree(pid: int) -> bool:
         return False
 
 
-async def _cleanup_windows_task_runtime_processes(task_id: int, force_hw_server: bool = False) -> list[int]:
-    if os.name != "nt":
-        return []
-    script = r"""
+def _windows_task_cleanup_script() -> str:
+    """Return a task-scoped Windows process-tree cleanup script.
+
+    The first process launched for a task is normally tracked in memory, but a
+    timeout, backend restart, or wrapper exit can orphan a descendant.  Match
+    only command lines carrying this task's unique runtime path/name, snapshot
+    the complete descendant tree, and then stop that snapshot leaf-first.
+    """
+    return r"""
 $ErrorActionPreference = 'SilentlyContinue'
 $taskId = $args[0]
-$forceHwServer = $args[1] -eq '1'
 $taskNeedles = @(
   ('\uploads\task_runs\' + $taskId + '\').ToLowerInvariant(),
   ('/uploads/task_runs/' + $taskId + '/').ToLowerInvariant(),
+  ('pcids_task_' + $taskId + '_').ToLowerInvariant(),
   ('pcids_al321_xsdb_' + $taskId + '.tcl').ToLowerInvariant(),
   ('pcids_al321_program_flash_' + $taskId + '.log').ToLowerInvariant(),
   ('pcids_al321_xsdb_' + $taskId + '.log').ToLowerInvariant()
 )
-$toolNames = @(
-  'cmd.exe',
-  'rdi_zynq_flash.exe',
-  'rdi_xsdb.exe',
-  'program_flash.exe',
-  'xsdb.exe',
-  'hw_server.exe'
-)
-$killed = @()
-Get-CimInstance Win32_Process | ForEach-Object {
-  $name = ([string]$_.Name).ToLowerInvariant()
-  if ($toolNames -notcontains $name) { return }
-  $cmd = ([string]$_.CommandLine).ToLowerInvariant()
-  $matched = $false
+$processes = @(Get-CimInstance Win32_Process)
+$targetIds = @()
+foreach ($process in $processes) {
+  if ([int]$process.ProcessId -eq [int]$PID) { continue }
+  $cmd = ([string]$process.CommandLine).ToLowerInvariant()
   foreach ($needle in $taskNeedles) {
     if ($needle -and $cmd.Contains($needle)) {
-      $matched = $true
+      $targetIds += [int]$process.ProcessId
       break
     }
   }
-  if (-not $matched -and $forceHwServer -and $name -eq 'hw_server.exe') {
-    $matched = $true
+}
+$targetIds = @($targetIds | Sort-Object -Unique)
+do {
+  $added = $false
+  foreach ($process in $processes) {
+    $processId = [int]$process.ProcessId
+    $parentId = [int]$process.ParentProcessId
+    if ($targetIds -contains $parentId -and $targetIds -notcontains $processId) {
+      $targetIds += $processId
+      $added = $true
+    }
   }
-  if (-not $matched) { return }
-  Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-  $killed += [string]$_.ProcessId
+} while ($added)
+
+$depthById = @{}
+foreach ($targetId in $targetIds) {
+  $depth = 0
+  $cursor = $targetId
+  while ($depth -lt 128) {
+    $current = $processes | Where-Object { [int]$_.ProcessId -eq [int]$cursor } | Select-Object -First 1
+    if (-not $current -or $targetIds -notcontains [int]$current.ParentProcessId) { break }
+    $cursor = [int]$current.ParentProcessId
+    $depth++
+  }
+  $depthById[$targetId] = $depth
+}
+$killed = @()
+foreach ($targetId in @($targetIds | Sort-Object { $depthById[$_] } -Descending)) {
+  Stop-Process -Id $targetId -Force -ErrorAction SilentlyContinue
+  if (-not (Get-Process -Id $targetId -ErrorAction SilentlyContinue)) {
+    $killed += [string]$targetId
+  }
 }
 if ($killed.Count -gt 0) {
   [Console]::Out.WriteLine(($killed -join ','))
 }
 """
+
+
+async def _cleanup_windows_task_runtime_processes(task_id: int, force_hw_server: bool = False) -> list[int]:
+    if os.name != "nt":
+        return []
+    # ``force_hw_server`` is retained for call compatibility only.  A shared
+    # hw_server must never be killed merely because one AL321 task stopped; it
+    # is cleaned only when it is a descendant of this task's matched process.
+    script = _windows_task_cleanup_script()
     try:
         proc = await asyncio.create_subprocess_exec(
             "powershell",
@@ -1163,7 +1233,6 @@ if ($killed.Count -gt 0) {
             "-Command",
             script,
             str(task_id),
-            "1" if force_hw_server else "0",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -1210,17 +1279,7 @@ async def _terminate_task_runtime_processes(task_id: int, task: Optional[Burning
     if TASK_RUNTIME_PROCESSES.get(task_id) is proc:
         TASK_RUNTIME_PROCESSES.pop(task_id, None)
 
-    force_hw_server = False
-    if task is not None:
-        config = parse_json_object(getattr(task, "config_json", None)) if getattr(task, "config_json", None) else {}
-        script_name = str(config.get("script_name") or config.get("SCRIPT_NAME") or "").lower()
-        burner_name = ""
-        if db is not None and getattr(task, "burner_id", None):
-            burner = db.query(Burner).filter(Burner.id == task.burner_id).first()
-            burner_name = str(getattr(burner, "name", "") or "").lower()
-        force_hw_server = "al321" in script_name or "al321" in burner_name
-
-    killed_children = await _cleanup_windows_task_runtime_processes(task_id, force_hw_server=force_hw_server)
+    killed_children = await _cleanup_windows_task_runtime_processes(task_id)
     logger.info(
         "task.terminate.runtime_cleanup | %s",
         json.dumps(
@@ -1229,7 +1288,7 @@ async def _terminate_task_runtime_processes(task_id: int, task: Optional[Burning
                 "main_pid": main_pid or None,
                 "killed_main": killed_main,
                 "killed_children": killed_children,
-                "force_hw_server": force_hw_server,
+                "process_scope": "exact-task-tree",
             },
             ensure_ascii=False,
         ),
@@ -3336,7 +3395,11 @@ def _prepare_hybrid_tftp_artifact(local_artifact_path: str, config: dict, artifa
     filename = _sanitize_remote_name(artifact_name)
     tftp_root = str(config.get("tftp_root") or os.environ.get("PCIDS_TFTP_ROOT") or "").strip()
     if not tftp_root:
-        tftp_root = str(Path.cwd() / ".runtime" / "tftp")
+        # The packaged backend is launched with its working directory under
+        # Program Files, which is read-only for the desktop user. TFTP staging
+        # is disposable runtime data, so keep it under the OS temp directory
+        # just like the AL321 runtime wrappers and driver-state files.
+        tftp_root = str(Path(tempfile.gettempdir()) / "PCIDS" / "tftp")
     root_path = Path(tftp_root).expanduser().resolve(strict=False)
     root_path.mkdir(parents=True, exist_ok=True)
     staged_path = root_path / filename
@@ -5261,6 +5324,7 @@ async def _execute_script_content_locally(
             {"newline": ""} if use_utf8_custom_batch else {}
         )
         with tempfile.NamedTemporaryFile(
+            prefix=f"pcids_task_{task_id}_" if task_id else "pcids_task_",
             suffix=script_ext,
             delete=False,
             mode="w",
@@ -5941,8 +6005,14 @@ def _ensure_task_not_terminated(db: Session, task_id: int) -> None:
     run_token = CURRENT_TASK_RUN_TOKEN.get()
     if run_token and TASK_ACTIVE_RUN_TOKENS.get(task_id) != run_token:
         raise RuntimeError("task_stale")
-    current = db.query(BurningTask).filter(BurningTask.id == task_id).first()
-    if current and _is_task_terminated_status(current.status):
+    # Do not read through SQLAlchemy's identity map here.  The terminate
+    # endpoint uses a different session, so a cached BurningTask can still say
+    # RUNNING and incorrectly allow the next retry to start.
+    current_status = db.execute(
+        text("SELECT status FROM tasks WHERE id = :task_id"),
+        {"task_id": task_id},
+    ).scalar()
+    if current_status is not None and _is_task_terminated_status(current_status):
         raise RuntimeError("task_terminated")
 
 async def simulate_burning_process(
@@ -7675,10 +7745,22 @@ async def terminate_task(
     task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if int(task.status or 0) == int(TaskStatus.TERMINATED):
-        return {"code": 0, "message": "任务已终止", "data": {"id": task.id, "status": task.status}}
-    if int(task.status or 0) == int(TaskStatus.TERMINATING):
-        return {"code": 0, "message": "任务正在终止中", "data": {"id": task.id, "status": task.status}}
+    if int(task.status or 0) in {int(TaskStatus.TERMINATING), int(TaskStatus.TERMINATED)}:
+        cleanup_result = await _terminate_task_runtime_processes(task_id, task, db)
+        if int(task.status or 0) == int(TaskStatus.TERMINATING):
+            _finalize_task_as_terminated(task)
+            db.commit()
+            db.refresh(task)
+        return {
+            "code": 0,
+            "message": "任务已终止，残留进程已清理",
+            "data": {
+                "id": task.id,
+                "status": task.status,
+                "status_text": _resolve_task_status_text(task.status),
+                "runtime_cleanup": cleanup_result,
+            },
+        }
     if int(task.status or 0) != int(TaskStatus.RUNNING):
         raise HTTPException(status_code=400, detail="当前任务不是执行中状态，无法终止")
 

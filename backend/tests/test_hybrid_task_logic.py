@@ -2,6 +2,7 @@ import socket
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -18,6 +19,7 @@ from backend.routers.tasks import (
     _execute_os_task_via_sylix,
     _looks_like_existing_directory_listing,
     _interrupt_pmon_auto_boot,
+    _prepare_hybrid_tftp_artifact,
     _validate_task_creation_payload,
     _probe_serial_port_access,
     _wait_for_stable_pmon_console,
@@ -71,6 +73,24 @@ class _FakeSerialConnection:
 
 
 class HybridTaskLogicTests(unittest.IsolatedAsyncioTestCase):
+    def test_tftp_staging_uses_system_temp_root_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.elf"
+            source.write_bytes(b"pcids-sylixos")
+            system_temp_root = Path(temp_dir) / "system-temp"
+
+            with patch("backend.routers.tasks.tempfile.gettempdir", return_value=str(system_temp_root)):
+                staged_path, filename = _prepare_hybrid_tftp_artifact(
+                    str(source),
+                    {},
+                    "bspls2kpcm2k01.elf",
+                )
+
+            expected_path = system_temp_root / "PCIDS" / "tftp" / "bspls2kpcm2k01.elf"
+            self.assertEqual(Path(staged_path), expected_path)
+            self.assertEqual(filename, "bspls2kpcm2k01.elf")
+            self.assertEqual(expected_path.read_bytes(), b"pcids-sylixos")
+
     async def test_ftp_passwordless_connection_test_fails(self):
         payload = {
             "transfer_protocol": "FTP+串口",

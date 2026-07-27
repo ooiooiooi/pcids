@@ -20,7 +20,9 @@ class Al321DriverSwitchScriptTests(unittest.TestCase):
 
     def test_already_active_amd_driver_is_treated_as_success_without_forcing_ftdi_back_to_winusb(self):
         self.assertIn('$current.Service -eq "FTDIBUS"', self.content)
-        self.assertIn('$current.PublishedInfPath -eq $resolvedAmdInfPath', self.content)
+        self.assertIn('return $current.Service -ne "FTDIBUS"', self.content)
+        self.assertIn("same signed package through its original", self.content)
+        self.assertIn("AMD xsdb/hw_server can use it without elevation or a driver update.", self.content)
         self.assertIn('AL321 already uses the required FTDI/AMD driver; no driver switch or WinUSB restore is needed.', self.content)
         self.assertIn('OriginalService = "WinUSB"', self.content)
         self.assertIn('State = "amd_active"', self.content)

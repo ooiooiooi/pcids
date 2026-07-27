@@ -1,5 +1,4 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from backend.routers.tasks import (
@@ -15,7 +14,6 @@ class TaskRunTokenTests(unittest.TestCase):
 
     def test_stale_execution_cannot_continue_after_reexecute(self):
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(status=1)
         TASK_ACTIVE_RUN_TOKENS[42] = "new-run"
         token = CURRENT_TASK_RUN_TOKEN.set("old-run")
         try:
@@ -26,7 +24,7 @@ class TaskRunTokenTests(unittest.TestCase):
 
     def test_current_execution_can_continue(self):
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(status=1)
+        db.execute.return_value.scalar.return_value = 1
         TASK_ACTIVE_RUN_TOKENS[42] = "current-run"
         token = CURRENT_TASK_RUN_TOKEN.set("current-run")
         try:
@@ -36,7 +34,7 @@ class TaskRunTokenTests(unittest.TestCase):
 
     def test_terminating_task_cannot_continue(self):
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(status=4)
+        db.execute.return_value.scalar.return_value = 4
         TASK_ACTIVE_RUN_TOKENS[42] = "current-run"
         token = CURRENT_TASK_RUN_TOKEN.set("current-run")
         try:

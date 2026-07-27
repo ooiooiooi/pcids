@@ -779,6 +779,13 @@ function Test-RequiresElevationForMode([string]$RequestedMode) {
     $device = Get-ExactDeviceBySerial $Serial
     $targetHardwareId = Get-InstanceHardwareId $device.InstanceId
     $current = Get-DriverMetadata $device.InstanceId
+    # Windows publishes an installed FTDI package as C:\Windows\INF\oemNN.inf,
+    # while discovery resolves the same signed package through its original
+    # ftdibus.inf path.  Comparing those path strings incorrectly requests UAC
+    # on every task even though the exact bound cable already uses FTDIBUS.
+    if ((Get-DeviceCategory $targetHardwareId) -eq "ftdi") {
+      return $current.Service -ne "FTDIBUS"
+    }
     $resolvedAmdInfPath = Resolve-AmdInfPath $targetHardwareId $current
     return -not ($current.Service -eq "FTDIBUS" -and $current.PublishedInfPath -eq $resolvedAmdInfPath)
   }
@@ -854,6 +861,10 @@ try {
   $current = Get-DriverMetadata $device.InstanceId
   if ((Get-DeviceCategory $targetHardwareId) -eq "ftdi" -and $current.Service -eq "WinUSB" -and @(Get-PresentCompatibleDevices $targetHardwareId).Count -ne 1) {
     throw "Refusing to switch shared FTDI device $targetHardwareId currently bound to WinUSB. Disconnect other matching FTDI devices, then retry."
+  }
+  if ((Get-DeviceCategory $targetHardwareId) -eq "ftdi" -and $current.Service -eq "FTDIBUS") {
+    Write-Host "[INFO] Exact AL321 FTDI cable already uses FTDIBUS; AMD xsdb/hw_server can use it without elevation or a driver update."
+    exit 0
   }
   $resolvedWinUsbInfPath = Resolve-WinUsbInfPath
   $resolvedAmdInfPath = Resolve-AmdInfPath $targetHardwareId $current

@@ -1,7 +1,7 @@
 # PCIDS 新工作站完整部署、驱动与验收手册
 
 > 适用范围：Windows 10/11 PCIDS 烧录工作站、服务器节点和通信协议验证工作站。
-> 当前验证基线：PCIDS 1.0.0，2026-07-24。
+> 当前验证基线：PCIDS 1.0.0，2026-07-27；已加入 XDS510Plus、Altera USB-Blaster II、MOXA UPort 1150 和翼辉混合烧录的目标机实测结论。
 > 本文档的目标是：新电脑按本文一次部署完成，不再重复出现“软件装了但 CLI 找不到、驱动版本不一致、缺 Python、局域网扫不到节点、制品无法同步”等问题。
 
 ## 1. 必须先理解的部署结构
@@ -29,6 +29,8 @@ D:\PCIDS-Deploy\
     ST-LINK\
     SWD_Downloader\
     XDS510plus\
+  drivers\
+    MOXA\
   installers\
     Xilinx_Unified_2020.2_1118_1232\
     MPLABX-v6.20-windows-installer.exe
@@ -64,7 +66,8 @@ Get-Volume | Select-Object DriveLetter, SizeRemaining
 - Vitis/Vivado 2020.2 离线安装介质。
 - MPLAB X 6.20、MPLAB XC8、MPLAB XC16。
 - Quartus/Quartus Programmer 和 USB-Blaster II 独立驱动包。
-- CCS 和 XDS510Plus/SEED 驱动。
+- CCS 5.x、完整 SEED XDS510Plus 插件、目标配置和驱动；不能只保存 CCS 安装器。
+- MOXA UPort 1150 驱动包，以及翼辉板卡所需串口、FTP/TFTP 网络配置记录。
 - 本手册和两个 PowerShell 部署脚本。
 
 复制结束后必须比较文件数量、总大小和安装包 SHA256，避免网络中断产生不完整文件：
@@ -183,7 +186,8 @@ python -c "import sys; print(sys.executable)"
 | HDSC CCID | Python agent + HDSC CCID Prog 6.04 | HDSC/Microchip WinUSB 驱动 | `HDSC_CCID_AGENT`、`HDSC_CCID_V604_EXE` | `python hdsc_ccid_agent.py --help` |
 | MPLAB ICD 3 | MPLAB X IPE 6.20 `ipecmd.exe` | Microchip WinUSB 驱动 | `IPECMD_EXE` | `ipecmd.exe -?` |
 | USB-Blaster II | Quartus Programmer `quartus_pgm.exe` | Intel/Altera USB-Blaster II 驱动 | `QUARTUS_PGM` | `quartus_pgm.exe --version`、`-l` |
-| XDS510Plus | CCS DSS + SEED 驱动 | `EZUSBPLUS` 驱动 | `DSS_BAT`、`XDS510_DRIVER_INSTALL_SCRIPT` | 设备服务为 `EZUSBPLUS` |
+| XDS510Plus | CCS DSS/UniFlash + SEED 插件 | `EZUSBPLUS` 驱动、目标 `.ccxml` | `DSS_BAT`、`XDS510_DRIVER_INSTALL_SCRIPT` | 服务为 `EZUSBPLUS`，UniFlash 能加载目标并连接 |
+| 翼辉混合烧录 | FTP/TFTP + 串口脚本 | MOXA UPort 1150、独立板卡网口 | 项目网络/串口配置 | 串口可打开、FTP 可达、TFTP 实传 |
 | HDC | OpenHarmony `hdc.exe` | 目标设备 USB 驱动 | `HDC_EXE` | `hdc.exe list targets` |
 
 ### 4.1 ST-LINK 注意事项
@@ -361,7 +365,7 @@ C:\Program Files\Microchip\MPLABX\v6.20\mplab_platform\mplab_ipe\ipecmd.exe
 
 ### 4.8 Quartus / USB-Blaster II
 
-安装 Quartus 25.1 后，也可能因为系统里同时存在 13.0sp1，自动搜索到旧版本。因此不能只说“Quartus 已安装”，必须检查 PCIDS 实际使用的 `QUARTUS_PGM`。
+安装 Quartus 25.1 后，也可能因为系统里同时存在 13.0sp1，自动搜索到不同版本。因此不能只说“Quartus 已安装”，必须检查 PCIDS 实际使用的 `QUARTUS_PGM`。本次 EPM7064AE/旧 `.pof` 制品已在 Quartus II 13.0sp1 上完成真实烧录和独立校验，建议该类项目固定使用：
 
 ```powershell
 $quartus = [Environment]::GetEnvironmentVariable("QUARTUS_PGM", "Machine")
@@ -370,17 +374,53 @@ $quartus
 & $quartus -l
 ```
 
-若项目需要固定版本，显式写入：
+```text
+C:\altera\13.0sp1\quartus\bin64\quartus_pgm.exe
+```
+
+若其他项目明确要求 Quartus 25.1，可以并存，但应按项目显式写入并重新验收，不能依赖自动搜索。设置 13.0sp1 示例：
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
   "QUARTUS_PGM",
-  "C:\intelFPGA_pro\25.1\quartus\bin64\quartus_pgm.exe",
+  "C:\altera\13.0sp1\quartus\bin64\quartus_pgm.exe",
   "Machine"
 )
 ```
 
 路径以现场真实安装目录为准。写入后必须重启 PCIDS。
+
+USB-Blaster II 在设备管理器中正常出现两个接口：
+
+```text
+Altera USB-Blaster II (JTAG interface)          MI_00
+Altera USB-Blaster II (System Console interface) MI_01
+```
+
+烧录必须选择 **JTAG interface**。两个接口均为 `Status=OK` 只证明“电脑能识别烧录器”，不证明烧录器已读到板卡。部署验收必须额外执行：
+
+```powershell
+$jtagconfig = "C:\altera\13.0sp1\quartus\bin64\jtagconfig.exe"
+& $jtagconfig --enum
+```
+
+EPM7064AE 测试板应能读到类似：
+
+```text
+170640DD   EPM7064AE
+```
+
+若显示 `Unable to read device chain (JTAG chain broken)`，而两个 USB 接口均正常，则优先检查目标板供电、VTref、GND、TCK/TMS/TDI/TDO、排线方向和连接器接触，不要反复重装驱动。本次实测即为重新连接板端链路后恢复。
+
+界面填写的频率还必须确认已真正传给 Quartus。可用以下命令检查并设置：
+
+```powershell
+& $jtagconfig --getparam 1 JtagClock
+& $jtagconfig --setparam 1 JtagClock 2500000
+& $jtagconfig --getparam 1 JtagClock
+```
+
+烧录器重新插拔后，`USB-1` 可能变成 `USB-2`，时钟也可能恢复默认值。不要在配置或脚本中永久写死瞬时编号；重新扫描并在任务前核对实际 cable 和实际 JTAG 时钟。若设备只支持邻近档位，2.5 MHz 可能实际落到 2.4 MHz，应以 `--getparam` 输出为准。
 
 ### 4.9 CCS / XDS510Plus
 
@@ -388,13 +428,22 @@ $quartus
 
 - CCS 安装自己的目录。
 - XDS510Plus/SEED 驱动通过 `install-xds510plus-driver.ps1` 安装。
+- CCS 目录中必须存在 SEED 仿真插件、connection/driver 描述和 UniFlash 命令行入口；“CCS 能启动”不能证明这些文件存在。
+- PCIDS 离线包中必须有对应 `.ccxml` 目标配置。
 - PCIDS 使用 `DSS_BAT` 指向实际 CCS DSS。
 
 当前验证目标路径示例：
 
 ```text
 C:\ti\ccsv5\ccs_base\scripting\bin\dss.bat
+C:\ti\ccsv5\ccs_base\scripting\examples\uniflash\cmdLine\uniflash.bat
+C:\ti\ccsv5\ccs_base\emulation\seed\seedxds510usb.inf
+C:\ti\ccsv5\ccs_base\emulation\seed\seedxds510usb.sys
+C:\ti\ccsv5\ccs_base\common\uscif\seed*.dll
+C:\ti\ccsv5\ccs_base\common\targetdb\connections\SEED-XDS510PLUS*
+C:\ti\ccsv5\ccs_base\common\targetdb\drivers\seedxds510plus*
 D:\PCIDS-Deploy\burners\XDS510plus\drivers\install-xds510plus-driver.ps1
+D:\PCIDS-Deploy\burners\XDS510plus\targets\seed_xds510plus_f28335.ccxml
 ```
 
 设备通过标准：
@@ -405,7 +454,61 @@ Service = EZUSBPLUS
 Status = OK
 ```
 
+本次目标机最初虽然已安装 CCS 5.5，但上述 SEED 插件文件为 0，设备处于未知状态。因此部署时必须分别验收“CCS 主程序、SEED 插件、Windows 驱动、目标 `.ccxml`”，禁止用文件夹整体复制成功代替逐项检查。
+
+驱动预检：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File D:\PCIDS-Deploy\burners\XDS510plus\drivers\ensure-xds510plus-mode.ps1
+```
+
+输出应表明当前和要求的驱动均为 `EZUSBPLUS`，且结果为 matched。然后执行：
+
+```powershell
+& "C:\ti\ccsv5\ccs_base\scripting\examples\uniflash\cmdLine\uniflash.bat" -help
+```
+
+再用交付 `.ccxml` 执行 `-listOperations` 或只读连接检查。只有能够加载 TMS320F28335 配置并连接，才进入真实擦写验收。
+
+旧版 SEED 驱动可能没有厂商数字签名，直接 `pnputil /add-driver` 会报“第三方 INF 不包含数字签名信息”。首选经过批准的厂商签名驱动；若现场只能使用遗留驱动，必须由管理员批准后制作受控的测试签名 catalog、将公开证书导入目标机 `LocalMachine\Root` 和 `TrustedPublisher`，并记录测试签名状态。禁止为了省事永久关闭所有驱动签名检查，也不要把私钥随部署包分发。
+
+真实烧录验收中可能出现 `.out` 某些 section 位于不可写区域的警告。若随后擦除、加载、复位均成功且板卡运行正常，可将其作为链接段警告记录；若板卡行为异常，则必须检查 linker map 和目标内存映射，不能仅凭任务退出码判断。
+
 CCS 3.3 可以保留用于原项目，但 PCIDS 当前路径必须以 `DSS_BAT` 实际指向并验证可执行，不能仅凭“CCS 3.3 已安装”判定环境完成。
+
+### 4.10 翼辉混合烧录 / MOXA UPort 1150
+
+翼辉任务同时依赖串口、板卡网络、FTP/TFTP 和 PCIDS 后端临时目录。目标机需要安装并验收 MOXA UPort 1150 驱动：
+
+```text
+硬件 ID：USB\VID_110A&PID_1150
+驱动包：mxuboard2.inf、mxuport2.inf
+已验证版本：3.2.0.0
+建议离线归档位置：D:\PCIDS-Deploy\drivers\MOXA
+```
+
+COM 号会随机器和 USB 端口变化，本次目标机为 COM1、源工作站为 COM2。因此脚本和项目配置禁止写死源机器 COM 号，部署后应按目标机实际端口执行 115200/8N1 打开测试。
+
+板卡网络的一个已验证示例为：
+
+```text
+工作站板卡网口：192.168.1.100/24
+翼辉板卡：      192.168.1.230
+FTP：           TCP 21
+TFTP：          UDP 69 + 动态数据端口
+```
+
+地址以现场为准。先 `Test-NetConnection <板卡IP> -Port 21`，再验证配置中的 FTP 账号，不要假定密码与其他板卡相同。TFTP 防火墙规则应按 PCIDS 后端程序、本地板卡网口 IP 和远端板卡 IP 精确放行；只放 UDP 69 可能仍会挡住动态数据端口。
+
+PCIDS 安装目录位于 `C:\Program Files` 时，运行期文件不得写入 `resources\backend\.runtime`。当前包已将混合烧录临时文件改为：
+
+```text
+%TEMP%\PCIDS\tftp
+%TEMP%\PCIDS\logs
+```
+
+新机必须部署包含该修复的当前安装包，并以实际运行 PCIDS 的 Windows 用户执行一次任务，确认该用户可创建以上目录。不要通过放宽整个 `Program Files` ACL 来规避权限问题。
 
 ## 5. 通信协议验证环境
 
@@ -646,6 +749,15 @@ Copy-Item `
 | CodeArts 显示同步 0 个文件 | 项目配置/API 路径或权限错误 | 新增后立即同步并核对实际文件数 |
 | 拉取中断后程序启动失败 | 同步/数据库写入时被中断 | 升级前完整备份 DB+WAL，不强杀写入过程 |
 | Quartus 已安装但仍走旧版本 | 同机多版本，自动搜索优先级不同 | 显式设置 `QUARTUS_PGM` 并打印 `--version` |
+| USB-Blaster II 出现两个设备 | JTAG 和 System Console 是两个正常接口 | 烧录选择 JTAG interface；两个接口都应 `Status=OK` |
+| USB-Blaster II 正常但 `JTAG chain broken` | 电脑到探头正常，探头到板卡链路不通 | 用 `jtagconfig --enum` 读取目标 ID；检查供电、VTref、GND 和 JTAG 六线 |
+| 界面选择 2.5 MHz，工具仍显示 24 MHz | 任务参数未实际应用或插拔后恢复默认 | 任务前用 `jtagconfig --getparam/--setparam` 验证实际时钟 |
+| Quartus cable 从 `USB-1` 变成 `USB-2` | 重新插拔后瞬时编号变化 | 不写死编号；重新扫描并使用当前 cable |
+| CCS 已安装但 XDS510Plus 是未知设备 | 目标 CCS 缺 SEED 插件和 Windows 驱动 | 分别核对 seed INF/SYS/DLL、targetdb、`.ccxml` 和 `EZUSBPLUS` |
+| XDS510Plus 驱动提示 INF 未签名 | 遗留 SEED 驱动没有数字签名 | 优先厂商签名包；否则使用经批准的受控测试签名流程 |
+| 翼辉任务访问 `Program Files\...\backend\.runtime` 被拒绝 | 运行期临时目录错误地放入只读安装目录 | 部署当前包，统一使用 `%TEMP%\PCIDS\tftp` 和 `%TEMP%\PCIDS\logs` |
+| MOXA 串口在另一台电脑变成不同 COM 号 | Windows 按机器和 USB 口重新分配 COM | 部署后重新枚举并打开测试，项目不写死源机器 COM |
+| 长时间烧录在 10 分钟时被中止 | 默认超时小于设备实际耗时 | AL321 等长任务默认至少设置 1200 秒，并以最长实测时间复核 |
 | 通信协议页面有设备但不能收发 | 只有 PnP 驱动，没有 SDK DLL/通道验证 | 同时验收驱动、DLL、CAN0/CAN1 和真实收发 |
 
 ## 10. 部署后总体验收
@@ -691,7 +803,7 @@ $names | ForEach-Object {
 ```powershell
 Get-PnpDevice -PresentOnly |
   Where-Object {
-    $_.InstanceId -match "VID_0483|VID_1366|VID_0D28|VID_28E9|VID_0403|VID_03FD|VID_0547|VID_04D8|VID_3068"
+    $_.InstanceId -match "VID_0483|VID_1366|VID_0D28|VID_28E9|VID_0403|VID_03FD|VID_0547|VID_04D8|VID_3068|VID_09FB|VID_110A"
   } |
   Select-Object Status, Class, FriendlyName, InstanceId
 ```
@@ -727,6 +839,12 @@ Get-PnpDevice -PresentOnly |
 
 不要用生产板作为新工作站的第一次环境测试。
 
+对本次已暴露问题的设备还要增加以下专项验收：
+
+- XDS510Plus：服务为 `EZUSBPLUS`，SEED 插件和 `.ccxml` 均存在，UniFlash 能加载目标配置，并完成一次真实 `.out` 烧录。
+- Altera：明确选中 JTAG interface，`jtagconfig --enum` 能读出目标 ID，记录实际 JTAG 时钟，并完成 program + 独立 verify。
+- 翼辉混合烧录：MOXA 串口实际打开成功，板卡 FTP 可达，TFTP 能传输，运行期目录确实位于 `%TEMP%\PCIDS`。
+
 ## 11. 交付完成标准
 
 只有同时满足以下条件，才能标记“新工作站环境完成”：
@@ -741,6 +859,7 @@ Get-PnpDevice -PresentOnly |
 - SSH 制品传输通过。
 - 通信协议适配器完成至少一次真实连接/收发。
 - 每类烧录器完成只读探测；正式交付范围内至少完成一次真实烧录。
+- XDS510Plus、USB-Blaster II 不能只凭设备管理器 `Status=OK` 判定完成，必须读到目标并保存成功任务日志。
 - `%APPDATA%\PCIDS` 已建立可恢复备份。
 
 最终交付记录至少保存：
@@ -759,3 +878,40 @@ CodeArts/SSH 验收结果
 通信协议收发结果
 各烧录器成功日志
 ```
+
+## 12. 下次新机一次迁移执行单
+
+下面的执行单用于避免“边测试边补文件”。每完成一项就保存输出和截图；任一项失败，先修复该层，再进入下一层。
+
+### 12.1 在成功工作站制作基线包
+
+1. 导出当前正式 PCIDS 安装包及 SHA256。
+2. 复制完整 `D:\PCIDS-Deploy\burners`，包括脚本、vendor、drivers、targets 和运行时，不能只复制可执行文件。
+3. 归档 Vitis/Vivado 2020.2、MPLAB X/XC8/XC16、Quartus 13.0sp1/25.1、CCS 5.x 的离线安装介质。
+4. 单独归档 SEED XDS510Plus 插件文件、驱动、`.ccxml` 和 MOXA UPort 1150 驱动。
+5. 导出当前成功机的系统环境变量、PnP 驱动 INF/版本、烧录器 SN、COM 号和实际厂商 CLI 路径。
+6. 保存每类设备最近一条成功任务日志及对应测试制品 SHA256。
+7. 计算整个交付目录的文件数、总大小和关键文件哈希。
+
+### 12.2 在新机安装
+
+1. 创建带密码的本地管理员账号；网卡设为 Private。
+2. 安装 PCIDS 当前正式包，但暂不执行真实烧录。
+3. 按顺序安装 Python、Vitis/Vivado、MPLAB/XC、Quartus、CCS。
+4. 复制完整外部烧录环境，执行统一驱动安装脚本。
+5. 安装并核对 XDS510Plus `EZUSBPLUS`、USB-Blaster II 两个接口、MOXA UPort、ST-LINK/J-LINK/GD-LINK 等计划交付驱动。
+6. 写入环境变量后完全退出并重新启动 PCIDS；仅重开页面不够。
+7. 配置 `agent-discovery.yaml`、服务器 IP、SSH、CodeArts、板卡网口和防火墙规则。
+
+### 12.3 分层验收
+
+1. **文件层**：环境变量路径全部存在，关键哈希与基线一致。
+2. **驱动层**：计划使用设备均 `Status=OK`，INF、版本、服务名与基线一致。
+3. **探头层**：厂商 CLI 能枚举正确 SN/端口。
+4. **目标层**：能读取芯片 ID/JTAG chain；不能用探头在线代替目标在线。
+5. **业务层**：PCIDS 分别完成一次擦除、写入、校验、复位；长任务超时不少于 1200 秒。
+6. **网络层**：跨节点扫描、CodeArts 实际文件同步、SSH 传输、FTP/TFTP 均用真实数据验收。
+7. **通信层**：串口/CAN/GPIO 按交付范围完成真实连接或收发。
+8. **恢复层**：备份 `%APPDATA%\PCIDS`，保存版本、驱动、日志、配置和哈希清单。
+
+只有上述八层全部通过，才能把该机器复制为下一台工作站的基线。任何“软件能打开”“设备管理器正常”“同步显示成功但 0 文件”都不能单独作为验收结论。

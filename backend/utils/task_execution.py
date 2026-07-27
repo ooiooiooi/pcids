@@ -847,6 +847,16 @@ def build_execution_plan(
     used_file_path: Optional[str],
 ) -> ExecutionPlan:
     normalized_config = normalize_execution_config(config, script)
+    script_name = str(getattr(script, "name", None) or "").strip().lower()
+    if script_name == "al321_fpga_mcu_flash" and _is_al321_flash_operation(
+        str(normalized_config.get("execution_operation") or normalized_config.get("execution_operation_mode") or "")
+    ):
+        # Older saved AL321 tasks can still carry the former 600-second
+        # timeout.  A verified ~12 MB ZynqMP QSPI run takes about 8-10 minutes,
+        # so that value can abort a healthy write at the finish line and start
+        # an unnecessary retry.  Keep this floor local to AL321 Flash only.
+        if get_task_timeout_seconds(normalized_config, default=120) < 1200:
+            normalized_config["timeout_seconds"] = 1200
     _validate_strict_swd_runtime_requirements(
         normalized_config,
         script,

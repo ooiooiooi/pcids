@@ -4,6 +4,18 @@ from backend.routers.tasks import _script_output_failure_reason
 
 
 class ScriptOutputFailureTests(unittest.TestCase):
+    def test_al321_xicom_temp_permission_failure_has_actionable_reason(self):
+        reason = _script_output_failure_reason(
+            "ERROR: Flash Operation Failed\n"
+            "Could not create temporary file "
+            r"C:\Program Files\pcids\resources\backend\xicom_zynq_bin5200",
+            "",
+        )
+
+        self.assertIn("AL321 Flash 固化", reason)
+        self.assertIn("xicom 临时文件", reason)
+        self.assertIn("用户可写的临时目录", reason)
+
     def test_explicit_error_line_marks_script_as_failed(self):
         reason = _script_output_failure_reason(
             "[INFO] start\n[ERROR] missing programmer CLI\n",

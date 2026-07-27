@@ -16,7 +16,7 @@ class DatabaseInitializationSyncTests(unittest.TestCase):
 
     def test_al321_and_xds_defaults_use_timeout_seconds_for_ui_consistency(self):
         by_name = {item["name"]: item for item in db_utils.DEFAULT_SYSTEM_SCRIPT_CATALOG}
-        self.assertEqual(by_name["al321_fpga_mcu_flash"]["default_config"]["timeout_seconds"], 600)
+        self.assertEqual(by_name["al321_fpga_mcu_flash"]["default_config"]["timeout_seconds"], 1200)
         self.assertEqual(by_name["xds510plus_dsp_flash"]["default_config"]["timeout_seconds"], 600)
 
     def test_initialization_uses_the_normal_hdsc_script_generator(self):

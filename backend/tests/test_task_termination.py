@@ -12,8 +12,10 @@ from backend.models import Base, Burner, OperationLog, Record, User
 from backend.models.task import BurningTask, TaskStatus
 from backend.routers.auth import get_current_user
 from backend.routers.tasks import (
+    _ensure_task_not_terminated,
     _finalize_task_after_unhandled_exception,
     _get_burner_runtime_issue,
+    _windows_task_cleanup_script,
     recover_interrupted_tasks,
     router as tasks_router,
 )
@@ -125,7 +127,47 @@ class TaskTerminationTests(unittest.TestCase):
         response = self.client.post(f"/tasks/{task.id}/terminate", json={"reason": "重复点击"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["message"], "任务正在终止中")
+        self.assertEqual(response.json()["message"], "任务已终止，残留进程已清理")
+        self.assertEqual(response.json()["data"]["status"], int(TaskStatus.TERMINATED))
+        self.assertIn("runtime_cleanup", response.json()["data"])
+
+    def test_terminate_task_rechecks_cleanup_when_already_terminated(self):
+        task = self._create_task(TaskStatus.TERMINATED)
+
+        response = self.client.post(f"/tasks/{task.id}/terminate", json={"reason": "再次清理"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"], "任务已终止，残留进程已清理")
+        self.assertEqual(response.json()["data"]["status"], int(TaskStatus.TERMINATED))
+        self.assertIn("runtime_cleanup", response.json()["data"])
+
+    def test_termination_check_bypasses_stale_sqlalchemy_identity_map(self):
+        task = self._create_task(TaskStatus.RUNNING)
+        worker_session = self.SessionLocal()
+        cached = worker_session.query(BurningTask).filter(BurningTask.id == task.id).first()
+        self.assertEqual(cached.status, int(TaskStatus.RUNNING))
+
+        controller_session = self.SessionLocal()
+        controller_session.query(BurningTask).filter(BurningTask.id == task.id).update(
+            {"status": int(TaskStatus.TERMINATING)},
+            synchronize_session=False,
+        )
+        controller_session.commit()
+        controller_session.close()
+
+        with self.assertRaisesRegex(RuntimeError, "task_terminated"):
+            _ensure_task_not_terminated(worker_session, task.id)
+        worker_session.close()
+
+    def test_windows_cleanup_is_generic_task_scoped_and_descendant_aware(self):
+        script = _windows_task_cleanup_script()
+
+        self.assertIn("pcids_task_", script)
+        self.assertIn("ParentProcessId", script)
+        self.assertIn("$targetIds -contains $parentId", script)
+        self.assertIn("Sort-Object { $depthById[$_] } -Descending", script)
+        self.assertNotIn("$toolNames", script)
+        self.assertNotIn("$forceHwServer", script)
 
     def test_terminate_task_rejects_non_running_status(self):
         task = self._create_task(TaskStatus.SUCCESS)

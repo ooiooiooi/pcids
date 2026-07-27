@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from backend.utils.burner_environment import _decode_powershell_output, ensure_burner_environment, restore_burner_environment
@@ -72,6 +73,29 @@ class BurnerEnvironmentTests(unittest.TestCase):
         self.assertIn("winusb", runner.call_args.args[1])
         self.assertIn("210512180081", runner.call_args.args[1])
 
+    @patch("backend.utils.burner_environment._run_powershell", return_value="al321-ready")
+    def test_ftdi_al321_sram_uses_amd_mode_when_official_tools_are_available(self, runner):
+        with TemporaryDirectory() as temp_dir:
+            xsdb = Path(temp_dir) / "xsdb.bat"
+            hw_server = Path(temp_dir) / "hw_server.bat"
+            xsdb.touch()
+            hw_server.touch()
+            result = ensure_burner_environment(
+                "al321_fpga_mcu_flash",
+                {
+                    "BURNER_NAME": "AL321",
+                    "EXECUTION_OPERATION_MODE": "sram",
+                    "BURNER_SN": "210512180081",
+                    "BURNER_LOCATION": r"USB\VID_0403&PID_6014\210512180081",
+                    "XSDB_EXE": str(xsdb),
+                    "HW_SERVER_EXE": str(hw_server),
+                },
+            )
+        self.assertIn("目标环境：AMD/JTAG 驱动环境", result)
+        self.assertIn("amd", runner.call_args.args[1])
+        self.assertNotIn("winusb", runner.call_args.args[1])
+        self.assertIn("210512180081", runner.call_args.args[1])
+
     def test_fixed_environment_burner_still_runs_preflight(self):
         result = ensure_burner_environment("pwlink_v2_arm_mcu_flash", {"BURNER_NAME": "PWLINK2"})
         self.assertIn("烧录器：PWLINK2", result)
@@ -80,11 +104,29 @@ class BurnerEnvironmentTests(unittest.TestCase):
 
     @patch("backend.utils.burner_environment._run_powershell", return_value="restored")
     def test_al321_is_restored_after_execution(self, runner):
-        result = restore_burner_environment("al321_fpga_mcu_flash", {"TASK_ID": "42", "BURNER_SN": "210512180081"})
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "pcids_al321_driver_state_42.json"
+            state_file.write_text("{}", encoding="utf-8")
+            with patch("backend.utils.burner_environment.tempfile.gettempdir", return_value=temp_dir):
+                result = restore_burner_environment(
+                    "al321_fpga_mcu_flash",
+                    {"TASK_ID": "42", "BURNER_SN": "210512180081"},
+                )
         self.assertEqual(result, "restored")
         self.assertIn("winusb", runner.call_args.args[1])
         self.assertIn("210512180081", runner.call_args.args[1])
         self.assertNotIn("-RestoreGowinPeer", runner.call_args.args[1])
+
+    @patch("backend.utils.burner_environment._run_powershell")
+    def test_al321_does_not_restore_without_pending_driver_state(self, runner):
+        with TemporaryDirectory() as temp_dir:
+            with patch("backend.utils.burner_environment.tempfile.gettempdir", return_value=temp_dir):
+                result = restore_burner_environment(
+                    "al321_fpga_mcu_flash",
+                    {"TASK_ID": "42", "BURNER_SN": "210512180081"},
+                )
+        self.assertEqual(result, "")
+        runner.assert_not_called()
 
     def test_fixed_environment_burner_needs_no_restore(self):
         self.assertEqual(restore_burner_environment("pwlink_v2_arm_mcu_flash", {"BURNER_NAME": "PWLINK2"}), "")

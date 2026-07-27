@@ -200,7 +200,7 @@ SYSTEM_SCRIPT_CATALOG = [
             "completion_action_options": ["复位运行", "不处理"],
             "options": ["local", "integrity", "writeVerify"],
             "retry_count": 1,
-            "timeout_seconds": 600,
+            "timeout_seconds": 1200,
         },
     },
     {
@@ -1236,6 +1236,132 @@ def _al321_xsdb_scan_script_setup() -> str:
     )
 
 
+def _al321_xsdb_sram_script_source() -> str:
+    return dedent(
+        """\
+        proc pcids_value {item key} {
+          if {[dict exists $item $key]} {
+            return [dict get $item $key]
+          }
+          return ""
+        }
+
+        set expectedSerial $::env(BURNER_SN)
+        set firmwarePath $::env(FIRMWARE_PATH)
+        set configuredTarget ""
+        if {[info exists ::env(TARGET_CHIP)]} {
+          set configuredTarget $::env(TARGET_CHIP)
+        }
+        if {$expectedSerial eq ""} {
+          puts stderr "BURNER_SN is required for AL321 AMD SRAM download."
+          exit 2
+        }
+        if {![file isfile $firmwarePath]} {
+          puts stderr "AL321 bitstream does not exist: $firmwarePath"
+          exit 2
+        }
+
+        connect -url TCP:127.0.0.1:3121
+        set detectedFpgaTargets {}
+        set detectedFpgaName "unknown"
+        set detectedFpgaIdcode "unknown"
+        set detectedFpgaContext ""
+        foreach item [jtag targets -target-properties] {
+          if {[pcids_value $item jtag_cable_serial] eq $expectedSerial &&
+              [pcids_value $item is_fpga] eq "1"} {
+            lappend detectedFpgaTargets $item
+          }
+        }
+        if {[llength $detectedFpgaTargets] != 1} {
+          puts stderr "Expected exactly one physical FPGA on AL321 serial $expectedSerial; found [llength $detectedFpgaTargets]."
+          disconnect
+          exit 2
+        }
+        set detectedFpga [lindex $detectedFpgaTargets 0]
+        set detectedFpgaName [pcids_value $detectedFpga name]
+        set detectedFpgaIdcode [pcids_value $detectedFpga idcode]
+        set detectedFpgaContext [pcids_value $detectedFpga jtag_device_ctx]
+
+        set matchedTargets {}
+        foreach item [targets -target-properties] {
+          set serial [pcids_value $item jtag_cable_serial]
+          set targetName [string tolower [pcids_value $item name]]
+          set targetId [pcids_value $item target_id]
+          set targetIsFpga [pcids_value $item is_fpga]
+          set targetDeviceContext [pcids_value $item jtag_device_ctx]
+          # AMD tool versions expose programmable targets differently.  A
+          # discrete FPGA can carry is_fpga=1 directly, while Zynq devices
+          # expose the programmable fabric as PL.  Select by the exact bound
+          # cable and the live FPGA context, never by a model-name allowlist.
+          set contextMatches [expr {$detectedFpgaContext eq "" ||
+              $targetDeviceContext eq "" ||
+              $targetDeviceContext eq $detectedFpgaContext}]
+          if {$serial eq $expectedSerial && $targetId ne "" &&
+              $contextMatches &&
+              ($targetIsFpga eq "1" || $targetName eq "pl")} {
+            lappend matchedTargets $item
+          }
+        }
+
+        if {[llength $matchedTargets] != 1} {
+          puts stderr "Expected exactly one programmable FPGA target on AL321 serial $expectedSerial; found [llength $matchedTargets]."
+          disconnect
+          exit 2
+        }
+
+        set selected [lindex $matchedTargets 0]
+        set selectedId [pcids_value $selected target_id]
+        set deviceContext [pcids_value $selected jtag_device_ctx]
+        set bitstreamPart "unknown"
+        set bitstreamFile [open $firmwarePath rb]
+        fconfigure $bitstreamFile -translation binary
+        set bitstreamHeader [read $bitstreamFile 512]
+        close $bitstreamFile
+        regexp -nocase {(xc[a-z0-9]+-[a-z0-9-]+)} $bitstreamHeader _ bitstreamPart
+        puts "__PCIDS_AL321_SRAM_TARGET__serial=$expectedSerial|target_id=$selectedId|target_name=[pcids_value $selected name]|device_ctx=$deviceContext|detected_fpga=$detectedFpgaName|idcode=$detectedFpgaIdcode|configured_target=$configuredTarget|bitstream_part=$bitstreamPart"
+        targets $selectedId
+        puts "Programming AL321 SRAM through AMD xsdb using the exact bound cable serial."
+        if {[catch {fpga -file $firmwarePath} programmingError]} {
+          puts stderr "__PCIDS_AL321_ERROR__:AL321 bitstream is incompatible with the physical FPGA: file target $bitstreamPart; JTAG detected $detectedFpgaName (IDCODE=$detectedFpgaIdcode). Programming stopped before writing. Use a .bit file built for $detectedFpgaName."
+          puts stderr "AL321 SRAM programming was safely refused: $programmingError"
+          puts stderr "Bound cable serial: $expectedSerial"
+          puts stderr "Detected FPGA JTAG context: $deviceContext"
+          puts stderr "Bitstream target part: $bitstreamPart"
+          if {$configuredTarget ne ""} {
+            puts stderr "Configured target chip: $configuredTarget"
+          }
+          puts stderr "Use a bitstream built for the physically connected FPGA. Compatibility checks will not be bypassed."
+          disconnect
+          exit 3
+        }
+        disconnect
+        exit 0
+        """
+    )
+
+
+def _al321_xsdb_sram_script_setup() -> str:
+    helper_base64 = base64.b64encode(_al321_xsdb_sram_script_source().encode("utf-8")).decode("ascii")
+    write_command = (
+        "$bytes=[System.Convert]::FromBase64String('"
+        + helper_base64
+        + "');[System.IO.File]::WriteAllBytes($env:AL321_SRAM_XSDB_SCRIPT,$bytes)"
+    )
+    encoded_write_command = base64.b64encode(write_command.encode("utf-16le")).decode("ascii")
+    return dedent(
+        f"""\
+        set "AL321_SRAM_XSDB_SCRIPT=%TEMP%\\pcids_al321_sram_%TASK_ID%.tcl"
+        if "%TASK_ID%"=="" set "AL321_SRAM_XSDB_SCRIPT=%TEMP%\\pcids_al321_sram.tcl"
+        powershell -NoProfile -EncodedCommand {encoded_write_command}
+        set "AL321_SRAM_XSDB_SCRIPT_WRITE_EXIT=!ERRORLEVEL!"
+        if not "!AL321_SRAM_XSDB_SCRIPT_WRITE_EXIT!"=="0" (
+          echo [ERROR] 无法生成 AL321 AMD xsdb SRAM 下载脚本。
+          exit /b !AL321_SRAM_XSDB_SCRIPT_WRITE_EXIT!
+        )
+        """
+    )
+
+
 def _strict_flash_parameter_guards() -> str:
     return dedent(
         r"""\
@@ -1796,9 +1922,9 @@ def _al321_openfpgaloader_runner() -> str:
           for /L %%R in (1,1,3) do if "!AL321_JTAGTARGETS_READY!"=="0" (
             echo [EXEC] "%PROGRAM_FLASH_EXE%" -jtagtargets -url TCP:127.0.0.1:3121
             call "%PROGRAM_FLASH_EXE%" -jtagtargets -url TCP:127.0.0.1:3121 >"!AL321_JTAGTARGETS_LOG!" 2>&1
-            findstr /I /C:"name xczu" "!AL321_JTAGTARGETS_LOG!" >nul
+            findstr /R /I /C:"(name [^ ][^ ]* idcode [^ ][^ ]*)" "!AL321_JTAGTARGETS_LOG!" >nul
             if errorlevel 1 (
-              echo [WARN] program_flash 暂未枚举到 xczu 设备，等待 JTAG 链路稳定后重试 ^(%%R/3^)。
+              echo [WARN] program_flash 暂未枚举到带 IDCODE 的 JTAG 器件，等待链路稳定后重试 ^(%%R/3^)。
               powershell -NoProfile -Command "Start-Sleep -Seconds 2"
             ) else (
               set "AL321_JTAGTARGETS_READY=1"
@@ -1892,6 +2018,80 @@ def _al321_openfpgaloader_runner() -> str:
           exit /b !AL321_PROGRAM_FLASH_EXIT!
         )
         :PCIDS_AL321_SRAM_RUNNER
+        set "AL321_IS_FTDI_BINDING=0"
+        if /I "%BURNER_LOCATION:~0,12%"=="USB\VID_0403" set "AL321_IS_FTDI_BINDING=1"
+        if not "!AL321_IS_FTDI_BINDING!"=="1" goto :PCIDS_AL321_OPENFPGALOADER_SRAM
+        if "%XSDB_EXE%"=="" for /f "delims=" %%I in ('where xsdb.bat 2^>nul') do if "%XSDB_EXE%"=="" set "XSDB_EXE=%%I"
+        if "%XSDB_EXE%"=="" for /f "delims=" %%I in ('where xsdb.exe 2^>nul') do if "%XSDB_EXE%"=="" set "XSDB_EXE=%%I"
+        if "%HW_SERVER_EXE%"=="" for /f "delims=" %%I in ('where hw_server.bat 2^>nul') do if "%HW_SERVER_EXE%"=="" set "HW_SERVER_EXE=%%I"
+        if "%HW_SERVER_EXE%"=="" for /f "delims=" %%I in ('where hw_server.exe 2^>nul') do if "%HW_SERVER_EXE%"=="" set "HW_SERVER_EXE=%%I"
+        if "%XSDB_EXE%"=="" (
+          echo [WARN] FTDI AL321 未找到 AMD xsdb，回退 openFPGALoader SRAM 路径。
+          goto :PCIDS_AL321_OPENFPGALOADER_SRAM
+        )
+        if "%HW_SERVER_EXE%"=="" (
+          echo [WARN] FTDI AL321 未找到 AMD hw_server，回退 openFPGALoader SRAM 路径。
+          goto :PCIDS_AL321_OPENFPGALOADER_SRAM
+        )
+        if not exist "%XSDB_EXE%" (
+          echo [WARN] XSDB_EXE 指向的文件不存在，回退 openFPGALoader SRAM 路径: %XSDB_EXE%
+          goto :PCIDS_AL321_OPENFPGALOADER_SRAM
+        )
+        if not exist "%HW_SERVER_EXE%" (
+          echo [WARN] HW_SERVER_EXE 指向的文件不存在，回退 openFPGALoader SRAM 路径: %HW_SERVER_EXE%
+          goto :PCIDS_AL321_OPENFPGALOADER_SRAM
+        )
+        if "%BURNER_SN%"=="" (
+          echo [ERROR] FTDI AL321 使用 AMD SRAM 下载时必须配置 BURNER_SN，禁止默认选择第一个 cable。
+          exit /b 2
+        )
+        for %%I in ("%FIRMWARE_PATH%") do set "AL321_AMD_SRAM_EXT=%%~xI"
+        if /I not "!AL321_AMD_SRAM_EXT!"==".bit" (
+          echo [ERROR] AL321 AMD SRAM 下载只接受 FPGA bitstream ^(.bit^) 文件。
+          exit /b 2
+        )
+        __PCIDS_AL321_SRAM_XSDB_SETUP__
+        set "AL321_SRAM_XSDB_LOG=%TEMP%\pcids_al321_sram_xsdb_%TASK_ID%.log"
+        if "%TASK_ID%"=="" set "AL321_SRAM_XSDB_LOG=%TEMP%\pcids_al321_sram_xsdb.log"
+        set "AL321_SRAM_STARTED_HW_SERVER=0"
+        set "AL321_SRAM_HW_SERVER_PID="
+        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$client=New-Object System.Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1',3121); '1' } catch { '0' } finally { $client.Dispose() }"`) do set "AL321_SRAM_HW_SERVER_READY=%%I"
+        if "!AL321_SRAM_HW_SERVER_READY!"=="1" goto :PCIDS_AL321_SRAM_HW_SERVER_READY
+        echo [INFO] AL321 SRAM: hw_server 未运行，正在启动并等待就绪。
+        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$proc=Start-Process -FilePath $env:HW_SERVER_EXE -PassThru -WindowStyle Hidden; [Console]::Out.WriteLine([string]$proc.Id)"`) do set "AL321_SRAM_HW_SERVER_PID=%%I"
+        if "!AL321_SRAM_HW_SERVER_PID!"=="" (
+          echo [ERROR] AL321 SRAM 启动 hw_server 失败，未获得进程 ID。
+          exit /b 2
+        )
+        set "AL321_SRAM_STARTED_HW_SERVER=1"
+        set "AL321_SRAM_HW_SERVER_READY=0"
+        for /L %%S in (1,1,20) do if "!AL321_SRAM_HW_SERVER_READY!"=="0" (
+          timeout /t 1 >nul
+          for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$client=New-Object System.Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1',3121); '1' } catch { '0' } finally { $client.Dispose() }"`) do set "AL321_SRAM_HW_SERVER_READY=%%I"
+        )
+        if not "!AL321_SRAM_HW_SERVER_READY!"=="1" (
+          echo [ERROR] AL321 SRAM: hw_server 启动后仍未在 TCP:127.0.0.1:3121 就绪。
+          powershell -NoProfile -Command "Stop-Process -Id !AL321_SRAM_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue"
+          exit /b 2
+        )
+        :PCIDS_AL321_SRAM_HW_SERVER_READY
+          echo [INFO] FTDI AL321 SRAM 使用 AMD 官方 xsdb/hw_server，按 BURNER_SN=%BURNER_SN% 精确选择 cable 和 ZynqMP PL target。
+        echo [EXEC] "%XSDB_EXE%" "!AL321_SRAM_XSDB_SCRIPT!"
+        call "%XSDB_EXE%" "!AL321_SRAM_XSDB_SCRIPT!" >"!AL321_SRAM_XSDB_LOG!" 2>&1
+        set "AL321_SRAM_XSDB_EXIT=!ERRORLEVEL!"
+        type "!AL321_SRAM_XSDB_LOG!"
+        if "!AL321_SRAM_STARTED_HW_SERVER!"=="1" (
+          echo [INFO] 正在停止本次为 AL321 SRAM 启动的 hw_server ^(PID=!AL321_SRAM_HW_SERVER_PID!^)
+          powershell -NoProfile -Command "Stop-Process -Id !AL321_SRAM_HW_SERVER_PID! -Force -ErrorAction SilentlyContinue"
+        )
+        del /f /q "!AL321_SRAM_XSDB_SCRIPT!" >nul 2>nul
+        if not "!AL321_SRAM_XSDB_EXIT!"=="0" (
+          echo [ERROR] AL321 AMD SRAM 下载失败；已严格限制为绑定序列号对应的唯一 ZynqMP PL target。
+        ) else (
+          echo [INFO] AL321 AMD SRAM 下载完成。
+        )
+        exit /b !AL321_SRAM_XSDB_EXIT!
+        :PCIDS_AL321_OPENFPGALOADER_SRAM
         if "%OPENFPGALOADER_EXE%"=="" for /f "delims=" %%I in ('where openFPGALoader.exe 2^>nul') do if "%OPENFPGALOADER_EXE%"=="" set "OPENFPGALOADER_EXE=%%I"
         if "%OPENFPGALOADER_EXE%"=="" for /f "delims=" %%I in ('where openFPGALoader 2^>nul') do if "%OPENFPGALOADER_EXE%"=="" set "OPENFPGALOADER_EXE=%%I"
         if "%OPENFPGALOADER_EXE%"=="" (
@@ -2065,7 +2265,10 @@ def _al321_openfpgaloader_runner() -> str:
         '''
         ).lstrip(),
     )
-    return runner.replace("__PCIDS_AL321_XSDB_SETUP__", _al321_xsdb_scan_script_setup().rstrip())
+    return (
+        runner.replace("__PCIDS_AL321_XSDB_SETUP__", _al321_xsdb_scan_script_setup().rstrip())
+        .replace("__PCIDS_AL321_SRAM_XSDB_SETUP__", _al321_xsdb_sram_script_setup().rstrip())
+    )
 
 
 def build_system_script_content(script_name: str, burner_name: str) -> str:
