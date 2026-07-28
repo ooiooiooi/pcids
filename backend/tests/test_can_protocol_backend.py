@@ -1,16 +1,17 @@
 import asyncio
 import json
+import tempfile
 import threading
 import time
 import unittest
 from contextlib import ExitStack
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from backend.models import Base, ProtocolLog, ProtocolSession
 from backend.routers import protocol_tests
@@ -242,19 +243,21 @@ def _write_c_bytes(target, value: str) -> None:
 
 class CanProtocolBackendTests(unittest.TestCase):
     def setUp(self) -> None:
-        engine = create_engine(
-            "sqlite://",
+        self._db_temp_dir = tempfile.TemporaryDirectory()
+        self._engine = create_engine(
+            f"sqlite:///{Path(self._db_temp_dir.name) / 'protocol-test.db'}",
             future=True,
             connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
         )
-        Base.metadata.create_all(engine)
-        self.Session = sessionmaker(bind=engine, expire_on_commit=False)
+        Base.metadata.create_all(self._engine)
+        self.Session = sessionmaker(bind=self._engine, expire_on_commit=False)
         self.db = self.Session()
 
     def tearDown(self) -> None:
         protocol_tests._close_all_can_session_connections()
         self.db.close()
+        self._engine.dispose()
+        self._db_temp_dir.cleanup()
 
     def _create_session(self, *, protocol: str, config: dict[str, object]) -> ProtocolSession:
         session = ProtocolSession(

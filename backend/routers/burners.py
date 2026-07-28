@@ -47,6 +47,17 @@ logger = logging.getLogger(__name__)
 _USB_PROBE_CACHE_LOCK = threading.Lock()
 _USB_PROBE_CACHE: dict[str, object] = {"expires_at": 0.0, "devices": []}
 _STLINK_SERIAL_CACHE: dict[str, object] = {"expires_at": 0.0, "serials": []}
+_PYOCD_PROBE_CACHE_LOCK = threading.Lock()
+_PYOCD_PROBE_CACHE: dict[str, object] = {"expires_at": 0.0, "probes": []}
+_PNP_REFRESH_LOCK = threading.Lock()
+_PNP_REFRESH_CACHE: dict[str, object] = {"refreshed_at": 0.0}
+_RUNTIME_STATUS_REFRESH_LOCK = asyncio.Lock()
+_RUNTIME_STATUS_REFRESH_CACHE: dict[str, object] = {
+    "key": None,
+    "expires_at": 0.0,
+    "values": {},
+    "usb_device_count": 0,
+}
 _LAN_AGENT_CACHE_LOCK = threading.Lock()
 _LAN_AGENT_CACHE: dict[str, object] = {"expires_at": 0.0, "urls": []}
 _AGENT_DISCOVERY_CONFIG_ENV = "PCIDS_AGENT_DISCOVERY_CONFIG"
@@ -56,16 +67,17 @@ _AGENT_DISCOVERY_CONFIG_ENV = "PCIDS_AGENT_DISCOVERY_CONFIG"
 def _debug_report_device_refresh_crash(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None, trace_id: Optional[str] = None) -> None:
     try:
         _env_path = os.path.join(".dbg", "device-status-refresh-crash.env")
+        if not os.path.isfile(_env_path):
+            return
         _url = "http://127.0.0.1:7779/event"
         _session_id = "device-status-refresh-crash"
-        if os.path.exists(_env_path):
-            with open(_env_path, "r", encoding="utf-8") as _env_file:
-                for _line in _env_file:
-                    _line = _line.strip()
-                    if _line.startswith("DEBUG_SERVER_URL="):
-                        _url = _line.split("=", 1)[1] or _url
-                    elif _line.startswith("DEBUG_SESSION_ID="):
-                        _session_id = _line.split("=", 1)[1] or _session_id
+        with open(_env_path, "r", encoding="utf-8") as _env_file:
+            for _line in _env_file:
+                _line = _line.strip()
+                if _line.startswith("DEBUG_SERVER_URL="):
+                    _url = _line.split("=", 1)[1] or _url
+                elif _line.startswith("DEBUG_SESSION_ID="):
+                    _session_id = _line.split("=", 1)[1] or _session_id
         urllib.request.urlopen(
             urllib.request.Request(
                 _url,
@@ -94,16 +106,17 @@ def _debug_report_device_refresh_crash(hypothesis_id: str, location: str, msg: s
 def _debug_report_burner_scan_crash(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None, trace_id: Optional[str] = None) -> None:
     try:
         _env_path = os.path.join(".dbg", "burner-scan-crash.env")
+        if not os.path.isfile(_env_path):
+            return
         _url = "http://127.0.0.1:7777/event"
         _session_id = "burner-scan-crash"
-        if os.path.exists(_env_path):
-            with open(_env_path, "r", encoding="utf-8") as _env_file:
-                for _line in _env_file:
-                    _line = _line.strip()
-                    if _line.startswith("DEBUG_SERVER_URL="):
-                        _url = _line.split("=", 1)[1] or _url
-                    elif _line.startswith("DEBUG_SESSION_ID="):
-                        _session_id = _line.split("=", 1)[1] or _session_id
+        with open(_env_path, "r", encoding="utf-8") as _env_file:
+            for _line in _env_file:
+                _line = _line.strip()
+                if _line.startswith("DEBUG_SERVER_URL="):
+                    _url = _line.split("=", 1)[1] or _url
+                elif _line.startswith("DEBUG_SESSION_ID="):
+                    _session_id = _line.split("=", 1)[1] or _session_id
         urllib.request.urlopen(
             urllib.request.Request(
                 _url,
@@ -245,6 +258,58 @@ def _probe_usb_devices(cache_ttl_seconds: float = 3.0) -> list[dict]:
         _USB_PROBE_CACHE["devices"] = list(devices)
         _USB_PROBE_CACHE["expires_at"] = time.monotonic() + max(cache_ttl_seconds, 0.0)
         return list(devices)
+
+
+def _invalidate_usb_probe_cache() -> None:
+    with _USB_PROBE_CACHE_LOCK:
+        _USB_PROBE_CACHE["devices"] = []
+        _USB_PROBE_CACHE["expires_at"] = 0.0
+    _STLINK_SERIAL_CACHE["serials"] = []
+    _STLINK_SERIAL_CACHE["expires_at"] = 0.0
+    with _PYOCD_PROBE_CACHE_LOCK:
+        _PYOCD_PROBE_CACHE["probes"] = []
+        _PYOCD_PROBE_CACHE["expires_at"] = 0.0
+
+
+def _refresh_windows_pnp_state(min_interval_seconds: float = 1.5) -> bool:
+    """Ask Windows to re-enumerate devices before a user-triggered scan.
+
+    ``Get-PnpDevice -PresentOnly`` can retain an unplugged devnode until the
+    Plug and Play manager performs another enumeration.  A short shared
+    throttle prevents local-list, form-scan, and task-wizard refreshes from
+    launching duplicate scans at the same time.
+    """
+    if platform.system().lower() != "windows":
+        return False
+    with _PNP_REFRESH_LOCK:
+        now = time.monotonic()
+        refreshed_at = float(_PNP_REFRESH_CACHE.get("refreshed_at") or 0.0)
+        if now - refreshed_at < max(min_interval_seconds, 0.0):
+            return True
+        succeeded = False
+        try:
+            completed = subprocess.run(
+                ["pnputil.exe", "/scan-devices"],
+                capture_output=True,
+                timeout=8,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            succeeded = completed.returncode == 0
+            if not succeeded:
+                logger.warning(
+                    "burner.pnp_refresh.failed | %s",
+                    json.dumps({"exit_code": completed.returncode}, ensure_ascii=False),
+                )
+        except Exception as exc:
+            logger.warning(
+                "burner.pnp_refresh.exception | %s",
+                json.dumps({"error": str(exc)}, ensure_ascii=False),
+            )
+        finally:
+            _PNP_REFRESH_CACHE["refreshed_at"] = time.monotonic()
+            _invalidate_usb_probe_cache()
+        return succeeded
 
 
 def _probe_windows_usb_devices() -> list[dict]:
@@ -511,7 +576,10 @@ def _device_alias_matches(haystack: str, alias: str) -> bool:
     if not raw_haystack or not raw_alias:
         return False
     normalized_alias = _normalize_device_match_text(raw_alias)
-    if normalized_alias and normalized_alias in _normalize_device_match_text(raw_haystack):
+    # Very short aliases such as "sd" and "swd" must remain whole tokens.
+    # Substring matching made "CMSIS-DAP V2" look like an SD card reader
+    # because its normalized text contains the adjacent letters "sd".
+    if len(normalized_alias) >= 4 and normalized_alias in _normalize_device_match_text(raw_haystack):
         return True
     escaped_parts = [re.escape(part) for part in re.split(r"[\s\-_]+", raw_alias.lower()) if part]
     if not escaped_parts:
@@ -547,6 +615,157 @@ def _classify_probe_items(item: dict) -> list[dict]:
     return []
 
 
+def _find_pyocd_runtime_python() -> str:
+    configured = str(os.environ.get("PYOCD_PYTHON") or "").strip()
+    if configured and os.path.isfile(configured):
+        return configured
+    pyocd_exe = str(os.environ.get("PYOCD_EXE") or "").strip()
+    if not pyocd_exe:
+        return ""
+    executable = Path(pyocd_exe)
+    candidates = [
+        executable.with_name("python.exe"),
+        executable.parent.parent / "python.exe",
+    ]
+    return next((str(candidate) for candidate in candidates if candidate.is_file()), "")
+
+
+def _probe_pyocd_probes(cache_ttl_seconds: float = 15.0) -> list[dict]:
+    now = time.monotonic()
+    with _PYOCD_PROBE_CACHE_LOCK:
+        if now < float(_PYOCD_PROBE_CACHE.get("expires_at") or 0):
+            return [dict(item) for item in (_PYOCD_PROBE_CACHE.get("probes") or [])]
+
+    python_exe = _find_pyocd_runtime_python()
+    if not python_exe:
+        return []
+    helper = (
+        "import json;"
+        "from pyocd.core.helpers import ConnectHelper;"
+        "print(json.dumps(["
+        "{'unique_id':str(getattr(p,'unique_id','') or '').rstrip(chr(0)).strip(),"
+        "'description':str(getattr(p,'description','') or ''),"
+        "'vendor_name':str(getattr(p,'vendor_name','') or ''),"
+        "'product_name':str(getattr(p,'product_name','') or '')}"
+        " for p in ConnectHelper.get_all_connected_probes(blocking=False)]))"
+    )
+    probes: list[dict] = []
+    try:
+        completed = subprocess.run(
+            [python_exe, "-c", helper],
+            capture_output=True,
+            timeout=_get_env_float("PCIDS_PYOCD_PROBE_TIMEOUT_SECONDS", 6, min_value=2, max_value=15),
+            check=False,
+        )
+        stdout = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+        payload = json.loads(stdout.splitlines()[-1]) if stdout else []
+        if isinstance(payload, list):
+            probes = [dict(item) for item in payload if isinstance(item, dict)]
+    except Exception as exc:
+        logger.warning("burner.pyocd_probe.failed | %s", str(exc))
+
+    with _PYOCD_PROBE_CACHE_LOCK:
+        _PYOCD_PROBE_CACHE["probes"] = probes
+        _PYOCD_PROBE_CACHE["expires_at"] = time.monotonic() + max(cache_ttl_seconds, 0.0)
+    return [dict(item) for item in probes]
+
+
+def _pyocd_probe_burner_type(serial: Optional[str], pyocd_probes: list[dict]) -> str:
+    normalized_serial = _normalize_binding_sn(str(serial or "").rstrip("\x00"))
+    if not normalized_serial:
+        return ""
+    for probe in pyocd_probes:
+        probe_serial = _normalize_binding_sn(str(probe.get("unique_id") or "").rstrip("\x00"))
+        if probe_serial != normalized_serial:
+            continue
+        identity = " ".join(
+            str(probe.get(field) or "")
+            for field in ("description", "vendor_name", "product_name")
+        ).lower()
+        if "gdlink" in identity or "gigadevice" in identity:
+            return "GDLINK"
+        if "pwlink" in identity or "pw-link" in identity:
+            return "PWLINK2"
+        if "stlink" in identity or "st-link" in identity:
+            return "ST-LINK"
+    return ""
+
+
+def _usb_item_product_key(item: dict) -> tuple[str, str]:
+    return (
+        str(item.get("vendor_id") or "").strip().lower(),
+        str(item.get("product_id") or "").strip().lower(),
+    )
+
+
+def _usb_item_instance_ids(item: dict) -> set[str]:
+    return {
+        str(value or "").strip().lower()
+        for value in (
+            item.get("pnp_device_id"),
+            item.get("device_id"),
+            item.get("location_id"),
+            item.get("location_id_hex"),
+            item.get("registry_id"),
+        )
+        if str(value or "").strip()
+    }
+
+
+def _usb_items_are_same_composite_device(left: dict, right: dict) -> bool:
+    """Return whether two PnP rows represent interfaces of one USB device.
+
+    Windows often reports a composite parent as ``USB Composite Device`` and
+    exposes the useful burner name only on a child interface.  A shared
+    container is the strongest signal.  Parent/child relationships are also
+    accepted when both rows carry the same VID/PID, which avoids treating a
+    USB hub and all of its attached devices as one physical burner.
+    """
+
+    if left is right:
+        return True
+    left_container = str(left.get("container_id") or "").strip().lower()
+    right_container = str(right.get("container_id") or "").strip().lower()
+    if left_container and right_container and left_container == right_container:
+        return True
+
+    left_product = _usb_item_product_key(left)
+    right_product = _usb_item_product_key(right)
+    if not all(left_product) or left_product != right_product:
+        return False
+    left_ids = _usb_item_instance_ids(left)
+    right_ids = _usb_item_instance_ids(right)
+    left_parent = str(left.get("parent_id") or "").strip().lower()
+    right_parent = str(right.get("parent_id") or "").strip().lower()
+    return bool((left_parent and left_parent in right_ids) or (right_parent and right_parent in left_ids))
+
+
+def _classified_usb_device_types(
+    item: dict,
+    usb_devices: list[dict],
+    pyocd_probes: Optional[list[dict]] = None,
+) -> set[str]:
+    """Collect confident burner types from a composite device and its interfaces."""
+
+    classified_types: set[str] = set()
+    for related in usb_devices:
+        if not _usb_items_are_same_composite_device(item, related):
+            continue
+        classified_types.update(
+            _normalize_device_token(classified.get("type"))
+            for classified in _classify_probe_items(related)
+            if classified.get("type")
+        )
+        if pyocd_probes:
+            probe_type = _pyocd_probe_burner_type(
+                _get_real_usb_serial(related, usb_devices, None),
+                pyocd_probes,
+            )
+            if probe_type:
+                classified_types.add(_normalize_device_token(probe_type))
+    return classified_types
+
+
 def _burner_node_key(burner: Burner) -> str:
     agent_url = str(getattr(burner, "agent_url", None) or "").strip()
     host_address = str(getattr(burner, "host_address", None) or "").strip()
@@ -573,8 +792,94 @@ def _get_service_node_addresses() -> set[str]:
 
 
 def _get_service_node_address() -> str:
-    addresses = [item for item in _get_service_node_addresses() if item not in {"127.0.0.1", "::1", "localhost"}]
-    return addresses[0] if addresses else "127.0.0.1"
+    local_addresses = _get_service_node_addresses()
+    configured_server = str(
+        _get_repository_server_transport_config().get("host") or ""
+    ).strip()
+    configured_host = (
+        urlparse(configured_server).hostname or configured_server
+    ).strip().lower()
+    if configured_host:
+        normalized_local_addresses = {str(item or "").strip().lower() for item in local_addresses}
+        if configured_host in normalized_local_addresses:
+            return configured_host
+        try:
+            configured_ips = {
+                str(item or "").strip().lower()
+                for item in socket.gethostbyname_ex(configured_host)[2]
+                if str(item or "").strip()
+            }
+            matching_ips = sorted(configured_ips & normalized_local_addresses)
+            if matching_ips:
+                return matching_ips[0]
+        except Exception:
+            pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            route_address = str(sock.getsockname()[0] or "").strip()
+            if route_address and route_address != "127.0.0.1":
+                # A proxy/VPN adapter may own the default route. Only prefer
+                # it when it is also exposed by a physical active interface.
+                physical_addresses: set[str] = set()
+                virtual_markers = (
+                    "meta", "vmware", "virtual", "vbox", "hyper-v",
+                    "docker", "wsl", "vpn", "tunnel", "teredo",
+                )
+                if psutil is not None:
+                    interface_stats = psutil.net_if_stats()
+                    for interface_name, addresses in psutil.net_if_addrs().items():
+                        stats = interface_stats.get(interface_name)
+                        if (
+                            not stats
+                            or not stats.isup
+                            or any(marker in interface_name.lower() for marker in virtual_markers)
+                        ):
+                            continue
+                        for item in addresses:
+                            if item.family == socket.AF_INET and item.address:
+                                physical_addresses.add(str(item.address).strip())
+                if not physical_addresses or route_address in physical_addresses:
+                    return route_address
+    except Exception:
+        pass
+    addresses = sorted(
+        item
+        for item in local_addresses
+        if item not in {"127.0.0.1", "::1", "localhost"}
+    )
+    if psutil is not None:
+        virtual_markers = (
+            "meta", "vmware", "virtual", "vbox", "hyper-v",
+            "docker", "wsl", "vpn", "tunnel", "teredo",
+        )
+        try:
+            interface_stats = psutil.net_if_stats()
+            physical_ipv4 = sorted({
+                str(item.address).strip()
+                for interface_name, interface_addresses in psutil.net_if_addrs().items()
+                if interface_stats.get(interface_name)
+                and interface_stats[interface_name].isup
+                and not any(marker in interface_name.lower() for marker in virtual_markers)
+                for item in interface_addresses
+                if item.family == socket.AF_INET
+                and item.address
+                and not ipaddress.ip_address(item.address).is_loopback
+            })
+            if physical_ipv4:
+                return physical_ipv4[0]
+        except Exception:
+            pass
+    ipv4_addresses = []
+    for item in addresses:
+        try:
+            parsed = ipaddress.ip_address(item)
+        except ValueError:
+            continue
+        if parsed.version == 4 and not parsed.is_loopback:
+            ipv4_addresses.append(parsed.compressed)
+    return ipv4_addresses[0] if ipv4_addresses else (addresses[0] if addresses else "127.0.0.1")
 
 
 def _get_request_node_address(request: Optional[Request]) -> str:
@@ -584,14 +889,15 @@ def _get_request_node_address(request: Optional[Request]) -> str:
     return forwarded or (request.client.host if request.client else "") or ""
 
 
-def _collect_node_address_aliases(value: Optional[str]) -> set[str]:
+@lru_cache(maxsize=128)
+def _collect_node_address_aliases(value: Optional[str]) -> frozenset[str]:
     raw_value = str(value or "").strip()
     if not raw_value:
-        return set()
+        return frozenset()
     host = urlparse(raw_value).hostname or raw_value
     normalized = host.strip().lower()
     if not normalized:
-        return set()
+        return frozenset()
     aliases = {normalized}
     try:
         parsed_ip = ipaddress.ip_address(normalized)
@@ -613,7 +919,7 @@ def _collect_node_address_aliases(value: Optional[str]) -> set[str]:
                 pass
     except Exception:
         pass
-    return {item for item in aliases if item}
+    return frozenset(item for item in aliases if item)
 
 
 def _get_configured_server_addresses() -> frozenset[str]:
@@ -650,6 +956,17 @@ def _is_same_node_address(left: str, right: str) -> bool:
     return left_is_local and right_is_local
 
 
+def _is_agent_url_for_service_node(agent_url: Optional[str]) -> bool:
+    value = str(agent_url or "").strip()
+    if not value:
+        return False
+    try:
+        host = str(urlparse(value).hostname or "").strip()
+    except ValueError:
+        return False
+    return bool(host and _is_same_node_address(host, _get_service_node_address()))
+
+
 def _is_local_burner_owner(burner: Burner) -> bool:
     agent_url = str(getattr(burner, "agent_url", None) or "").strip()
     host_type = str(getattr(burner, "host_type", None) or "").strip().lower()
@@ -657,6 +974,17 @@ def _is_local_burner_owner(burner: Burner) -> bool:
     if agent_url or host_type in {"agent", "server"}:
         return False
     return not _is_configured_server_node(host_address)
+
+
+def _is_burner_owned_by_service_node(burner: Burner) -> bool:
+    """Return whether a non-Agent burner belongs to this backend machine."""
+    if str(getattr(burner, "agent_url", None) or "").strip():
+        return False
+    host_address = str(getattr(burner, "host_address", None) or "").strip()
+    if not host_address:
+        # Legacy local/server rows did not persist host_address.
+        return True
+    return _is_same_node_address(host_address, _get_service_node_address())
 
 
 def _is_local_candidate_node(candidate: dict) -> bool:
@@ -676,9 +1004,19 @@ def _ensure_burner_owner_node(payload: dict) -> dict:
     next_payload = dict(payload)
     agent_url = str(next_payload.get("agent_url") or "").strip()
     host_type = str(next_payload.get("host_type") or "").strip().lower()
+    if host_type and host_type not in {"local", "server", "agent"}:
+        raise HTTPException(status_code=422, detail="设备节点类型只能选择本地、服务器或局域网其他节点")
+    if host_type == "agent" and not agent_url:
+        raise HTTPException(status_code=422, detail="局域网其他节点必须填写有效的 Agent 地址")
     if agent_url:
+        try:
+            agent_url = _normalize_agent_url(agent_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        next_payload["agent_url"] = agent_url
         next_payload["host_type"] = "agent"
-        next_payload.setdefault("host_address", urlparse(agent_url).hostname or "")
+        if not str(next_payload.get("host_address") or "").strip():
+            next_payload["host_address"] = urlparse(agent_url).hostname or ""
         return next_payload
     if host_type not in {"server", "local"}:
         host_type = "local"
@@ -689,17 +1027,16 @@ def _ensure_burner_owner_node(payload: dict) -> dict:
 
 
 def _resolve_node_display(burner: Burner, request: Optional[Request]) -> dict:
-    host_type = str(getattr(burner, "host_type", None) or "").strip().lower()
     agent_url = str(getattr(burner, "agent_url", None) or "").strip()
     host_name = str(getattr(burner, "host_name", None) or "").strip()
     host_address = str(getattr(burner, "host_address", None) or "").strip()
     owner_address = host_address or (urlparse(agent_url).hostname if agent_url else "") or _get_service_node_address()
     current_address = _get_request_node_address(request)
     is_local = _is_same_node_address(owner_address, current_address)
+    if _is_configured_server_node(owner_address):
+        return {"label": "服务器", "owner_address": owner_address, "current_address": current_address, "is_local": False}
     if is_local:
         return {"label": "本地", "owner_address": owner_address, "current_address": current_address, "is_local": True}
-    if host_type == "server" or _is_configured_server_node(owner_address):
-        return {"label": "服务器", "owner_address": owner_address, "current_address": current_address, "is_local": False}
     if owner_address:
         # Node positions identify a machine.  For all non-server machines show
         # their address consistently, including an Agent node.
@@ -714,10 +1051,10 @@ def _resolve_node_display(burner: Burner, request: Optional[Request]) -> dict:
 
 def _derive_node_label(agent_url: Optional[str], host_name: Optional[str] = None, host_address: Optional[str] = None) -> str:
     address = str(host_address or "").strip() or (urlparse(str(agent_url or "")).hostname or "").strip()
-    if _is_same_node_address(address, _get_service_node_address()):
-        return "本地"
     if _is_configured_server_node(address):
         return "服务器"
+    if _is_same_node_address(address, _get_service_node_address()):
+        return "本地"
     if address:
         return address
     return "本地"
@@ -738,6 +1075,10 @@ USB_BINDING_IDENTITY_FIELDS = (
     "location_path",
     "pnp_device_id",
     "container_id",
+)
+USB_BINDING_DIRECT_PORT_FIELDS = (
+    "location_info",
+    "pnp_device_id",
 )
 
 
@@ -770,7 +1111,20 @@ def _usb_binding_port_values(binding: object) -> set[str]:
     return _port_match_values(*(normalized.get(field) for field in USB_BINDING_IDENTITY_FIELDS))
 
 
-def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name: Optional[str] = None, host_address: Optional[str] = None) -> list[dict]:
+def _usb_binding_direct_port_values(binding: object) -> set[str]:
+    normalized = _normalize_usb_binding(binding)
+    return _port_match_values(*(normalized.get(field) for field in USB_BINDING_DIRECT_PORT_FIELDS))
+
+
+def _build_discovery_candidates(
+    item: dict,
+    agent_url: Optional[str],
+    host_name: Optional[str] = None,
+    host_address: Optional[str] = None,
+    *,
+    usb_devices: Optional[list[dict]] = None,
+    pyocd_probes: Optional[list[dict]] = None,
+) -> list[dict]:
     classified_items = _classify_probe_items(item)
     node_key = str(agent_url or host_address or "").strip() or "local"
     node_label = _derive_node_label(agent_url, host_name=host_name, host_address=host_address)
@@ -778,7 +1132,15 @@ def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name:
     raw_port = str(item.get("location_id") or item.get("location_id_hex") or item.get("registry_id") or "").strip() or None
     port = _get_physical_usb_port(item, raw_port) or raw_port
     raw_name = str(item.get("_name") or item.get("product_name") or item.get("manufacturer") or "").strip()
-    usb_devices = _probe_usb_devices() if classified_items and not str(agent_url or "").strip() else None
+    if usb_devices is None and (classified_items or "dap" in raw_name.lower()) and not str(agent_url or "").strip():
+        usb_devices = _probe_usb_devices()
+    if not classified_items and usb_devices and pyocd_probes:
+        probe_type = _pyocd_probe_burner_type(
+            _get_real_usb_serial(item, usb_devices, None),
+            pyocd_probes,
+        )
+        if probe_type:
+            classified_items = [{"type": probe_type, "device_category": "burner"}]
     if not classified_items and not port:
         return []
     alternative_ports = [
@@ -854,10 +1216,12 @@ def _build_discovery_candidates(item: dict, agent_url: Optional[str], host_name:
 
 
 def _resolve_ambiguous_candidate_types(candidates: list[dict], burners: list[Burner]) -> list[dict]:
-    """Resolve one generic FTDI candidate from an existing SN/port binding.
+    """Resolve one generic candidate only from an existing immutable serial.
 
-    An unresolved cable remains one generic candidate. It is never duplicated
-    into AL321/Gowin/XDS rows merely because those products share a VID/PID.
+    A USB port, parent hub, container id, or VID/PID describes where/how a
+    device is connected; none of them proves that it is the registered
+    physical burner.  An unresolved cable therefore remains generic unless its
+    real serial matches exactly one registered burner on the same node.
     """
     resolved: list[dict] = []
     for raw_candidate in candidates:
@@ -872,30 +1236,17 @@ def _resolve_ambiguous_candidate_types(candidates: list[dict], burners: list[Bur
             continue
 
         candidate_sn = _normalize_binding_sn(candidate.get("sn"))
-        candidate_ports = {
-            value
-            for value in (
-                _normalize_binding_value(candidate.get("port")),
-                _normalize_binding_port(candidate.get("port")),
-            )
-            if value
-        }
         matches: list[Burner] = []
+        if not candidate_sn:
+            resolved.append(candidate)
+            continue
         for burner in burners:
             if str(getattr(burner, "type", None) or "").strip() not in possible_types:
                 continue
             if not _is_same_node_address(candidate.get("node_key"), _burner_node_key(burner)):
                 continue
             burner_sn = _normalize_binding_sn(getattr(burner, "sn", None))
-            burner_ports = {
-                value
-                for value in (
-                    _normalize_binding_value(getattr(burner, "port", None)),
-                    _normalize_binding_port(getattr(burner, "port", None)),
-                )
-                if value
-            }
-            if (candidate_sn and burner_sn == candidate_sn) or (candidate_ports and burner_ports & candidate_ports):
+            if burner_sn and burner_sn == candidate_sn:
                 matches.append(burner)
 
         if len(matches) == 1:
@@ -1053,6 +1404,57 @@ def _candidate_port_values(candidate: dict) -> set[str]:
     return _port_match_values(*values) | _usb_binding_port_values(candidate.get("usb_binding"))
 
 
+def _candidate_direct_port_values(candidate: dict) -> set[str]:
+    return _port_match_values(candidate.get("port"), candidate.get("raw_port")) | _usb_binding_direct_port_values(
+        candidate.get("usb_binding")
+    )
+
+
+def _candidate_has_same_known_type(burner_type: Optional[str], candidate: dict) -> bool:
+    if candidate.get("probe_only"):
+        return False
+    return _normalize_device_token(candidate.get("type")) == _normalize_device_token(burner_type)
+
+
+def _candidate_matches_registered_identity(
+    burner: Burner,
+    candidate: dict,
+    *,
+    require_same_node: bool,
+) -> bool:
+    """Match a registered burner without treating connection metadata as identity.
+
+    A reliable serial may follow the same device across USB ports.  A
+    serial-less device can only be considered present at its recorded port
+    when the scanner independently classified it as the same burner type.
+    Generic/probe-only devices never inherit a registration by port.
+    """
+    burner_type = str(getattr(burner, "type", None) or "").strip()
+    burner_sn = _normalize_binding_sn(getattr(burner, "sn", None))
+    candidate_sn = _normalize_binding_sn(candidate.get("sn"))
+    same_known_type = _candidate_has_same_known_type(burner_type, candidate)
+    try:
+        strategy = int(getattr(burner, "strategy", 1) or 1)
+    except Exception:
+        strategy = 1
+
+    if strategy == 1 and burner_sn:
+        if not candidate_sn or candidate_sn != burner_sn:
+            return False
+        # An unclassified candidate may be resolved by its exact real serial.
+        # A candidate positively classified as another burner type may not.
+        if not same_known_type and not candidate.get("probe_only"):
+            return False
+        return not require_same_node or _is_same_burner_candidate_node(burner, candidate)
+
+    if not same_known_type:
+        return False
+    burner_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_direct_port_values(_burner_usb_binding(burner))
+    if not (burner_ports and _candidate_direct_port_values(candidate) & burner_ports):
+        return False
+    return not require_same_node or _is_same_burner_candidate_node(burner, candidate)
+
+
 def _probe_item_port_values(item: dict, port: Optional[str], raw_port: Optional[str]) -> set[str]:
     return _port_match_values(
         port,
@@ -1062,6 +1464,16 @@ def _probe_item_port_values(item: dict, port: Optional[str], raw_port: Optional[
         item.get("location_path"),
         item.get("location_info"),
         item.get("parent_id"),
+    )
+
+
+def _probe_item_direct_port_values(item: dict, port: Optional[str], raw_port: Optional[str]) -> set[str]:
+    return _port_match_values(
+        port,
+        raw_port,
+        item.get("pnp_device_id"),
+        item.get("device_manager_location"),
+        item.get("location_info"),
     )
 
 
@@ -1088,26 +1500,44 @@ def _candidate_physical_id(item: dict, device_type: str, node_key: str, sn: Opti
     return hashlib.sha256("|".join([device_type, identity_value, node_key]).encode("utf-8")).hexdigest()
 
 
-def _registered_binding_keys(burners: list[Burner], exclude_id: Optional[int] = None) -> dict[str, set[str]]:
+def _registered_binding_keys(burners: list[Burner], exclude_id: Optional[int] = None) -> dict[str, object]:
     sn_values: set[str] = set()
-    port_values: set[str] = set()
+    sn_by_type: dict[str, set[str]] = {}
+    port_bindings: list[tuple[str, Burner, set[str]]] = []
     for burner in burners:
         if exclude_id is not None and getattr(burner, "id", None) == exclude_id:
             continue
-        sn = _normalize_binding_value(getattr(burner, "sn", None))
-        burner_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_port_values(_burner_usb_binding(burner))
+        burner_type = _normalize_device_token(getattr(burner, "type", None))
+        sn = _normalize_binding_sn(getattr(burner, "sn", None))
+        burner_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_direct_port_values(_burner_usb_binding(burner))
         if sn:
             sn_values.add(sn)
-        port_values.update(burner_ports)
-    return {"sn": sn_values, "port": port_values}
+            sn_by_type.setdefault(burner_type, set()).add(sn)
+        if burner_ports:
+            port_bindings.append((burner_type, burner, burner_ports))
+    return {
+        "sn": sn_values,
+        "sn_by_type": sn_by_type,
+        "port_bindings": port_bindings,
+    }
 
 
-def _candidate_matches_registered_binding(candidate: dict, registered_keys: dict[str, set[str]]) -> bool:
-    sn = _normalize_binding_value(candidate.get("sn"))
-    candidate_ports = _candidate_port_values(candidate)
-    if sn and sn in registered_keys["sn"]:
+def _candidate_matches_registered_binding(candidate: dict, registered_keys: dict[str, object]) -> bool:
+    sn = _normalize_binding_sn(candidate.get("sn"))
+    candidate_ports = _candidate_direct_port_values(candidate)
+    if candidate.get("probe_only"):
+        return bool(sn and sn in registered_keys["sn"])
+    candidate_type = _normalize_device_token(candidate.get("type"))
+    sn_by_type = registered_keys.get("sn_by_type") or {}
+    port_bindings = registered_keys.get("port_bindings") or []
+    if sn and sn in sn_by_type.get(candidate_type, set()):
         return True
-    return bool(candidate_ports & registered_keys["port"])
+    return any(
+        candidate_type == registered_type
+        and bool(candidate_ports & registered_ports)
+        and _is_same_burner_candidate_node(registered_burner, candidate)
+        for registered_type, registered_burner, registered_ports in port_bindings
+    )
 
 
 def _candidate_display_score(candidate: dict) -> int:
@@ -1141,11 +1571,28 @@ def _device_scan_priority(device_type: Optional[str]) -> int:
     return 0
 
 
-def _discover_local_candidates() -> list[dict]:
+def _discover_local_candidates(refresh_hardware: bool = False) -> list[dict]:
+    if refresh_hardware:
+        _refresh_windows_pnp_state()
     by_id: dict[str, dict] = {}
     host_address = _get_service_node_address()
-    for item in _probe_usb_devices():
-        for candidate in _build_discovery_candidates(item, agent_url=None, host_address=host_address):
+    usb_devices = _probe_usb_devices()
+    has_generic_dap = any(
+        "dap" in " ".join(
+            str(item.get(field) or "")
+            for field in ("_name", "product_name", "manufacturer")
+        ).lower()
+        for item in usb_devices
+    )
+    pyocd_probes = _probe_pyocd_probes() if has_generic_dap else []
+    for item in usb_devices:
+        for candidate in _build_discovery_candidates(
+            item,
+            agent_url=None,
+            host_address=host_address,
+            usb_devices=usb_devices,
+            pyocd_probes=pyocd_probes,
+        ):
             current = by_id.get(candidate["candidate_id"])
             if not current or _candidate_display_score(candidate) > _candidate_display_score(current):
                 by_id[candidate["candidate_id"]] = candidate
@@ -1179,11 +1626,38 @@ def _match_usb_device(
         usb_devices = _probe_usb_devices()
     type_hint = _normalize_device_token(device_type)
     location_hint = (location or "").strip().lower()
-    expected_sn_value = _normalize_binding_value(expected_sn)
-    expected_port_values = _port_match_values(expected_port) | _usb_binding_port_values(expected_usb_binding)
+    expected_sn_value = _normalize_binding_sn(expected_sn)
+    expected_port_values = _port_match_values(expected_port) | _usb_binding_direct_port_values(expected_usb_binding)
     candidates = _device_alias_candidates(type_hint)
     best_match: Optional[dict] = None
     best_score = -1
+    stlink_serial_override = ""
+    stlink_item_id: Optional[int] = None
+    has_generic_dap = any(
+        "dap" in " ".join(
+            str(item.get(field) or "")
+            for field in ("_name", "product_name", "manufacturer")
+        ).lower()
+        for item in usb_devices
+    )
+    pyocd_probes = _probe_pyocd_probes() if has_generic_dap else []
+    if type_hint == _normalize_device_token("ST-LINK"):
+        stlink_items = [
+            item
+            for item in usb_devices
+            if any(
+                _normalize_device_token(classified.get("type")) == type_hint
+                for classified in _classify_probe_items(item)
+            )
+        ]
+        official_stlink_serials = _probe_stlink_serials()
+        # Older ST-LINK/V2 firmware exposes only a Windows location-derived
+        # instance suffix through PnP.  The official CLI still returns the
+        # immutable probe SN.  Only combine those sources when both sides are
+        # unique, so one probe can never borrow another probe's identity.
+        if len(stlink_items) == 1 and len(official_stlink_serials) == 1:
+            stlink_serial_override = official_stlink_serials[0]
+            stlink_item_id = id(stlink_items[0])
 
     for item in usb_devices:
         name = " ".join(
@@ -1196,20 +1670,20 @@ def _match_usb_device(
         raw_port = str(item.get("location_id") or item.get("location_id_hex") or item.get("registry_id") or "").strip()
         port = _get_physical_usb_port(item, raw_port) or raw_port
         item_port_values = _probe_item_port_values(item, port, raw_port)
+        item_direct_port_values = _probe_item_direct_port_values(item, port, raw_port)
         if location_hint and not any(location_hint in value for value in item_port_values):
             continue
-        classified_items = _classify_probe_items(item)
-        classified_types = {
-            _normalize_device_token(classified.get("type"))
-            for classified in classified_items
-            if classified.get("type")
-        }
+        classified_types = _classified_usb_device_types(item, usb_devices, pyocd_probes)
         if not type_hint and not classified_types:
             continue
         serial = _get_real_usb_serial(item, usb_devices, device_type)
-        normalized_serial = _normalize_binding_value(serial)
-        normalized_ports = item_port_values
+        if not serial and stlink_item_id == id(item):
+            serial = stlink_serial_override
+        normalized_serial = _normalize_binding_sn(serial)
+        normalized_ports = item_direct_port_values
         if expected_sn_value and normalized_serial == expected_sn_value:
+            if type_hint and classified_types and type_hint not in classified_types:
+                continue
             matched = {"sn": serial or None, "port": port or None, "usb_binding": _build_usb_binding(item), "source": "usb_probe", "name": item.get("_name")}
             score = _candidate_display_score(
                 {
@@ -1223,7 +1697,12 @@ def _match_usb_device(
                 best_score = score
                 best_match = matched
             continue
-        if expected_port_values and normalized_ports & expected_port_values:
+        if expected_port_values and item_direct_port_values & expected_port_values:
+            # A port (and its parent/container metadata) is not a device
+            # identity.  It may only confirm a serial-less device that the
+            # scanner independently classified as the expected burner type.
+            if expected_sn_value or (type_hint and type_hint not in classified_types):
+                continue
             matched = {"sn": serial or None, "port": port or None, "usb_binding": _build_usb_binding(item), "source": "usb_probe", "name": item.get("_name")}
             score = _candidate_display_score(
                 {
@@ -1280,17 +1759,20 @@ def _build_scan_result(
         runtime_strategy = 1
     expected_sn = expected_sn or (getattr(existing, "sn", None) if existing is not None else None)
     expected_port = expected_port or (getattr(existing, "port", None) if existing is not None else None)
-    if not _normalize_binding_value(expected_port) and existing is not None:
+    if runtime_strategy == 1 and not _normalize_binding_value(expected_port) and existing is not None:
         expected_port = getattr(existing, "location", None)
     if existing is not None and not allow_fallback:
         if not _normalize_binding_value(expected_sn) and not _port_match_values(expected_port):
             return None
-    match_location = expected_port or location
+    if runtime_strategy == 1 and _normalize_binding_sn(expected_sn):
+        match_location = None
+    else:
+        match_location = expected_port if runtime_strategy == 2 else (expected_port or location)
     matched = _match_usb_device(
         device_type,
         match_location,
         usb_devices=usb_devices,
-        expected_sn=expected_sn,
+        expected_sn=expected_sn if runtime_strategy == 1 else None,
         expected_port=expected_port,
         expected_usb_binding=_burner_usb_binding(existing),
     )
@@ -1473,7 +1955,7 @@ def _get_lan_agent_scan_networks() -> list[ipaddress.IPv4Network]:
         # Scan every active physical LAN adapter, not merely the adapter used
         # for the Internet default route.  Virtual/VPN adapters are excluded:
         # otherwise each extra adapter adds another 254-host timeout window.
-        virtual_markers = ("vmware", "virtual", "vbox", "hyper-v", "docker", "wsl", "vpn", "tunnel", "teredo")
+        virtual_markers = ("meta", "vmware", "virtual", "vbox", "hyper-v", "docker", "wsl", "vpn", "tunnel", "teredo")
         if psutil is not None:
             try:
                 interface_stats = psutil.net_if_stats()
@@ -1641,7 +2123,7 @@ def _discover_scan_nodes(
 def _scan_discovery_node(node: dict) -> list[dict]:
     """Run one potentially slow discovery probe without touching the request DB session."""
     if node["node_type"] in {"local", "server"}:
-        return _discover_local_candidates()
+        return _discover_local_candidates(refresh_hardware=True)
 
     remote_res = _remote_discover_devices(str(node["agent_url"]))
     raw_candidates = remote_res.get("data", {}).get("items") or []
@@ -1665,13 +2147,13 @@ async def _scan_discovery_nodes_async(
     trace_id: str,
 ) -> tuple[list[list[dict]], set[str]]:
     """Offload blocking PnP, HTTP, and subprocess discovery work from the event loop."""
-    node_candidates: list[list[dict]] = []
+    node_candidates: list[list[dict]] = [[] for _node in nodes]
     failed_node_keys: set[str] = set()
-    for node in nodes:
+
+    async def scan_one(index: int, node: dict) -> tuple[int, list[dict], Optional[Exception]]:
         try:
-            node_candidates.append(await asyncio.to_thread(_scan_discovery_node, node))
+            return index, await asyncio.to_thread(_scan_discovery_node, node), None
         except Exception as exc:
-            failed_node_keys.add(str(node.get("node_key") or ""))
             _debug_report_burner_scan_crash(
                 "A",
                 "burners.py:_scan_discovery_nodes_async:node_error",
@@ -1683,42 +2165,28 @@ async def _scan_discovery_nodes_async(
                 "burner.discovery.agent_failed | %s",
                 json.dumps({"agent_url": node.get("agent_url"), "error": str(exc)}, ensure_ascii=False),
             )
-            if normalized_explicit_agent_url and str(node.get("agent_url") or "").rstrip("/") == normalized_explicit_agent_url:
-                raise ValueError(
-                    f"无法连接下位机 Agent（{normalized_explicit_agent_url}），请确认下位机程序正在运行、IP/端口正确且防火墙已放行"
-                ) from exc
-            node_candidates.append([])
+            return index, [], exc
+
+    results = await asyncio.gather(*(scan_one(index, node) for index, node in enumerate(nodes)))
+    explicit_error: Optional[Exception] = None
+    for index, candidates, error in results:
+        node_candidates[index] = candidates
+        if error is None:
+            continue
+        node = nodes[index]
+        failed_node_keys.add(str(node.get("node_key") or ""))
+        if normalized_explicit_agent_url and str(node.get("agent_url") or "").rstrip("/") == normalized_explicit_agent_url:
+            explicit_error = error
+    if explicit_error is not None:
+        raise ValueError(
+            f"无法连接下位机 Agent（{normalized_explicit_agent_url}），请确认下位机程序正在运行、IP/端口正确且防火墙已放行"
+        ) from explicit_error
     return node_candidates, failed_node_keys
 
 
 def _find_matching_candidate(burner: Burner, candidates: list[dict]) -> Optional[dict]:
-    burner_type = str(getattr(burner, "type", None) or "").strip()
-    burner_sn = str(getattr(burner, "sn", None) or "").strip()
-    burner_port = str(getattr(burner, "port", None) or "").strip()
-    try:
-        burner_strategy = int(getattr(burner, "strategy", 1) or 1)
-    except Exception:
-        burner_strategy = 1
-    burner_port_values = _port_match_values(burner_port) | _usb_binding_port_values(_burner_usb_binding(burner))
-
     for candidate in candidates:
-        candidate_port_values = _candidate_port_values(candidate)
-        if burner_strategy == 2 and burner_port_values and candidate_port_values & burner_port_values:
-            if _is_same_burner_candidate_node(burner, candidate):
-                return candidate
-            continue
-        if burner_sn and candidate.get("sn"):
-            cand_sn = str(candidate["sn"]).strip()
-            # 兼容前导 0 问题 (e.g. 000941000029 vs 941000029)
-            if (
-                (cand_sn == burner_sn or cand_sn.lstrip("0") == burner_sn.lstrip("0"))
-                and _is_same_burner_candidate_node(burner, candidate)
-                and (candidate["type"] == burner_type or candidate.get("probe_only"))
-            ):
-                return candidate
-        if candidate["type"] != burner_type:
-            continue
-        if burner_port_values and candidate_port_values & burner_port_values and _is_same_burner_candidate_node(burner, candidate):
+        if _candidate_matches_registered_identity(burner, candidate, require_same_node=True):
             return candidate
     return None
 
@@ -1726,49 +2194,37 @@ def _find_matching_candidate(burner: Burner, candidates: list[dict]) -> Optional
 def _find_discovery_binding_candidate(burner: Burner, candidates: list[dict]) -> Optional[dict]:
     burner_type = str(getattr(burner, "type", None) or "").strip()
     burner_sn = _normalize_binding_sn(getattr(burner, "sn", None))
-    try:
-        burner_strategy = int(getattr(burner, "strategy", 1) or 1)
-    except Exception:
-        burner_strategy = 1
-    burner_port_values = _port_match_values(getattr(burner, "port", None)) | _usb_binding_port_values(_burner_usb_binding(burner))
+    burner_port_values = _port_match_values(getattr(burner, "port", None)) | _usb_binding_direct_port_values(_burner_usb_binding(burner))
     best_match: Optional[dict] = None
     best_score = -1
 
     for candidate in candidates:
         candidate_sn = _normalize_binding_sn(candidate.get("sn"))
-        candidate_port_values = _candidate_port_values(candidate)
+        candidate_port_values = _candidate_direct_port_values(candidate)
+        same_known_type = _candidate_has_same_known_type(burner_type, candidate)
         score = 0
-        if burner_strategy == 2:
-            port_matches = bool(burner_port_values and candidate_port_values & burner_port_values)
-            serial_matches = bool(burner_sn and candidate_sn == burner_sn)
-            type_matches = str(candidate.get("type") or "").strip() == burner_type
-            if not port_matches and not (type_matches and serial_matches):
+        if burner_sn:
+            if not candidate_sn or candidate_sn != burner_sn:
                 continue
-            if port_matches:
-                score += 30
-            elif type_matches and serial_matches:
+            if not same_known_type and not candidate.get("probe_only"):
+                continue
+            same_node = _is_same_burner_candidate_node(burner, candidate)
+            score += 40
+            if same_known_type:
                 score += 10
-            if _is_same_burner_candidate_node(burner, candidate):
-                score += 20
-            if type_matches:
+            if same_node:
                 score += 5
         else:
-            type_matches = str(candidate.get("type") or "").strip() == burner_type
-            probe_sn_matches = bool(candidate.get("probe_only") and burner_sn and candidate_sn == burner_sn)
-            if not type_matches and not probe_sn_matches:
+            # Without an immutable serial there is no safe way to infer that a
+            # device moved. Same-type/same-port may only confirm the existing
+            # binding; an explicit user rebind is required for a new port.
+            if not same_known_type:
                 continue
-            if not ((burner_sn and candidate_sn == burner_sn) or (burner_port_values and candidate_port_values & burner_port_values)):
+            if not (burner_port_values and candidate_port_values & burner_port_values):
                 continue
-            if burner_sn and candidate_sn == burner_sn:
-                score += 20
-            if burner_port_values and candidate_port_values & burner_port_values:
-                score += 10
-            if type_matches:
-                score += 5
-        if burner_sn and candidate_sn == burner_sn:
-            score += 1
-        if _is_same_burner_candidate_node(burner, candidate):
-            score += 5
+            if not _is_same_burner_candidate_node(burner, candidate):
+                continue
+            score += 30
         if score > best_score:
             best_score = score
             best_match = candidate
@@ -1881,6 +2337,11 @@ def _build_discovery_payload(
                 "burner_name": burner.name,
                 "burner_type": burner.type,
                 "strategy": burner.strategy,
+                # The discovery dialog is independent of the current paginated
+                # device list.  Preserve the full record configuration so a
+                # binding update for an off-page burner only replaces
+                # usb_binding instead of erasing its capability settings.
+                "burner_config_json": getattr(burner, "config_json", None),
                 "original_binding": {
                     "sn": getattr(burner, "sn", None),
                     "port": getattr(burner, "port", None),
@@ -1899,6 +2360,7 @@ def _build_discovery_payload(
                     "node_label": matched.get("node_label"),
                     "node_type": matched.get("node_type"),
                     "agent_url": matched.get("agent_url"),
+                    "host_name": matched.get("host_name"),
                     "host_address": matched.get("host_address"),
                 },
                 "scan_device": matched,
@@ -1972,8 +2434,10 @@ def _resolve_discovery_status_updates(
         elif burner.id in occupied_burner_ids:
             status = 2
         elif scope == "local" and str(getattr(burner, "agent_url", None) or "").strip():
-            stored_status = getattr(burner, "status", 1)
-            status = int(stored_status if stored_status is not None else 1)
+            # A local-only scan must not rewrite a remote node based on missing
+            # candidates, but it also must not preserve a stale persisted
+            # busy/disabled value after the source task/state is gone.
+            status = _compute_burner_cached_status(burner, occupied_burner_ids)
         elif burner_node_key and burner_node_key in failed_node_keys:
             status = 1
         else:
@@ -2048,7 +2512,9 @@ def _refresh_registered_burner_statuses(
         next_status = status_by_id.get(burner.id)
         stored_status = getattr(burner, "status", 1)
         current_status = int(stored_status if stored_status is not None else 1)
-        if next_status is not None and current_status != next_status:
+        # Busy is derived from active tasks and must not be persisted; doing so
+        # leaves a burner stuck as busy after its task finishes.
+        if next_status is not None and next_status != 2 and current_status != next_status:
             burner.status = next_status
             changed = True
     if changed:
@@ -2057,7 +2523,8 @@ def _refresh_registered_burner_statuses(
 
 
 def _is_burner_enabled(burner: Burner) -> bool:
-    return bool(getattr(burner, "is_enabled", None)) and int(getattr(burner, "status", 0) or 0) != 3
+    enabled_value = getattr(burner, "is_enabled", None)
+    return enabled_value is None or bool(enabled_value)
 
 
 def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int], usb_devices: Optional[list[dict]] = None) -> int:
@@ -2066,10 +2533,12 @@ def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int]
         return 3
     if burner.id in occupied_burner_ids:
         return 2
-    if str(getattr(burner, "agent_url", None) or "").strip():
+    agent_url = str(getattr(burner, "agent_url", None) or "").strip()
+    self_agent = _is_agent_url_for_service_node(agent_url)
+    if agent_url and not self_agent:
         try:
             res = _remote_scan_burner(
-                str(getattr(burner, "agent_url", None) or ""),
+                agent_url,
                 burner.type,
                 burner.port if int(getattr(burner, "strategy", 1) or 1) == 2 else burner.location,
                 burner.strategy,
@@ -2093,6 +2562,8 @@ def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int]
             )
             # #endregion
             return 1
+    if not self_agent and not _is_burner_owned_by_service_node(burner):
+        return 1
     try:
         burner_strategy = int(getattr(burner, "strategy", 1) or 1)
         scan_anchor = burner.port if burner_strategy == 2 else burner.location
@@ -2125,6 +2596,112 @@ def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int]
     return 0 if scanned and scanned.get("online") else 1
 
 
+def _safe_compute_burner_runtime_status(
+    burner: Burner,
+    occupied_burner_ids: set[int],
+    usb_devices: Optional[list[dict]] = None,
+) -> int:
+    try:
+        return _compute_burner_runtime_status(burner, occupied_burner_ids, usb_devices)
+    except Exception as exc:
+        logger.warning(
+            "burner.runtime_status.failed | %s",
+            json.dumps(
+                {"burner_id": getattr(burner, "id", None), "error": str(exc)},
+                ensure_ascii=False,
+            ),
+        )
+        return 1
+
+
+def _runtime_status_refresh_key(
+    burners: list[Burner],
+    occupied_burner_ids: set[int],
+) -> tuple:
+    return tuple(
+        sorted(
+            (
+                int(getattr(burner, "id", 0) or 0),
+                str(getattr(burner, "type", None) or ""),
+                str(getattr(burner, "sn", None) or ""),
+                str(getattr(burner, "port", None) or ""),
+                str(getattr(burner, "location", None) or ""),
+                int(getattr(burner, "strategy", 1) or 1),
+                bool(_is_burner_enabled(burner)),
+                str(getattr(burner, "agent_url", None) or "").strip().rstrip("/").lower(),
+                int(getattr(burner, "id", 0) or 0) in occupied_burner_ids,
+            )
+            for burner in burners
+        )
+    )
+
+
+async def _compute_burner_runtime_statuses(
+    burners: list[Burner],
+    occupied_burner_ids: set[int],
+) -> tuple[dict[int, int], int]:
+    """Compute one coalesced runtime snapshot without monopolizing the API.
+
+    The task wizard may render more than once while its dependent options are
+    settling.  Coalescing identical requests prevents duplicate PnP scans and
+    keeps those requests from exhausting the SQLite connection pool.
+    """
+    cache_key = _runtime_status_refresh_key(burners, occupied_burner_ids)
+    async with _RUNTIME_STATUS_REFRESH_LOCK:
+        now = time.monotonic()
+        if (
+            _RUNTIME_STATUS_REFRESH_CACHE.get("key") == cache_key
+            and now < float(_RUNTIME_STATUS_REFRESH_CACHE.get("expires_at") or 0)
+        ):
+            return (
+                dict(_RUNTIME_STATUS_REFRESH_CACHE.get("values") or {}),
+                int(_RUNTIME_STATUS_REFRESH_CACHE.get("usb_device_count") or 0),
+            )
+
+        needs_local_probe = any(
+            _is_burner_enabled(burner)
+            and burner.id not in occupied_burner_ids
+            and (
+                _is_agent_url_for_service_node(getattr(burner, "agent_url", None))
+                or (
+                    not str(getattr(burner, "agent_url", None) or "").strip()
+                    and _is_burner_owned_by_service_node(burner)
+                )
+            )
+            for burner in burners
+        )
+        usb_devices: Optional[list[dict]] = None
+        if needs_local_probe:
+            await asyncio.to_thread(_refresh_windows_pnp_state)
+            usb_devices = await asyncio.to_thread(_probe_usb_devices)
+
+        runtime_values = await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    _safe_compute_burner_runtime_status,
+                    burner,
+                    occupied_burner_ids,
+                    usb_devices,
+                )
+                for burner in burners
+            )
+        )
+        values = {
+            burner.id: runtime_status
+            for burner, runtime_status in zip(burners, runtime_values)
+        }
+        usb_device_count = len(usb_devices or [])
+        _RUNTIME_STATUS_REFRESH_CACHE.update(
+            {
+                "key": cache_key,
+                "expires_at": time.monotonic() + 2.0,
+                "values": dict(values),
+                "usb_device_count": usb_device_count,
+            }
+        )
+        return values, usb_device_count
+
+
 def _compute_burner_cached_status(burner: Burner, occupied_burner_ids: set[int]) -> int:
     if not _is_burner_enabled(burner):
         return 3
@@ -2135,12 +2712,56 @@ def _compute_burner_cached_status(burner: Burner, occupied_burner_ids: set[int])
         status_value = int(stored_status if stored_status is not None else 1)
     except Exception:
         status_value = 1
+    # Busy and disabled are derived states. Once their source condition is
+    # gone, a persisted 2/3 must not keep the device stuck there.
+    if status_value == 2:
+        status_value = 0
+    elif status_value == 3:
+        status_value = 1
     if status_value == 0 and not (
         _normalize_binding_value(getattr(burner, "sn", None))
         or _port_match_values(getattr(burner, "port", None), getattr(burner, "location", None))
     ):
         return 1
     return status_value if status_value in (0, 1, 2, 3) else 1
+
+
+async def _refresh_and_persist_single_burner_status(db: Session, burner: Burner) -> int:
+    occupied = (
+        db.query(BurningTask.id)
+        .filter(
+            BurningTask.burner_id == burner.id,
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
+        )
+        .first()
+        is not None
+    )
+    occupied_ids = {burner.id} if occupied else set()
+    usb_devices: Optional[list[dict]] = None
+    agent_url = str(getattr(burner, "agent_url", None) or "").strip()
+    if not agent_url or _is_agent_url_for_service_node(agent_url):
+        usb_devices = await asyncio.to_thread(_probe_usb_devices)
+    try:
+        runtime_status = await asyncio.to_thread(
+            _safe_compute_burner_runtime_status,
+            burner,
+            occupied_ids,
+            usb_devices,
+        )
+    except Exception as exc:
+        logger.warning(
+            "burner.saved_status_refresh.failed | %s",
+            json.dumps(
+                {"burner_id": getattr(burner, "id", None), "error": str(exc)},
+                ensure_ascii=False,
+            ),
+        )
+        runtime_status = 1
+    if runtime_status != 2 and int(getattr(burner, "status", 1) or 0) != runtime_status:
+        burner.status = runtime_status
+        db.commit()
+        db.refresh(burner)
+    return runtime_status
 
 
 def _infer_device_category(burner: Burner) -> str:
@@ -2160,14 +2781,19 @@ def _infer_device_category(burner: Burner) -> str:
 
 def _infer_node_scope(burner: Burner) -> str:
     host_type = str(getattr(burner, "host_type", None) or "").strip().lower()
-    if host_type == "server":
+    agent_url = str(getattr(burner, "agent_url", None) or "").strip()
+    host_address = str(getattr(burner, "host_address", None) or "").strip()
+    owner_address = host_address or (
+        _get_service_node_address()
+        if not agent_url and host_type in {"local", "server"}
+        else ""
+    )
+    if _is_configured_server_node(owner_address):
         return "server"
     if host_type == "agent":
         return "agent"
-    if str(getattr(burner, "agent_url", None) or "").strip():
+    if agent_url:
         return "agent"
-    if _is_configured_server_node(getattr(burner, "host_address", None)):
-        return "server"
     return "local"
 
 
@@ -2206,6 +2832,8 @@ def _backfill_al321_binding_from_usb_binding(normalized: dict, config: dict, res
     current_location = str(normalized.get("location") or "").strip()
     if (not current_location or current_location == "-") and pnp_device_id:
         normalized["location"] = pnp_device_id
+    if int(normalized.get("strategy") or 1) != 1:
+        return
     if normalized.get("sn"):
         return
     serial = _extract_usb_instance_serial(pnp_device_id, "0403", "6014")
@@ -2233,6 +2861,7 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
         normalized["type"] = "SD卡文件写入"
         normalized["strategy"] = 1
         normalized["sn"] = ""
+        normalized["port"] = ""
     else:
         capability = BURNER_CAPABILITY_MAP.get(_normalize_burner_model_key(resolved_type)) or {}
         config["device_category"] = "burner"
@@ -2242,29 +2871,108 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
         config["supported_card_types"] = []
         config["mount_path"] = ""
         usb_binding = _normalize_usb_binding(config.get("usb_binding"))
+        explicit_port_values = _port_match_values(normalized.get("port"))
+        if (
+            usb_binding
+            and explicit_port_values
+            and not (explicit_port_values & _usb_binding_direct_port_values(usb_binding))
+        ):
+            # A manually changed primary port must not keep identifying a
+            # different USB device through stale form/config metadata.
+            usb_binding = {}
         if usb_binding:
             config["usb_binding"] = usb_binding
         else:
             config.pop("usb_binding", None)
+        if (
+            existing is not None
+            and "type" in normalized
+            and _normalize_device_token(getattr(existing, "type", None))
+            != _normalize_device_token(normalized.get("type"))
+        ):
+            config.pop("usb_binding", None)
         if _burner_requires_physical_port(resolved_type):
             normalized["strategy"] = 2
-            normalized["sn"] = ""
         _backfill_al321_binding_from_usb_binding(normalized, config, resolved_type)
+        if int(normalized.get("strategy") or getattr(existing, "strategy", 1) or 1) == 2:
+            normalized["sn"] = ""
 
     normalized["config_json"] = json.dumps(config, ensure_ascii=False)
     return normalized
 
 
+def _validate_burner_payload_required(payload: dict) -> None:
+    if not str(payload.get("name") or "").strip():
+        raise HTTPException(status_code=422, detail="设备名称不能为空")
+    if not str(payload.get("type") or "").strip():
+        raise HTTPException(status_code=422, detail="设备型号不能为空")
+    if payload.get("is_enabled") is None:
+        raise HTTPException(status_code=422, detail="启用状态不能为空")
+    if payload.get("strategy") is None:
+        raise HTTPException(status_code=422, detail="识别策略不能为空")
+    try:
+        config = json.loads(payload.get("config_json") or "{}") or {}
+    except Exception:
+        config = {}
+    is_enabled = payload.get("is_enabled", True) not in {False, 0}
+    if config.get("device_category") == "sd_reader":
+        if not is_enabled:
+            return
+        if not str(config.get("mount_path") or "").strip():
+            raise HTTPException(status_code=422, detail="SD 读卡器必须填写挂载路径")
+        if not list(config.get("supported_card_types") or []):
+            raise HTTPException(status_code=422, detail="SD 读卡器必须选择支持卡类型")
+        return
+
+    try:
+        strategy = int(payload.get("strategy") or 1)
+    except (TypeError, ValueError):
+        strategy = 0
+    if strategy not in {1, 2}:
+        raise HTTPException(status_code=422, detail="识别策略只能选择按 SN 或按物理端口")
+    if not is_enabled:
+        return
+    if strategy == 1 and _normalize_binding_sn(payload.get("sn")) in {"", "-"}:
+        raise HTTPException(status_code=422, detail="按 SN 识别时必须填写 SN 标识码")
+    if strategy == 2 and _normalize_binding_port(payload.get("port")) in {"", "-"}:
+        raise HTTPException(status_code=422, detail="按物理端口识别时必须填写物理端口")
+
+
 def _clear_conflicting_burner_port(conflict_burner: Burner, modified_by: Optional[str] = None) -> None:
+    original_port_values = _port_match_values(getattr(conflict_burner, "port", None))
+    original_direct_port_values = original_port_values | _usb_binding_direct_port_values(
+        _burner_usb_binding(conflict_burner)
+    )
     conflict_burner.port = ""
+    if int(getattr(conflict_burner, "strategy", 1) or 1) == 2:
+        conflict_burner.sn = ""
+    if _port_match_values(getattr(conflict_burner, "location", None)) & original_direct_port_values:
+        conflict_burner.location = ""
     try:
         config = json.loads(getattr(conflict_burner, "config_json", None) or "{}") or {}
     except Exception:
         config = {}
     config.pop("usb_binding", None)
     conflict_burner.config_json = json.dumps(config, ensure_ascii=False)
+    conflict_burner.status = 1 if _is_burner_enabled(conflict_burner) else 3
     if modified_by:
         conflict_burner.modified_by = modified_by
+
+
+def _ensure_burner_not_in_use(db: Session, burner: Burner, action: str) -> None:
+    active_task = (
+        db.query(BurningTask.id)
+        .filter(
+            BurningTask.burner_id == burner.id,
+            BurningTask.status.in_([int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING)]),
+        )
+        .first()
+    )
+    if active_task is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"设备「{getattr(burner, 'name', None) or burner.id}」正在执行任务，不能{action}，请等待任务结束后重试",
+        )
 
 
 def _validate_burner_binding_unique(
@@ -2277,7 +2985,7 @@ def _validate_burner_binding_unique(
         strategy = int(payload.get("strategy") or getattr(existing, "strategy", 1) or 1)
     except Exception:
         strategy = 1
-    sn = _normalize_binding_value(payload.get("sn"))
+    sn = _normalize_binding_sn(payload.get("sn"))
     port = _normalize_binding_value(payload.get("port"))
     normalized_port = _normalize_binding_port(payload.get("port"))
     try:
@@ -2305,14 +3013,16 @@ def _validate_burner_binding_unique(
     for burner in db.query(Burner).all():
         if exclude_id is not None and burner.id == exclude_id:
             continue
-        if not _is_same_node_address(payload_node_key, _burner_node_key(burner)):
-            continue
-        if strategy == 1 and sn and _normalize_binding_value(getattr(burner, "sn", None)) == sn:
+        # A serial identifies one physical probe across all nodes. Moving that
+        # probe must update its existing record instead of creating a duplicate.
+        if strategy == 1 and sn and _normalize_binding_sn(getattr(burner, "sn", None)) == sn:
             conflict_label = _build_conflict_burner_label(burner)
             raise HTTPException(
                 status_code=409,
                 detail=f"当前 SN 标识码已被设备「{conflict_label}」登记，请编辑已有设备或选择其他设备",
             )
+        if not _is_same_node_address(payload_node_key, _burner_node_key(burner)):
+            continue
         if strategy == 2:
             existing_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_port_values(_burner_usb_binding(burner))
             if payload_ports & existing_ports:
@@ -2436,6 +3146,24 @@ async def get_burners(
         query = query.order_by(Burner.updated_at.desc())
 
     burners = query.all()
+    selected_device_categories = _parse_device_categories_param(device_categories)
+    if node_scope and node_scope not in {"all", "local", "server", "agent"}:
+        raise HTTPException(status_code=422, detail="节点筛选参数非法")
+    if status is not None and status not in {0, 1, 2, 3}:
+        raise HTTPException(status_code=422, detail="设备状态筛选参数非法")
+    runtime_burners = [
+        burner
+        for burner in burners
+        if (
+            not selected_device_categories
+            or _infer_device_category(burner) in selected_device_categories
+        )
+        and (
+            not node_scope
+            or node_scope == "all"
+            or _infer_node_scope(burner) == node_scope
+        )
+    ]
     occupied_burner_ids = {
         burner_id
         for (burner_id,) in db.query(BurningTask.burner_id)
@@ -2446,7 +3174,19 @@ async def get_burners(
         .all()
         if burner_id is not None
     }
-    usb_devices = _probe_usb_devices() if include_runtime_status else None
+    if include_runtime_status:
+        # Release the read transaction before hardware/network I/O.  A single
+        # probe can legitimately take seconds; retaining a pooled SQLite
+        # connection for that entire period lets repeated UI refreshes starve
+        # unrelated pages such as products and repositories.
+        db.commit()
+        runtime_status_by_id, usb_device_count = await _compute_burner_runtime_statuses(
+            runtime_burners,
+            occupied_burner_ids,
+        )
+    else:
+        usb_device_count = 0
+        runtime_status_by_id = {}
     # #region debug-point K:usb-probe-summary
     _debug_report_device_refresh_crash(
         "K",
@@ -2454,30 +3194,36 @@ async def get_burners(
         "burner list usb probe summary",
         {
             "include_runtime_status": include_runtime_status,
-            "usb_device_count": len(usb_devices or []),
-            "burner_count": len(burners),
+            "usb_device_count": usb_device_count,
+            "burner_count": len(runtime_burners),
         },
         trace_id,
     )
     # #endregion
 
-    selected_device_categories = _parse_device_categories_param(device_categories)
     burner_rows = []
-    for burner in burners:
-        current_device_category = _infer_device_category(burner)
-        if selected_device_categories and current_device_category not in selected_device_categories:
-            continue
-        current_node_scope = _infer_node_scope(burner)
-        if node_scope and node_scope != "all" and current_node_scope != node_scope:
-            continue
+    for burner in runtime_burners:
         runtime_status = (
-            _compute_burner_runtime_status(burner, occupied_burner_ids, usb_devices=usb_devices)
+            runtime_status_by_id.get(burner.id, 1)
             if include_runtime_status
             else _compute_burner_cached_status(burner, occupied_burner_ids)
         )
         if status is not None and runtime_status != status:
             continue
         burner_rows.append((burner, runtime_status))
+
+    if include_runtime_status:
+        changed = False
+        for burner in runtime_burners:
+            runtime_status = runtime_status_by_id.get(burner.id)
+            if runtime_status is None or runtime_status == 2:
+                continue
+            stored_status = int(getattr(burner, "status", 1) or 0)
+            if stored_status != runtime_status:
+                burner.status = runtime_status
+                changed = True
+        if changed:
+            db.commit()
 
     if sort_field == "status":
         reverse = sort_order == "desc"
@@ -2560,12 +3306,15 @@ async def discover_burners(
         editing_burner_id = None
     ensure_schema()
     try:
+        _collect_node_address_aliases.cache_clear()
         normalized_explicit_agent_url = _normalize_agent_url(explicit_agent_url)
         # LAN probing may fan out to many hosts and local PnP uses synchronous
         # PowerShell.  Keep both operations out of this worker's event loop so
         # unrelated requests (such as PUT /api/burners/{id}) stay responsive.
         discovered_agent_urls = (
-            await asyncio.to_thread(_discover_lan_agent_urls) if scope == "all" else None
+            await asyncio.to_thread(_discover_lan_agent_urls)
+            if scope == "all" and not normalized_explicit_agent_url
+            else ([] if normalized_explicit_agent_url else None)
         )
         nodes = _discover_scan_nodes(
             db,
@@ -2640,22 +3389,32 @@ async def create_burner(
     ensure_schema()
     payload = burner_data.model_dump()
     force_rebind_port = bool(payload.pop("force_rebind_port", False))
+    payload.pop("status", None)
     payload = _normalize_burner_payload(payload)
     payload = _ensure_burner_owner_node(payload)
+    _validate_burner_payload_required(payload)
     conflict_burner = _validate_burner_binding_unique(db, payload, force_rebind_port=force_rebind_port)
-    if conflict_burner is not None:
+    while conflict_burner is not None:
+        _ensure_burner_not_in_use(db, conflict_burner, "换绑物理端口")
         _clear_conflicting_burner_port(conflict_burner, current_user.username)
+        conflict_burner = _validate_burner_binding_unique(
+            db,
+            payload,
+            force_rebind_port=force_rebind_port,
+        )
     payload["modified_by"] = current_user.username
+    payload["status"] = 1 if payload.get("is_enabled", True) else 3
     burner = Burner(**payload)
     db.add(burner)
     db.flush()
-    burner_id = burner.id
     db.commit()
+    db.refresh(burner)
+    runtime_status = await _refresh_and_persist_single_burner_status(db, burner)
 
     return {
         "code": 0,
         "message": "创建成功",
-        "data": {"id": burner_id}
+        "data": burner_to_dict(burner, runtime_status, request=request),
     }
 
 
@@ -2673,9 +3432,11 @@ async def update_burner(
     burner = db.query(Burner).filter(Burner.id == burner_id).first()
     if not burner:
         raise HTTPException(status_code=404, detail="烧录器不存在")
+    _ensure_burner_not_in_use(db, burner, "编辑")
 
     raw_update_payload = burner_data.model_dump(exclude_unset=True)
     force_rebind_port = bool(raw_update_payload.pop("force_rebind_port", False))
+    raw_update_payload.pop("status", None)
     update_payload = _normalize_burner_payload(raw_update_payload, existing=burner)
     update_payload = _ensure_burner_owner_node({
         "host_type": getattr(burner, "host_type", "local"),
@@ -2684,32 +3445,46 @@ async def update_burner(
         **update_payload,
     })
     resolved_payload = {
+        "name": update_payload.get("name", burner.name),
+        "type": update_payload.get("type", burner.type),
         "strategy": update_payload.get("strategy", burner.strategy),
         "sn": update_payload.get("sn", burner.sn),
         "port": update_payload.get("port", burner.port),
         "config_json": update_payload.get("config_json", burner.config_json),
         "agent_url": update_payload.get("agent_url", burner.agent_url),
         "host_address": update_payload.get("host_address", burner.host_address),
+        "is_enabled": update_payload.get("is_enabled", burner.is_enabled),
     }
+    _validate_burner_payload_required(resolved_payload)
     conflict_burner = _validate_burner_binding_unique(
         db,
         resolved_payload,
         existing=burner,
         force_rebind_port=force_rebind_port,
     )
-    if conflict_burner is not None:
+    while conflict_burner is not None:
+        _ensure_burner_not_in_use(db, conflict_burner, "换绑物理端口")
         _clear_conflicting_burner_port(conflict_burner, current_user.username)
+        conflict_burner = _validate_burner_binding_unique(
+            db,
+            resolved_payload,
+            existing=burner,
+            force_rebind_port=force_rebind_port,
+        )
     for key, value in update_payload.items():
         setattr(burner, key, value)
-    
+
+    burner.status = 1 if _is_burner_enabled(burner) else 3
     burner.modified_by = current_user.username
 
     db.commit()
     db.refresh(burner)
+    runtime_status = await _refresh_and_persist_single_burner_status(db, burner)
 
     return {
         "code": 0,
         "message": "更新成功",
+        "data": burner_to_dict(burner, runtime_status, request=request),
     }
 
 
@@ -2856,7 +3631,16 @@ async def scan_burners(
                 }
             }
 
-    scanned = _build_scan_result(device_type, location, strategy, existing, allow_fallback=allow_fallback)
+    await asyncio.to_thread(_refresh_windows_pnp_state)
+    usb_devices = await asyncio.to_thread(_probe_usb_devices)
+    scanned = _build_scan_result(
+        device_type,
+        location,
+        strategy,
+        existing,
+        allow_fallback=allow_fallback,
+        usb_devices=usb_devices,
+    )
     logger.info(
         "burner.scan.result | %s",
         json.dumps(
@@ -2915,12 +3699,15 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
             ensure_ascii=False,
         ),
     )
+    await asyncio.to_thread(_refresh_windows_pnp_state)
+    usb_devices = await asyncio.to_thread(_probe_usb_devices)
     scanned = _build_scan_result(
         device_type,
         location,
         strategy,
         existing=None,
         allow_fallback=False,
+        usb_devices=usb_devices,
         expected_sn=expected_sn,
         expected_port=expected_port,
     )
@@ -2972,7 +3759,7 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
 @router.post("/agent/discovery", response_model=Response)
 async def agent_discover_burners(request: Request, _: Optional[dict] = Body(default=None)):
     require_agent_token(request)
-    items = await asyncio.to_thread(_discover_local_candidates)
+    items = await asyncio.to_thread(_discover_local_candidates, True)
     return {
         "code": 0,
         "message": "success",

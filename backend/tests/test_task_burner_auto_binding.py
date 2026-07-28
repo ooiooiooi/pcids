@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from backend.models.task import BurningTask
 from backend.routers.tasks import (
+    _delete_unstarted_auto_execute_task,
     _ensure_unique_burner_serial_binding,
     _get_burner_runtime_issue,
     _hydrate_agent_jlink_serial,
@@ -88,6 +89,18 @@ class TaskBurnerAutoBindingTests(unittest.TestCase):
         self.assertEqual(self.burner.sn, "1002")
         self.assertEqual(self.burner.port, r"PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)")
 
+    def test_physical_port_jlink_never_falls_back_to_probe_on_another_port(self):
+        self.burner.strategy = 2
+        self.burner.port = "USB-PORT-2"
+        candidates = [{"type": "J-LINK", "sn": "1001", "port": "USB-PORT-1"}]
+
+        with patch("backend.routers.tasks._discover_local_candidates", return_value=candidates):
+            with self.assertRaises(HTTPException):
+                _ensure_unique_burner_serial_binding(self.db, self.burner)
+
+        self.assertEqual(self.burner.sn, "")
+        self.db.commit.assert_not_called()
+
     def test_agent_fills_missing_jlink_serial_from_local_probe(self):
         env = {"TASK_ID": "8", "BURNER_TYPE": "J-LINK", "BURNER_SN": ""}
         candidate = {"type": "J-LINK", "sn": "000941000029", "port": "USB-PORT-1"}
@@ -155,12 +168,89 @@ class TaskBurnerAutoBindingTests(unittest.TestCase):
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = None
 
-        with patch("backend.routers.tasks._build_scan_result", return_value={"online": True}) as scan_mock:
+        with (
+            patch("backend.routers.tasks._refresh_windows_pnp_state"),
+            patch("backend.routers.tasks._build_scan_result", return_value={"online": True}) as scan_mock,
+        ):
             issue = _get_burner_runtime_issue(db, burner, current_task_id=123)
 
         self.assertIsNone(issue)
         self.assertEqual(scan_mock.call_args.args[1], "Port_#0001.Hub_#0001")
         self.assertEqual(scan_mock.call_args.args[2], 2)
+
+    def test_burner_owned_by_another_node_is_not_probed_or_executed_locally(self):
+        burner = SimpleNamespace(
+            id=38,
+            name="Remote GDLINK",
+            type="GDLINK",
+            strategy=2,
+            sn="",
+            port="Port_#0001.Hub_#0004",
+            location=None,
+            host_address="192.168.0.50",
+            status=0,
+            is_enabled=True,
+            agent_url="",
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+
+        with (
+            patch("backend.routers.burners._get_service_node_address", return_value="192.168.0.117"),
+            patch("backend.routers.tasks._refresh_windows_pnp_state") as refresh_mock,
+            patch("backend.routers.tasks._build_scan_result") as scan_mock,
+        ):
+            issue = _get_burner_runtime_issue(db, burner, current_task_id=123)
+
+        self.assertIn("登记在节点 192.168.0.50", issue)
+        refresh_mock.assert_not_called()
+        scan_mock.assert_not_called()
+
+    def test_legacy_enabled_none_is_not_treated_as_disabled_by_stale_status(self):
+        burner = SimpleNamespace(
+            id=37,
+            name="Legacy ST-LINK",
+            type="ST-LINK",
+            strategy=1,
+            sn="0001",
+            port="USB-PORT-1",
+            location="USB-PORT-1",
+            status=3,
+            is_enabled=None,
+            agent_url="",
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+
+        with (
+            patch("backend.routers.tasks._refresh_windows_pnp_state"),
+            patch("backend.routers.tasks._build_scan_result", return_value={"online": True}),
+        ):
+            issue = _get_burner_runtime_issue(db, burner, current_task_id=123)
+
+        self.assertIsNone(issue)
+
+    def test_auto_bound_serial_cannot_duplicate_another_registered_burner(self):
+        candidate = {"type": "J-LINK", "sn": "000941000029", "port": "USB-PORT-1"}
+        registered = SimpleNamespace(id=99, name="Existing J-LINK", sn="941000029")
+        self.db.query.return_value.all.return_value = [registered]
+
+        with patch("backend.routers.tasks._discover_local_candidates", return_value=[candidate]):
+            with self.assertRaisesRegex(HTTPException, "Existing J-LINK"):
+                _ensure_unique_burner_serial_binding(self.db, self.burner)
+
+        self.db.commit.assert_not_called()
+
+    def test_failed_auto_start_deletes_unstarted_pending_task(self):
+        pending = SimpleNamespace(id=88, status=0)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = pending
+
+        deleted = _delete_unstarted_auto_execute_task(db, pending)
+
+        self.assertTrue(deleted)
+        db.delete.assert_called_once_with(pending)
+        db.commit.assert_called_once()
 
     def test_terminating_task_keeps_burner_reserved_until_cleanup_finishes(self):
         burner = SimpleNamespace(

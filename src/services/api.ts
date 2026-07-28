@@ -239,8 +239,18 @@ export const taskApi = {
     request.post('/tasks', data),
   getWizardContext: () => request.get('/tasks/wizard/context'),
   getVersionBaselineStatus: (repository_id: number) => request.get('/tasks/version-baseline', { params: { repository_id } }),
-  testOsConnection: (data: Record<string, any>) => request.post('/tasks/os/connection-test', data),
-  testHybridConnection: (data: Record<string, any>) => request.post('/tasks/hybrid/connection-test', data),
+  testOsConnection: (data: Record<string, any>) =>
+    request.post('/tasks/os/connection-test', data, {
+      timeout: 45000,
+      skipAutoErrorMessage: true,
+      suppressBackendServiceError: true,
+    } as any),
+  testHybridConnection: (data: Record<string, any>) =>
+    request.post('/tasks/hybrid/connection-test', data, {
+      timeout: 45000,
+      skipAutoErrorMessage: true,
+      suppressBackendServiceError: true,
+    } as any),
   update: (id: number, data: Record<string, any>) =>
     request.put(`/tasks/${id}`, data),
   delete: (id: number) => request.delete(`/tasks/${id}`),
@@ -336,9 +346,24 @@ export const injectionApi = {
   getById: (id: number) => request.get(`/injections/${id}`),
   execute: (id: number) => request.post(`/injections/${id}/execute`),
   scanPowerPorts: () => request.get('/injections/power-off/scan-ports'),
-  testStorageFullConnection: (data: Record<string, any>) => request.post('/injections/storage-full/connection-test', data),
-  testNetworkErrorConnection: (data: Record<string, any>) => request.post('/injections/network-error/connection-test', data),
-  testPermissionErrorConnection: (data: Record<string, any>) => request.post('/injections/permission-error/connection-test', data),
+  testStorageFullConnection: (data: Record<string, any>) =>
+    request.post('/injections/storage-full/connection-test', data, {
+      timeout: 45000,
+      skipAutoErrorMessage: true,
+      suppressBackendServiceError: true,
+    } as any),
+  testNetworkErrorConnection: (data: Record<string, any>) =>
+    request.post('/injections/network-error/connection-test', data, {
+      timeout: 45000,
+      skipAutoErrorMessage: true,
+      suppressBackendServiceError: true,
+    } as any),
+  testPermissionErrorConnection: (data: Record<string, any>) =>
+    request.post('/injections/permission-error/connection-test', data, {
+      timeout: 45000,
+      skipAutoErrorMessage: true,
+      suppressBackendServiceError: true,
+    } as any),
   getRunDetail: (runId: number) => request.get(`/injections/runs/${runId}`),
   recoverRun: (runId: number) => request.post(`/injections/runs/${runId}/recover`),
   deleteRun: (runId: number) => request.delete(`/injections/runs/${runId}`),

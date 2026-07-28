@@ -26,6 +26,7 @@ from backend.routers.tasks import (
     test_hybrid_connection as _test_hybrid_connection,
     test_os_connection as _test_os_connection,
 )
+from backend.utils.ssh_client import SSHCommandResult
 from backend.utils.task_execution import ExecutionMonitor
 
 
@@ -610,6 +611,75 @@ class HybridTaskLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response["data"]["success"])
         self.assertIn("FTP 免密登录及写入验证成功", response["data"]["message"])
         self.assertEqual(login_calls, [("root", "")])
+
+    async def test_kylin_connection_test_checks_ssh_and_install_directory_write(self):
+        commands = []
+
+        class WritableSsh:
+            def __init__(self, host, port, username, password="", auth_type="key", private_key_path="", connect_timeout=0):
+                self.connection = (host, port, username, password, auth_type, private_key_path, connect_timeout)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def run(self, command, timeout=None):
+                commands.append((command, timeout))
+                return SSHCommandResult(True, "PCIDS_OS_CONNECTION_OK", "", "")
+
+        payload = {
+            "os_type": "kylin",
+            "target_ip": "192.168.137.162",
+            "target_port": 22,
+            "login_username": "user",
+            "login_password": "secret",
+            "auth_type": "password",
+            "install_dir": "/home/user/pcids-acceptance/kylin",
+        }
+
+        with patch("backend.routers.tasks.SSHClientSession", WritableSsh):
+            response = await _test_os_connection(payload)
+
+        self.assertTrue(response["data"]["success"])
+        self.assertIn("SSH 连接及安装目录写入测试通过", response["data"]["message"])
+        self.assertIn("/home/user/pcids-acceptance/kylin", response["data"]["message"])
+        self.assertEqual(len(commands), 1)
+        self.assertIn("mkdir -p", commands[0][0])
+        self.assertIn(".pcids_write_probe_", commands[0][0])
+
+    async def test_kylin_connection_test_reports_target_and_unwritable_directory(self):
+        class UnwritableSsh:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def run(self, _command, timeout=None):
+                return SSHCommandResult(False, "", "mkdir: Permission denied", "mkdir: Permission denied")
+
+        payload = {
+            "os_type": "kylin",
+            "target_ip": "192.168.137.162",
+            "target_port": 22,
+            "login_username": "user",
+            "login_password": "secret",
+            "auth_type": "password",
+            "install_dir": "/opt/control-app",
+        }
+
+        with patch("backend.routers.tasks.SSHClientSession", UnwritableSsh):
+            response = await _test_os_connection(payload)
+
+        self.assertFalse(response["data"]["success"])
+        self.assertIn("user@192.168.137.162:22", response["data"]["message"])
+        self.assertIn("/opt/control-app", response["data"]["message"])
+        self.assertIn("Permission denied", response["data"]["message"])
 
     async def test_tftp_mode_stages_artifact_and_runs_pmon_serial_flow(self):
         task = BurningTask(

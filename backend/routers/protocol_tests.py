@@ -660,8 +660,13 @@ def _can_listener_worker(session_id: int, runtime: CanSessionRuntime) -> None:
                     runtime.rx_sequence += 1
                     runtime.rx_frames.append((runtime.rx_sequence, frame))
                     frame_entries.append((runtime.rx_sequence, frame))
-                runtime.rx_condition.notify_all()
             _append_can_rx_logs(session_id, frame_entries, runtime)
+            # Persist the received frames before waking a request that is
+            # waiting for validation. Otherwise the request and listener can
+            # commit through separate SQLAlchemy sessions at the same time,
+            # which can lose the Rx audit row even though validation passed.
+            with runtime.rx_condition:
+                runtime.rx_condition.notify_all()
     except CanDependencyMissingError as exc:
         _append_can_listener_failure(session_id, f"dependency_missing: {exc.message}")
         _close_can_session_connection(session_id)

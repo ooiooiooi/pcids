@@ -32,6 +32,7 @@ D:\PCIDS-Deploy\
   drivers\
     MOXA\
   installers\
+    vc_redist.x86.exe
     Xilinx_Unified_2020.2_1118_1232\
     MPLABX-v6.20-windows-installer.exe
     Quartus-或-Quartus-Programmer-离线安装包\
@@ -63,6 +64,7 @@ Get-Volume | Select-Object DriveLetter, SizeRemaining
 
 - 当前正式 PCIDS 安装包。
 - 完整 `burners` 目录，不能只复制某个 EXE。
+- Microsoft Visual C++ 2015–2022 Redistributable **x86** 安装包 `vc_redist.x86.exe`。即使系统已经安装 x64 版本也不能省略。
 - Vitis/Vivado 2020.2 离线安装介质。
 - MPLAB X 6.20、MPLAB XC8、MPLAB XC16。
 - Quartus/Quartus Programmer 和 USB-Blaster II 独立驱动包。
@@ -98,10 +100,20 @@ Start-Process `
 
 建议顺序：
 
-1. Vitis/Vivado 2020.2。
-2. MPLAB X 6.20、XC8、XC16。
-3. Quartus/Quartus Programmer 和 USB-Blaster II 驱动。
-4. CCS 和 XDS510Plus 驱动。
+1. Microsoft Visual C++ 2015–2022 Redistributable **x86**。
+2. Vitis/Vivado 2020.2。
+3. MPLAB X 6.20、XC8、XC16。
+4. Quartus/Quartus Programmer 和 USB-Blaster II 驱动。
+5. CCS 和 XDS510Plus 驱动。
+
+ST-LINK Utility CLI 是 32 位程序，必须安装 x86 运行库；只安装 x64 运行库不能满足依赖。离线静默安装：
+
+```powershell
+Start-Process `
+  -FilePath "D:\PCIDS-Deploy\installers\vc_redist.x86.exe" `
+  -ArgumentList "/install", "/quiet", "/norestart" `
+  -Wait
+```
 
 可以从目标机桌面交互运行：
 
@@ -175,7 +187,7 @@ python -c "import sys; print(sys.executable)"
 
 | 烧录器 | PCIDS 实际使用工具 | 必需驱动/环境 | 关键环境变量 | 只读验收 |
 | --- | --- | --- | --- | --- |
-| ST-LINK | STM32 ST-LINK Utility CLI 3.6 | ST-LINK USB Driver | `STLINK_UTILITY_CLI` | `ST-LINK_CLI.exe -List` |
+| ST-LINK | STM32 ST-LINK Utility CLI 3.6 | ST-LINK USB Driver、VC++ 2015–2022 Redistributable x86 | `STLINK_UTILITY_CLI` | `ST-LINK_CLI.exe -List` 必须返回真实 SN |
 | J-LINK | SEGGER J-Link 9.52 CLI | SEGGER USB/WinUSB 驱动 | `JLINK_EXE` | `JLink.exe -?`，并确认设备 SN |
 | PWLINK2 | 随包 pyOCD runtime | CMSIS-DAP/HID/WinUSB 驱动 | `PYOCD_EXE` | `pyocd list --json` |
 | SWD Downloader | 随包 pyOCD runtime | 对应 CMSIS-DAP 驱动 | `PYOCD_EXE` | `pyocd list --json` |
@@ -193,6 +205,8 @@ python -c "import sys; print(sys.executable)"
 ### 4.1 ST-LINK 注意事项
 
 - 当前 PCIDS **使用 STM32 ST-LINK Utility CLI 3.6**，不再以 CubeProgrammer + pyOCD 作为主流程。
+- `ST-LINK_CLI.exe` 是 32 位程序，依赖 x86 版 `mfc140.dll`、`msvcp140.dll` 和 `vcruntime140.dll`。目标机只安装 VC++ x64 运行库时，CLI 仍然无法启动。
+- 部分旧 ST-LINK/V2 固件在 Windows PnP 中只暴露位置派生的实例后缀（例如 `9&...&0&3`），真实 SN 只能由 `ST-LINK_CLI.exe -List` 取得。当前扫描仅在“唯一 ST-LINK PnP 设备 + 唯一 CLI 序列号”时合并两种信息；多探头时不会猜测绑定。
 - SWD 频率必须来自该 CLI 支持的离散值；当前默认值为 `900 kHz`。
 - 不要恢复旧脚本里的 `SWJCLK=950`，ST-LINK Utility 会报 `Unknown debug protocol or option`。
 - 如果提示 `Old ST-LINK firmware`，不要先改其他烧录器脚本；确认当前任务是否误用了 CubeProgrammer，并核对 `STLINK_UTILITY_CLI`。
@@ -203,8 +217,27 @@ python -c "import sys; print(sys.executable)"
 $env:STLINK_UTILITY_CLI =
   [Environment]::GetEnvironmentVariable("STLINK_UTILITY_CLI", "Machine")
 Test-Path $env:STLINK_UTILITY_CLI
+
+$vcX86 = Get-ItemProperty `
+  "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86" `
+  -ErrorAction SilentlyContinue
+$vcX86 | Select-Object Installed, Version
+
+Test-Path C:\Windows\SysWOW64\mfc140.dll
+Test-Path C:\Windows\SysWOW64\msvcp140.dll
+Test-Path C:\Windows\SysWOW64\vcruntime140.dll
+
 & $env:STLINK_UTILITY_CLI -List
 ```
+
+验收标准：
+
+- `$vcX86.Installed` 为 `1`。
+- 三个 `SysWOW64` DLL 检查均为 `True`。
+- `ST-LINK_CLI.exe -List` 正常启动、退出码为 `0`，并输出 `SN: <真实序列号>`。
+- 在 PCIDS“编辑设备”中选择“按 SN 序列号识别”，点击“获取标识码”能够取得相同 SN；保存后再创建任务。
+
+如果 CLI 退出码为 `-1073741515`（十六进制 `0xC0000135`），表示 32 位运行库 DLL 缺失。安装微软官方 `vc_redist.x86.exe` 后重新执行上述检查；不要通过手工复制单个 DLL 解决。
 
 ### 4.2 J-LINK、GDLINK 和 ST-LINK 的批处理脚本
 
@@ -742,6 +775,8 @@ Copy-Item `
 | GDLINK/JLINK/ST-LINK 出现批处理变量残片 | 旧系统脚本的 cmd 转义错误 | 安装当前包并让数据库同步最新初始化脚本 |
 | ST-LINK `SWJCLK=950` 不支持 | 频率不是 Utility 支持值 | 当前默认 900 kHz，只允许支持列表 |
 | ST-LINK 提示旧固件 | 误用 CubeProgrammer 或探头固件旧 | 当前主流程固定 ST-LINK Utility 3.6；再核对探头 |
+| ST-LINK “获取标识码”为空，CLI 退出 `0xC0000135` | 只安装了 VC++ x64，缺少 x86 运行库 | 安装微软官方 VC++ 2015–2022 Redistributable x86，确认 `SysWOW64` 三个 DLL 后重新扫描 |
+| `ST-LINK_CLI.exe -List` 能看到 SN，但任务预检提示未检测到设备 | 旧 ST-LINK/V2 的 PnP 实例号不是实际 SN，或目标机仍运行旧版 PCIDS | 安装当前 PCIDS 包；确认设备管理器只有预期探头，再执行“获取标识码”，所得 SN 必须与 CLI 完全一致 |
 | AL321 能识别 USB 但找不到 JTAG | FTDI 驱动版本/绑定不同或板端链路问题 | 先跑只读 `--detect`；驱动版本与成功机一致 |
 | AL321 `usb_open() failed -4` | 目标机使用旧 FTDI 驱动包 | 安装并验证 FTDI 2.12.36.20，不能只看状态 OK |
 | AL321 SN 为空 | 稳定序列只保存在 PnP/USB binding | 使用当前包重新扫描和绑定，日志必须能定位唯一实例 |

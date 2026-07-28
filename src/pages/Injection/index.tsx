@@ -76,6 +76,22 @@ const getFirstFormErrorMessage = (errorInfo: any, fallback = '请检查表单填
   return firstField?.errors?.[0] || fallback
 }
 
+const getConnectionTestErrorMessage = (error: any, targetIp: any, targetPort: any) => {
+  const target = `${String(targetIp || '').trim() || '-'}:${Number(targetPort || 22)}`
+  const responseDetail = String(
+    error?.response?.data?.detail
+    || error?.response?.data?.message
+    || '',
+  ).trim()
+  if (responseDetail) return responseDetail
+
+  const isTimeout = String(error?.code || '').toUpperCase() === 'ECONNABORTED'
+    || /timeout/i.test(String(error?.message || ''))
+  return isTimeout
+    ? `连接测试超时：${target}。请检查目标地址、SSH 端口和网络连接。`
+    : `连接测试请求失败：${target}。请稍后重试并检查目标机服务。`
+}
+
 const Injection: React.FC = () => {
   const { message } = AntdApp.useApp()
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -774,8 +790,14 @@ const Injection: React.FC = () => {
       }
     } catch (e: any) {
       if (!e?.errorFields) {
-        setNetworkConnectionResult(null)
+        const failureMessage = getConnectionTestErrorMessage(
+          e,
+          actionForm.getFieldValue('network_target_ip'),
+          actionForm.getFieldValue('network_ssh_port'),
+        )
+        setNetworkConnectionResult({ success: false, message: failureMessage })
         setNetworkInterfaces([])
+        message.error(failureMessage)
       }
     } finally {
       setNetworkConnectionLoading(false)
@@ -807,7 +829,13 @@ const Injection: React.FC = () => {
       }
     } catch (e: any) {
       if (!e?.errorFields) {
-        setStorageConnectionResult(null)
+        const failureMessage = getConnectionTestErrorMessage(
+          e,
+          actionForm.getFieldValue('storage_target_ip'),
+          actionForm.getFieldValue('storage_ssh_port'),
+        )
+        setStorageConnectionResult({ success: false, message: failureMessage })
+        message.error(failureMessage)
       }
     } finally {
       setStorageConnectionLoading(false)
@@ -839,7 +867,13 @@ const Injection: React.FC = () => {
       }
     } catch (e: any) {
       if (!e?.errorFields) {
-        setPermissionConnectionResult(null)
+        const failureMessage = getConnectionTestErrorMessage(
+          e,
+          actionForm.getFieldValue('permission_target_ip'),
+          actionForm.getFieldValue('permission_ssh_port'),
+        )
+        setPermissionConnectionResult({ success: false, message: failureMessage })
+        message.error(failureMessage)
       }
     } finally {
       setPermissionConnectionLoading(false)

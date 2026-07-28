@@ -5,6 +5,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -15,6 +16,7 @@ from backend.routers.tasks import (
     _ensure_task_not_terminated,
     _finalize_task_after_unhandled_exception,
     _get_burner_runtime_issue,
+    _is_sqlite_write_lock_error,
     _windows_task_cleanup_script,
     recover_interrupted_tasks,
     router as tasks_router,
@@ -217,6 +219,25 @@ class TaskTerminationTests(unittest.TestCase):
             response = self.client.delete(f"/tasks/{task.id}")
             self.assertEqual(response.status_code, 400)
             self.assertIn("不能删除", response.json()["detail"])
+
+    def test_source_task_can_be_deleted_while_its_execution_copy_is_running(self):
+        source = self._create_task(TaskStatus.PENDING)
+        execution_copy = self._create_task(TaskStatus.RUNNING)
+        execution_copy.config_json = json.dumps({"source_task_id": source.id})
+        self.db.commit()
+
+        response = self.client.delete(f"/tasks/{source.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.SessionLocal().query(BurningTask).filter(BurningTask.id == source.id).first())
+        self.assertIsNotNone(self.SessionLocal().query(BurningTask).filter(BurningTask.id == execution_copy.id).first())
+
+    def test_sqlite_write_lock_is_recognized_as_retryable(self):
+        locked = OperationalError("DELETE FROM tasks", {}, Exception("database is locked"))
+        unrelated = OperationalError("DELETE FROM tasks", {}, Exception("foreign key constraint failed"))
+
+        self.assertTrue(_is_sqlite_write_lock_error(locked))
+        self.assertFalse(_is_sqlite_write_lock_error(unrelated))
 
     def test_task_status_cannot_be_changed_through_generic_update(self):
         task = self._create_task(TaskStatus.PENDING)

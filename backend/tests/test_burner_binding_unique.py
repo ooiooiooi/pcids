@@ -88,6 +88,18 @@ class BurnerBindingUniqueTests(unittest.TestCase):
             sn="",
             host_name=None,
             modified_by=None,
+            location="Port_#0003.Hub_#0001",
+            status=0,
+            is_enabled=True,
+            strategy=2,
+            config_json=json.dumps(
+                {
+                    "usb_binding": {
+                        "location_info": "Port_#0003.Hub_#0001",
+                        "pnp_device_id": r"USB\VID_1234&PID_5678\OLD",
+                    }
+                }
+            ),
         )
         db = _FakeDB([conflict_burner])
 
@@ -103,6 +115,9 @@ class BurnerBindingUniqueTests(unittest.TestCase):
         self.assertIs(matched, conflict_burner)
         _clear_conflicting_burner_port(conflict_burner, "tester")
         self.assertEqual(conflict_burner.port, "")
+        self.assertEqual(conflict_burner.location, "")
+        self.assertEqual(conflict_burner.status, 1)
+        self.assertNotIn("usb_binding", json.loads(conflict_burner.config_json))
         self.assertEqual(conflict_burner.modified_by, "tester")
 
     def test_strategy_two_uses_full_usb_binding_on_same_node(self):
@@ -155,6 +170,34 @@ class BurnerBindingUniqueTests(unittest.TestCase):
         )
 
         self.assertIsNone(result)
+
+    def test_serial_is_unique_across_nodes_and_ignores_leading_zeroes(self):
+        existing = SimpleNamespace(
+            id=6,
+            name="J-LINK on node A",
+            type="J-LINK",
+            port="USB-A",
+            sn="000941000029",
+            host_name=None,
+            host_address="10.0.0.8",
+            agent_url=None,
+            config_json="{}",
+        )
+        db = _FakeDB([existing])
+
+        with self.assertRaises(HTTPException) as context:
+            _validate_burner_binding_unique(
+                db,
+                {
+                    "strategy": 1,
+                    "sn": "941000029",
+                    "host_address": "10.0.0.9",
+                    "config_json": "{}",
+                },
+            )
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertIn("J-LINK on node A", context.exception.detail)
 
 
 if __name__ == "__main__":

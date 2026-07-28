@@ -29,6 +29,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, Response as FastAPIResponse, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import or_, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from backend.utils.db import get_db, ensure_schema, generate_task_no
@@ -48,8 +49,12 @@ from backend.routers.burners import (
     _build_agent_endpoint,
     _candidate_port_values,
     _discover_local_candidates,
+    _is_burner_owned_by_service_node,
+    _is_burner_enabled,
     _is_test_online_burner,
+    _normalize_binding_sn,
     _port_match_values,
+    _refresh_windows_pnp_state,
     _remote_discover_devices,
 )
 from backend.routers.repositories import (
@@ -141,6 +146,12 @@ def _is_task_active_status(status: Optional[int]) -> bool:
 
 def _is_task_terminated_status(status: Optional[int]) -> bool:
     return int(status or 0) in {int(TaskStatus.TERMINATING), int(TaskStatus.TERMINATED)}
+
+
+def _is_sqlite_write_lock_error(exc: OperationalError) -> bool:
+    """Return whether an OperationalError is SQLite's transient writer contention."""
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in message or "database is busy" in message
 
 
 def _resolve_task_status_text(status: Optional[int]) -> str:
@@ -764,8 +775,7 @@ def _get_burner_runtime_issue(
         logger.warning("task.burner_check.missing | %s", json.dumps({"current_task_id": current_task_id}, ensure_ascii=False))
         return "当前任务还没有选择烧录器，请先选择一个在线烧录器后再执行"
 
-    is_enabled = bool(getattr(burner, "is_enabled", None)) and int(getattr(burner, "status", 0) or 0) != 3
-    if not is_enabled:
+    if not _is_burner_enabled(burner):
         logger.warning("task.burner_check.disabled | %s", json.dumps({"burner_id": burner.id, "burner_name": burner.name, "current_task_id": current_task_id}, ensure_ascii=False))
         return f"设备“{burner.name}”已被禁用，请先在设备管理中启用后再执行"
 
@@ -852,6 +862,21 @@ def _get_burner_runtime_issue(
                 ),
             )
             return f"暂时无法连接烧录器“{burner.name}”配置的代理地址，请检查网络和代理服务状态后再执行"
+    elif not _is_burner_owned_by_service_node(burner):
+        owner_address = str(getattr(burner, "host_address", None) or "").strip() or "其他节点"
+        logger.warning(
+            "task.burner_check.wrong_service_node | %s",
+            json.dumps(
+                {
+                    "burner_id": burner.id,
+                    "burner_name": burner.name,
+                    "owner_address": owner_address,
+                    "current_task_id": current_task_id,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return f"烧录器“{burner.name}”登记在节点 {owner_address}，当前服务不能在本机执行；请重新扫描并绑定正确节点"
     elif _is_test_online_burner(burner):
         logger.info(
             "task.burner_check.test_online | %s",
@@ -861,6 +886,7 @@ def _get_burner_runtime_issue(
             ),
         )
     else:
+        _refresh_windows_pnp_state()
         burner_strategy = int(getattr(burner, "strategy", 1) or 1)
         scan_anchor = burner.port if burner_strategy == 2 else burner.location
         scanned = _build_scan_result(
@@ -900,13 +926,16 @@ def _get_burner_runtime_issue(
 def _ensure_unique_burner_serial_binding(db: Session, burner: Optional[Burner]) -> None:
     if not burner:
         return
-    if str(getattr(burner, "sn", None) or "").strip():
-        return
 
     strategy = int(getattr(burner, "strategy", 1) or 1)
     burner_type_token = re.sub(r"[^a-z0-9]+", "", str(getattr(burner, "type", None) or "").lower())
     # J-Link 官方 CLI 即使按物理端口登记，执行时仍必须通过序列号精确选中探针。
     if strategy != 1 and burner_type_token != "jlink":
+        return
+    # SN strategy is already fully bound. A physical-port J-Link is different:
+    # resolve the serial at its current bound port before every execution so a
+    # replaced probe cannot inherit the previous probe's serial.
+    if strategy == 1 and str(getattr(burner, "sn", None) or "").strip():
         return
 
     agent_url = str(getattr(burner, "agent_url", None) or "").strip()
@@ -915,7 +944,7 @@ def _ensure_unique_burner_serial_binding(db: Session, burner: Optional[Burner]) 
             response = _remote_discover_devices(agent_url)
             raw_candidates = list(response.get("data", {}).get("items") or [])
         else:
-            raw_candidates = _discover_local_candidates()
+            raw_candidates = _discover_local_candidates(refresh_hardware=True)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"无法读取烧录器“{burner.name}”的 SN：{str(exc)}") from exc
 
@@ -938,8 +967,7 @@ def _ensure_unique_burner_serial_binding(db: Session, burner: Optional[Burner]) 
                 for candidate in candidates
                 if _candidate_port_values(candidate) & expected_ports
             ]
-            if port_matches:
-                candidates = port_matches
+            candidates = port_matches
     if not candidates:
         raise HTTPException(
             status_code=400,
@@ -952,7 +980,17 @@ def _ensure_unique_burner_serial_binding(db: Session, burner: Optional[Burner]) 
         )
 
     candidate = candidates[0]
-    burner.sn = str(candidate.get("sn") or "").strip()
+    candidate_sn = str(candidate.get("sn") or "").strip()
+    normalized_candidate_sn = _normalize_binding_sn(candidate_sn)
+    for registered_burner in db.query(Burner).all():
+        if getattr(registered_burner, "id", None) == getattr(burner, "id", None):
+            continue
+        if normalized_candidate_sn and _normalize_binding_sn(getattr(registered_burner, "sn", None)) == normalized_candidate_sn:
+            raise HTTPException(
+                status_code=409,
+                detail=f"检测到的 SN 已绑定设备「{getattr(registered_burner, 'name', None) or registered_burner.id}」，请先在设备管理中处理重复绑定",
+            )
+    burner.sn = candidate_sn
     detected_port = str(candidate.get("port") or "").strip()
     if detected_port:
         burner.port = detected_port
@@ -1001,8 +1039,7 @@ def _hydrate_agent_jlink_serial(env: dict) -> None:
             for candidate in candidates
             if _candidate_port_values(candidate) & expected_ports
         ]
-        if port_matches:
-            candidates = port_matches
+        candidates = port_matches
 
     if not candidates:
         raise HTTPException(status_code=400, detail="下位机未检测到带有效 SN 的 J-Link，请检查 USB 连接和驱动")
@@ -2934,6 +2971,7 @@ async def test_os_connection(
     login_password = str(payload.get("login_password") or "")
     auth_type = str(payload.get("auth_type") or "key").strip().lower()
     private_key_path = str(payload.get("private_key_path") or "").strip()
+    install_dir = str(payload.get("install_dir") or "/opt/control-app").strip() or "/opt/control-app"
 
     if not target_ip:
         raise HTTPException(status_code=400, detail="请输入目标地址")
@@ -2948,6 +2986,16 @@ async def test_os_connection(
     if auth_type == "password":
         private_key_path = ""
 
+    probe_name = f".pcids_write_probe_{uuid.uuid4().hex[:8]}"
+    probe_path = posixpath.join(install_dir.rstrip("/") or "/", probe_name)
+    probe_command = " && ".join(
+        [
+            f"mkdir -p {shlex.quote(install_dir)}",
+            f": > {shlex.quote(probe_path)}",
+            f"rm -f {shlex.quote(probe_path)}",
+            "printf 'PCIDS_OS_CONNECTION_OK'",
+        ]
+    )
     try:
         with SSHClientSession(
             target_ip,
@@ -2958,20 +3006,32 @@ async def test_os_connection(
             private_key_path=private_key_path,
             connect_timeout=8,
         ) as session:
-            result = session.run(remote_shell_command("printf 'PCIDS_OS_CONNECTION_OK'"), timeout=10)
+            result = session.run(remote_shell_command(probe_command), timeout=10)
             if not result.success or "PCIDS_OS_CONNECTION_OK" not in result.stdout:
                 raise RuntimeError(result.reason or "远端命令验证失败")
     except Exception as exc:
         return {
             "code": 0,
             "message": "连接测试完成",
-            "data": {"success": False, "message": f"SSH 连接测试失败：{str(exc)}"},
+            "data": {
+                "success": False,
+                "message": (
+                    f"SSH 连接测试失败：{login_username}@{target_ip}:{target_port}；"
+                    f"安装目录：{install_dir}；原因：{str(exc) or exc.__class__.__name__}"
+                ),
+            },
         }
 
     return {
         "code": 0,
         "message": "连接测试完成",
-        "data": {"success": True, "message": f"SSH 连接测试通过：{login_username}@{target_ip}:{target_port}"},
+        "data": {
+            "success": True,
+            "message": (
+                f"SSH 连接及安装目录写入测试通过：{login_username}@{target_ip}:{target_port}；"
+                f"安装目录：{install_dir}"
+            ),
+        },
     }
 
 
@@ -7604,6 +7664,24 @@ async def download_consistency_report_csv(
     return FastAPIResponse(content=csv_text, media_type="text/csv; charset=utf-8", headers=headers)
 
 
+def _delete_unstarted_auto_execute_task(db: Session, task: BurningTask) -> bool:
+    task_id = getattr(task, "id", None)
+    if not task_id:
+        return False
+    try:
+        db.rollback()
+        persisted = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+        if not persisted or int(getattr(persisted, "status", TaskStatus.PENDING)) != int(TaskStatus.PENDING):
+            return False
+        db.delete(persisted)
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        logger.exception("task.auto_execute.cleanup_failed | task_id=%s", task_id)
+        return False
+
+
 @router.post("", response_model=Response)
 async def create_task(
     task_data: TaskCreate,
@@ -7681,15 +7759,14 @@ async def create_task(
                 burner=burner,
                 config=task_config,
             )
-        except HTTPException:
+        except Exception:
             # An auto-start task is not a draft.  If its artifact cannot be
             # prepared (for example an SSH/SFTP transfer fails), do not leave
             # an unexecutable pending task in the task list.
-            db.delete(task)
-            db.commit()
+            _delete_unstarted_auto_execute_task(db, task)
             raise
         if not repo or not repo.file_url:
-            db.commit()
+            _delete_unstarted_auto_execute_task(db, task)
             raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
         task_config = {**task_config, **artifact_cleanup_plan}
         task_config = {
@@ -7700,14 +7777,21 @@ async def create_task(
             "execution_task_no": task.task_no,
             "auto_execute": True,
         }
-        await _start_task_execution(
-            db=db,
-            request=request,
-            background_tasks=background_tasks,
-            task=task,
-            task_config=task_config,
-            current_user=current_user,
-        )
+        try:
+            await _start_task_execution(
+                db=db,
+                request=request,
+                background_tasks=background_tasks,
+                task=task,
+                task_config=task_config,
+                current_user=current_user,
+            )
+        except Exception:
+            # Device refresh, burner occupancy and script preflight all happen
+            # immediately before the task is claimed. A rejected auto-start is
+            # not a draft and must not remain as a pending task.
+            _delete_unstarted_auto_execute_task(db, task)
+            raise
         db.commit()
         auto_execute_response = {"id": task.id, "task_no": task.task_no}
 
@@ -7954,14 +8038,40 @@ async def delete_task(
     _: None = Depends(require_permission("burning:delete")),
 ):
     """删除任务"""
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if _is_task_active_status(task.status):
-        raise HTTPException(status_code=400, detail="执行中或终止中的任务不能删除，请先终止任务并等待状态收口")
+    # The copied execution task writes from a separate session while its
+    # source task may be deleted. Keep the source independently deletable,
+    # but turn transient SQLite writer contention into a business response.
+    for attempt in range(3):
+        task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if _is_task_active_status(task.status):
+            raise HTTPException(status_code=400, detail="执行中或终止中的任务不能删除，请先终止任务并等待状态收口")
 
-    db.delete(task)
-    db.commit()
+        try:
+            # Avoid spending the service-wide 30-second busy timeout on an
+            # interactive delete action; retry briefly instead.
+            db.connection().exec_driver_sql("PRAGMA busy_timeout = 1000")
+            db.delete(task)
+            db.commit()
+            break
+        except OperationalError as exc:
+            db.rollback()
+            if not _is_sqlite_write_lock_error(exc):
+                raise
+            if attempt == 2:
+                raise HTTPException(
+                    status_code=409,
+                    detail="任务执行正在更新状态，暂时无法删除原任务，请稍后重试。",
+                ) from exc
+            await asyncio.sleep(0.15 * (attempt + 1))
+        finally:
+            # Connections are pooled; restore the standard timeout before the
+            # request session returns its connection to the pool.
+            try:
+                db.connection().exec_driver_sql("PRAGMA busy_timeout = 30000")
+            except Exception:
+                pass
 
     return {
         "code": 0,

@@ -35,6 +35,7 @@ import {
 import { ActionButtonGroup, ActionLinkButton, PagePrimaryButton, PageSecondaryButton } from '../../components/ActionButton'
 import EmptyStateIllustration from '../../assets/images/repository-empty-state.svg'
 import { repositoryApi, userApi } from '../../services/api'
+import { consumeBackendServiceError } from '../../services/backendErrorCenter'
 import { renderListPaginationTotal } from '../../utils/pagination'
 import { formatDateTime } from '../../utils/dateTime'
 import { patchTreeHiddenInputs } from '../../utils/treeAccessibility'
@@ -487,6 +488,10 @@ const Repository: React.FC = () => {
         setTreeRaw(res.data || [])
       }
     } catch (e: any) {
+      if (consumeBackendServiceError(e)) {
+        setTreeRaw([])
+        return
+      }
       const errDetail = e?.response?.data?.detail
       message.error(errDetail || '本地项目加载失败，请稍后重试')
       setTreeRaw([])
@@ -776,6 +781,7 @@ const Repository: React.FC = () => {
   }
 
   const showCreateProjectRequestError = (error: any) => {
+    if (consumeBackendServiceError(error)) return
     const status = Number(error?.response?.status || 0)
     const detail = String(error?.response?.data?.detail || '').trim()
 
@@ -835,6 +841,7 @@ const Repository: React.FC = () => {
         message.open({ key: messageKey, type: 'error', content: errorText, duration: 5 })
       }
     } catch (e: any) {
+      if (consumeBackendServiceError(e)) return
       const detail = String(e?.response?.data?.detail || '').trim()
       if (e?.response?.status === 409 && detail) {
         setSyncTaskNotice({ type: 'error', message: detail })

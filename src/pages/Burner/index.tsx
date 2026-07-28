@@ -111,6 +111,8 @@ const parseBurnerConfig = (configJson?: string) => {
   }
 }
 
+const normalizeAgentAddress = (value: any) => String(value || '').trim().replace(/\/+$/, '').toLowerCase()
+
 const inferDeviceCategory = (record: any) => {
   const config = parseBurnerConfig(record?.config_json)
   if (config.device_category === 'sd_reader' || record?.type === 'SD卡文件写入' || String(record?.name || '').includes('SD')) {
@@ -149,6 +151,8 @@ const buildFormValues = (record?: any) => {
     mount_path: config.mount_path || '',
     usb_binding: config.usb_binding || {},
     host_type: record.host_type || (record.agent_url ? 'agent' : 'local'),
+    host_name: record.host_name || '',
+    host_address: record.host_address || '',
     agent_url: record.agent_url || '',
     is_enabled: record.is_enabled ?? true,
   }
@@ -181,6 +185,8 @@ const buildBurnerPayload = (values: any, strategy: number) => {
     description: values.description,
     agent_url: values.host_type === 'agent' ? (values.agent_url || '') : '',
     host_type: values.host_type || (values.agent_url ? 'agent' : 'local'),
+    host_name: values.host_name || '',
+    host_address: values.host_address || '',
     config_json: JSON.stringify(config),
   }
 }
@@ -306,6 +312,8 @@ const buildDiscoveryCreateValues = (candidate: any) => {
     device_model: deviceCategory === 'burner' && !isProbeOnly ? candidate?.type : undefined,
     name: candidate?.detected_name || candidate?.type || '',
     host_type: lockedHostType,
+    host_name: candidate?.host_name || '',
+    host_address: candidate?.host_address || '',
     agent_url: candidate?.agent_url || '',
     locked_host_type: lockedHostType,
     sn: candidate?.sn || '',
@@ -373,6 +381,8 @@ const Burner: React.FC = () => {
   const editHostType = Form.useWatch('host_type', editForm) || 'local'
   const createLockedHostType = Form.useWatch('locked_host_type', createForm) || ''
   const editLockedHostType = Form.useWatch('locked_host_type', editForm) || ''
+  const createIsEnabled = Form.useWatch('is_enabled', createForm) !== false
+  const editIsEnabled = Form.useWatch('is_enabled', editForm) !== false
 
   useEffect(() => { fetchBurners() }, [params])
 
@@ -475,7 +485,7 @@ const Burner: React.FC = () => {
       && (detail.includes('绑定') || detail.includes('占用'))
   }
 
-  const finishCreateSuccess = () => {
+  const finishCreateSuccess = async () => {
     message.success('创建成功')
     if (!keepAdding) {
       setIsCreateModalOpen(false)
@@ -483,13 +493,13 @@ const Burner: React.FC = () => {
     createForm.resetFields()
     createForm.setFieldsValue(buildFormValues())
     setCreateStrategy(1)
-    fetchBurners()
+    await fetchBurners()
   }
 
-  const finishUpdateSuccess = () => {
+  const finishUpdateSuccess = async () => {
     message.success('更新成功')
     setIsEditModalOpen(false)
-    fetchBurners()
+    await fetchBurners()
   }
 
   const confirmForceRebind = (detail: string, onConfirm: () => Promise<void>) =>
@@ -519,14 +529,14 @@ const Burner: React.FC = () => {
     setCreating(true)
     try {
       await burnerApi.create(payload, { skipAutoErrorMessage: true } as any)
-      finishCreateSuccess()
+      await finishCreateSuccess()
     } catch (e: any) {
       if (e?.errorFields) return
       if (isPhysicalPortConflictError(e, payload)) {
         const detail = getBurnerSubmitErrorDetail(e, '当前物理位置已被其他设备绑定')
         confirmForceRebind(detail, async () => {
           await burnerApi.create({ ...payload, force_rebind_port: true }, { skipAutoErrorMessage: true } as any)
-          finishCreateSuccess()
+          await finishCreateSuccess()
         })
         return
       }
@@ -541,14 +551,14 @@ const Burner: React.FC = () => {
     setUpdating(true)
     try {
       await burnerApi.update(editingBurner.id, payload, { skipAutoErrorMessage: true } as any)
-      finishUpdateSuccess()
+      await finishUpdateSuccess()
     } catch (e: any) {
       if (e?.errorFields) return
       if (isPhysicalPortConflictError(e, payload)) {
         const detail = getBurnerSubmitErrorDetail(e, '当前物理位置已被其他设备绑定')
         confirmForceRebind(detail, async () => {
           await burnerApi.update(editingBurner.id, { ...payload, force_rebind_port: true }, { skipAutoErrorMessage: true } as any)
-          finishUpdateSuccess()
+          await finishUpdateSuccess()
         })
         return
       }
@@ -601,26 +611,40 @@ const Burner: React.FC = () => {
     const currentBinding = item?.current_binding || {}
     const existingRecord = dataSource.find((record: any) => Number(record?.id) === Number(item?.burner_id))
     const nextConfig = {
-      ...parseBurnerConfig(existingRecord?.config_json),
+      ...parseBurnerConfig(existingRecord?.config_json || item?.burner_config_json),
       usb_binding: currentBinding?.usb_binding || {},
+    }
+    const updatePayload = {
+      sn: currentBinding?.sn || null,
+      port: currentBinding?.port || null,
+      agent_url: currentBinding?.agent_url || null,
+      host_type: ['local', 'server', 'agent'].includes(String(currentBinding?.node_type || '').trim().toLowerCase())
+        ? String(currentBinding?.node_type || '').trim().toLowerCase()
+        : (currentBinding?.agent_url ? 'agent' : 'local'),
+      host_name: currentBinding?.host_name || null,
+      host_address: currentBinding?.host_address || null,
+      config_json: JSON.stringify(nextConfig),
     }
     setDiscoveryActionKey(`bind-${item?.burner_id}`)
     try {
-      await burnerApi.update(item?.burner_id, {
-        sn: currentBinding?.sn || null,
-        port: currentBinding?.port || null,
-        agent_url: currentBinding?.agent_url || null,
-        host_type: ['local', 'server', 'agent'].includes(String(currentBinding?.node_type || '').trim().toLowerCase())
-          ? String(currentBinding?.node_type || '').trim().toLowerCase()
-          : (currentBinding?.agent_url ? 'agent' : 'local'),
-        host_name: null,
-        host_address: currentBinding?.host_address || null,
-        config_json: JSON.stringify(nextConfig),
-      })
+      await burnerApi.update(item?.burner_id, updatePayload, { skipAutoErrorMessage: true } as any)
       message.success('绑定已更新')
       await runDiscovery(discoveryScope, false)
-    } catch {
-      message.error('更新绑定失败，请稍后重试')
+    } catch (error: any) {
+      if (isPhysicalPortConflictError(error, { ...updatePayload, strategy: item?.strategy })) {
+        const detail = getBurnerSubmitErrorDetail(error, '当前物理位置已被其他设备绑定')
+        confirmForceRebind(detail, async () => {
+          await burnerApi.update(
+            item?.burner_id,
+            { ...updatePayload, force_rebind_port: true },
+            { skipAutoErrorMessage: true } as any,
+          )
+          message.success('绑定已更新，原设备位置已解除')
+          await runDiscovery(discoveryScope, false)
+        })
+      } else {
+        message.error(getBurnerSubmitErrorDetail(error, '更新绑定失败，请稍后重试'))
+      }
     } finally {
       setDiscoveryActionKey(null)
     }
@@ -653,43 +677,26 @@ const Burner: React.FC = () => {
     editForm.resetFields()
   }
 
-  const getRegisteredDeviceKeys = (mode: 'create' | 'edit') => {
-    const editingId = mode === 'edit' ? editingBurner?.id : undefined
-    const registeredSn = new Set(
-      dataSource
-        .filter((item) => item?.id !== editingId)
-        .map((item) => String(item?.sn || '').trim())
-        .filter(Boolean),
-    )
-    const registeredPort = new Set(
-      dataSource
-        .filter((item) => item?.id !== editingId)
-        .map((item) => String(item?.port || '').trim())
-        .filter(Boolean),
-    )
-    return { registeredSn, registeredPort }
-  }
-
-  const buildScanOptions = (candidates: any[], type: string, field: 'sn' | 'port', mode: 'create' | 'edit') => {
-    const { registeredSn, registeredPort } = getRegisteredDeviceKeys(mode)
+  const buildScanOptions = (candidates: any[], type: string, field: 'sn' | 'port') => {
     const seen = new Set<string>()
     const burnerCandidates = (candidates || []).filter((candidate) => candidate?.device_category !== 'sd_reader')
     const typedCandidates = burnerCandidates.filter(
       (candidate) => !candidate?.probe_only && String(candidate?.type || '') === String(type || ''),
     )
+    const compatibleProbeCandidates = burnerCandidates.filter((candidate) => (
+      candidate?.probe_only
+      && Array.isArray(candidate?.possible_types)
+      && candidate.possible_types.some((possibleType: string) => String(possibleType || '') === String(type || ''))
+    ))
     const selectableCandidates = typedCandidates.length
       ? typedCandidates
-      : burnerCandidates.filter((candidate) => candidate?.probe_only)
+      : compatibleProbeCandidates
     return selectableCandidates
       .map((candidate) => ({
         ...candidate,
         value: String(candidate?.[field] || '').trim(),
-        snValue: String(candidate?.sn || '').trim(),
-        portValue: String(candidate?.port || '').trim(),
       }))
       .filter((candidate) => candidate.value)
-      .filter((candidate) => !candidate.snValue || !registeredSn.has(candidate.snValue))
-      .filter((candidate) => !candidate.portValue || !registeredPort.has(candidate.portValue))
       .filter((candidate) => {
         if (seen.has(candidate.value)) return false
         seen.add(candidate.value)
@@ -722,6 +729,8 @@ const Burner: React.FC = () => {
       usb_binding: selected?.usb_binding || form.getFieldValue('usb_binding') || {},
       agent_url: selected?.agent_url || form.getFieldValue('agent_url'),
       host_type: selected?.node_type || (selected?.agent_url ? 'agent' : form.getFieldValue('host_type')),
+      host_name: selected?.host_name || '',
+      host_address: selected?.host_address || '',
       name: form.getFieldValue('name') || selected?.detected_name || selected?.type || '',
     })
     setScanSelect((prev) => ({ ...prev, open: false, value: undefined }))
@@ -755,7 +764,13 @@ const Burner: React.FC = () => {
       const candidates = mode === 'edit'
         ? [...(discoveryRes?.data?.selectable_devices || []), ...(discoveryRes?.data?.probe_only_devices || [])]
         : [...(discoveryRes?.data?.unregistered_devices || []), ...(discoveryRes?.data?.probe_only_devices || [])]
-      const options = buildScanOptions(candidates, type, field, mode)
+      const requestedNodeCandidates = candidates.filter((candidate: any) => {
+        if (hostType === 'agent') {
+          return normalizeAgentAddress(candidate?.agent_url) === normalizeAgentAddress(agentUrl)
+        }
+        return !normalizeAgentAddress(candidate?.agent_url)
+      })
+      const options = buildScanOptions(requestedNodeCandidates, type, field)
       if (options.length === 1) {
         applyScanSelection({
           open: false,
@@ -992,6 +1007,7 @@ const Burner: React.FC = () => {
     deviceModel: string | undefined,
     hostType: string,
     lockedHostType: string,
+    isEnabled: boolean,
     onFinish: (values: any) => void,
   ) => {
     const physicalPortOnly = requiresPhysicalPortStrategy(deviceModel)
@@ -1014,6 +1030,12 @@ const Burner: React.FC = () => {
         <Form.Item name="usb_binding" hidden>
           <Input />
         </Form.Item>
+        <Form.Item name="host_name" hidden>
+          <Input />
+        </Form.Item>
+        <Form.Item name="host_address" hidden>
+          <Input />
+        </Form.Item>
         <div className="device-form-banner">
           <Alert
             message="物理端口位置识别的设备发生物理位置更改时，请重新获取新的物理位置并保存"
@@ -1031,7 +1053,13 @@ const Burner: React.FC = () => {
 
             {deviceCategory === 'burner' ? (
               <Form.Item label="选择烧录器" name="device_model" rules={[{ required: true, message: '请选择烧录器' }]} required>
-                <Select placeholder="请选择烧录器" options={BURNER_MODEL_OPTIONS} />
+                <Select
+                  placeholder="请选择烧录器"
+                  options={BURNER_MODEL_OPTIONS}
+                  onChange={() => {
+                    form.setFieldsValue({ sn: undefined, port: undefined, usb_binding: {} })
+                  }}
+                />
               </Form.Item>
             ) : (
               <div className="device-form-grid__placeholder" />
@@ -1067,11 +1095,11 @@ const Burner: React.FC = () => {
               </>
             ) : (
               <>
-                <Form.Item label="支持卡类型" name="supported_card_types" rules={[{ required: true, message: '请选择支持卡类型' }]} required>
+                <Form.Item label="支持卡类型" name="supported_card_types" rules={[{ required: isEnabled, message: '请选择支持卡类型' }]} required={isEnabled}>
                   <Select mode="multiple" placeholder="请选择支持卡类型" options={CARD_TYPE_OPTIONS} />
                 </Form.Item>
 
-                <Form.Item label="挂载路径" name="mount_path" rules={[{ required: true, message: '请输入挂载路径' }]} required>
+                <Form.Item label="挂载路径" name="mount_path" rules={[{ required: isEnabled, message: '请输入挂载路径' }]} required={isEnabled}>
                   <Input name="mount_path" autoComplete="off" placeholder="例如：/Volumes/SDCARD" />
                 </Form.Item>
               </>
@@ -1094,6 +1122,15 @@ const Burner: React.FC = () => {
                       className={`device-location-card${active ? ' device-location-card--active' : ''}${disabled ? ' device-location-card--disabled' : ''}`}
                       onClick={() => {
                         if (disabled) return
+                        if (form.getFieldValue('host_type') !== item.value) {
+                          form.setFieldsValue({
+                            sn: undefined,
+                            port: undefined,
+                            usb_binding: {},
+                            host_name: '',
+                            host_address: '',
+                          })
+                        }
                         form.setFieldValue('host_type', item.value)
                       }}
                       aria-disabled={disabled}
@@ -1130,7 +1167,14 @@ const Burner: React.FC = () => {
 
             {hostType === 'agent' ? (
               <Form.Item className="device-form-grid__full" label="代理地址" name="agent_url" rules={[{ required: true, message: '请输入代理地址' }]} required>
-                <Input name="agent_url" autoComplete="url" placeholder="例如：http://192.168.1.20:8000" />
+                <Input
+                  name="agent_url"
+                  autoComplete="url"
+                  placeholder="例如：http://192.168.1.20:8000"
+                  onChange={() => {
+                    form.setFieldsValue({ sn: undefined, port: undefined, usb_binding: {}, host_name: '', host_address: '' })
+                  }}
+                />
               </Form.Item>
             ) : (
               <Form.Item name="agent_url" hidden>
@@ -1160,8 +1204,8 @@ const Burner: React.FC = () => {
                   className="device-form-grid__full"
                   label="SN 标识码"
                   name="sn"
-                  required
-                  rules={[{ required: true, message: '请输入 SN 标识码' }]}
+                  required={isEnabled}
+                  rules={[{ required: isEnabled, message: '请输入 SN 标识码' }]}
                   extra={<div className="device-field-extra">推荐 J-LINK、ST-LINK 等支持序列号的设备使用</div>}
                 >
                   <Input
@@ -1190,8 +1234,8 @@ const Burner: React.FC = () => {
                 className="device-form-grid__full"
                 label="物理端口"
                 name="port"
-                required
-                rules={[{ required: true, message: '请输入物理端口' }]}
+                required={isEnabled}
+                rules={[{ required: isEnabled, message: '请输入物理端口' }]}
                 extra={<div className="device-field-extra device-field-extra--warning">无 SN 设备专用。绑定后请勿更换 USB 插口，避免热插拔漂移导致错烧</div>}
               >
                 <Input
@@ -1362,14 +1406,14 @@ const Burner: React.FC = () => {
           </div>
         }
       >
-        {formBody('create', createForm, createStrategy, setCreateStrategy, createDeviceCategory, createDeviceModel, createHostType, createLockedHostType, handleCreate)}
+        {formBody('create', createForm, createStrategy, setCreateStrategy, createDeviceCategory, createDeviceModel, createHostType, createLockedHostType, createIsEnabled, handleCreate)}
       </Modal>
 
       <Modal title="编辑设备" open={isEditModalOpen} onOk={() => editForm.submit()} confirmLoading={updating}
         className="pcids-modal pcids-modal--form device-form-modal"
         okText="保存" cancelText="取消"
         onCancel={closeEditModal} cancelButtonProps={{ disabled: updating }}>
-        {formBody('edit', editForm, editStrategy, setEditStrategy, editDeviceCategory, editDeviceModel, editHostType, editLockedHostType, handleUpdate)}
+        {formBody('edit', editForm, editStrategy, setEditStrategy, editDeviceCategory, editDeviceModel, editHostType, editLockedHostType, editIsEnabled, handleUpdate)}
       </Modal>
 
       <Modal

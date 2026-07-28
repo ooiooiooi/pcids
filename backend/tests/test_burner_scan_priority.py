@@ -88,6 +88,122 @@ class BurnerScanPriorityTests(unittest.TestCase):
 
         self.assertEqual(classified[0]["type"], "ST-LINK")
 
+    def test_cmsis_dap_is_not_misclassified_as_sd_reader(self):
+        classified = _classify_probe_items(
+            {
+                "_name": "CMSIS-DAP V2",
+                "product_name": "CMSIS-DAP V2",
+                "manufacturer": "WinUSB Device",
+            }
+        )
+
+        self.assertEqual(classified, [])
+
+    def test_pyocd_identity_classifies_generic_cmsis_dap_as_gdlink(self):
+        parent_id = r"USB\VID_28E9&PID_0698\3835388D0655"
+        container_id = "{BD11BA2D-789B-5B07-80E9-7BA3E8F3FF87}"
+        usb_devices = [
+            {
+                "_name": "CMSIS-DAP V2",
+                "product_name": "CMSIS-DAP V2",
+                "manufacturer": "WinUSB Device",
+                "serial_num": "8&3645FEEE&0&0000",
+                "location_id": "Port_#0001.Hub_#0007",
+                "pnp_device_id": r"USB\VID_28E9&PID_0698&MI_00\8&3645FEEE&0&0000",
+                "parent_id": parent_id,
+                "container_id": container_id,
+                "vendor_id": "28E9",
+                "product_id": "0698",
+                "source": "windows_pnp",
+            },
+            {
+                "_name": "USB Composite Device",
+                "serial_num": "3835388D0655",
+                "location_id": "Port_#0001.Hub_#0007",
+                "pnp_device_id": parent_id,
+                "container_id": container_id,
+                "vendor_id": "28E9",
+                "product_id": "0698",
+                "source": "windows_pnp",
+            },
+        ]
+        pyocd_probes = [
+            {
+                "unique_id": "3835388D0655\x00\x00",
+                "description": "GigaDevice GDLinker_V3",
+                "vendor_name": "GigaDevice",
+                "product_name": "GDLinker_V3",
+            }
+        ]
+
+        candidates = _build_discovery_candidates(
+            usb_devices[0],
+            agent_url=None,
+            host_address="192.168.137.2",
+            usb_devices=usb_devices,
+            pyocd_probes=pyocd_probes,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["type"], "GDLINK")
+        self.assertEqual(candidates[0]["device_category"], "burner")
+        self.assertEqual(candidates[0]["sn"], "3835388D0655")
+
+    @patch(
+        "backend.routers.burners._probe_stlink_serials",
+        return_value=["51FF6F067182525607321487"],
+    )
+    def test_stlink_scan_uses_unique_official_cli_serial_for_location_only_pnp(self, _serials_mock):
+        device = {
+            "_name": "STM32 STLink",
+            "product_name": "STM32 STLink",
+            "manufacturer": "STMicroelectronics",
+            "serial_num": "9&8BD070F&0&3",
+            "location_id": "Port_#0003.Hub_#0007",
+            "location_info": "Port_#0003.Hub_#0007",
+            "pnp_device_id": r"USB\VID_0483&PID_3748\9&8BD070F&0&3",
+            "vendor_id": "0483",
+            "product_id": "3748",
+            "source": "windows_pnp",
+        }
+
+        result = _match_usb_device(
+            "ST-LINK",
+            None,
+            usb_devices=[device],
+            expected_sn="51FF6F067182525607321487",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["sn"], "51FF6F067182525607321487")
+        self.assertEqual(result["port"], "Port_#0003.Hub_#0007")
+
+    @patch(
+        "backend.routers.burners._probe_stlink_serials",
+        return_value=["51FF6F067182525607321487"],
+    )
+    def test_stlink_scan_does_not_assign_one_cli_serial_to_multiple_pnp_devices(self, _serials_mock):
+        devices = [
+            {
+                "_name": "STM32 STLink",
+                "serial_num": f"9&8BD070F&0&{index}",
+                "location_id": f"Port_#000{index}.Hub_#0007",
+                "vendor_id": "0483",
+                "product_id": "3748",
+                "source": "windows_pnp",
+            }
+            for index in (3, 4)
+        ]
+
+        result = _match_usb_device(
+            "ST-LINK",
+            None,
+            usb_devices=devices,
+            expected_sn="51FF6F067182525607321487",
+        )
+
+        self.assertIsNone(result)
+
     def test_unrecognized_usb_with_port_creates_probe_only_candidate(self):
         candidates = _build_discovery_candidates(
             self.ftdi_al321,
@@ -134,8 +250,8 @@ class BurnerScanPriorityTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["sn"], "210512180081")
 
-    def test_strategy_two_expected_port_can_match_unrecognized_usb(self):
-        self.assertIsNotNone(
+    def test_strategy_two_expected_port_cannot_claim_unrecognized_usb(self):
+        self.assertIsNone(
             _match_usb_device(
                 "Gowin USB Cable",
                 None,
@@ -146,7 +262,7 @@ class BurnerScanPriorityTests(unittest.TestCase):
 
     def test_windows_device_manager_location_is_primary_physical_port(self):
         device = {
-            "_name": "USB Composite Device",
+            "_name": "Gowin USB Cable",
             "location_id": "Port_#0011.Hub_#0001",
             "device_manager_location": "Port_#0011.Hub_#0001",
             "location_info": "Port_#0011.Hub_#0001",

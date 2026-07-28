@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import socket
 import tempfile
@@ -12,9 +13,12 @@ from backend.routers.burners import (
     DEVICE_SCAN_PRIORITY,
     LOCATION_PROBE_CANDIDATE_TYPE,
     _build_discovery_payload,
+    _build_scan_result,
+    _candidate_matches_registered_identity,
     _compute_burner_cached_status,
     _discover_lan_agent_urls,
     _discover_scan_nodes,
+    _find_discovery_binding_candidate,
     _get_lan_agent_scan_networks,
     _normalize_agent_url,
     _probe_stlink_serials,
@@ -91,6 +95,7 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
 
         changed_ids = [item["burner_id"] for item in payload["changed_bindings"]]
         self.assertNotIn(burner.id, changed_ids)
+        self.assertEqual(payload["unregistered_devices"], [])
 
     def test_non_sn_strategy_still_reports_binding_change_when_port_changes(self):
         burner = self.burners[0]
@@ -98,6 +103,7 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
         burner.strategy = 2
         burner.sn = "42742761BAA116B9D7012DB4810082D1"
         burner.port = r"USB\VID_0D28&PID_0204\OLD-PORT"
+        burner.config_json = json.dumps({"supported_interfaces": ["SWD"]})
         candidate = self.candidates[0]
         candidate["type"] = "PWLINK2"
         candidate["sn"] = "42742761BAA116B9D7012DB4810082D1"
@@ -107,10 +113,11 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
 
         self.assertEqual(len(payload["changed_bindings"]), 1)
         self.assertEqual(payload["changed_bindings"][0]["burner_id"], burner.id)
+        self.assertEqual(payload["changed_bindings"][0]["burner_config_json"], burner.config_json)
         self.assertEqual(payload["changed_bindings"][0]["original_binding"]["port"], r"USB\VID_0D28&PID_0204\OLD-PORT")
         self.assertEqual(payload["changed_bindings"][0]["current_binding"]["port"], r"USB\VID_0D28&PID_0204\NEW-PORT")
 
-    def test_strategy_two_probe_only_same_port_same_node_is_online(self):
+    def test_strategy_two_probe_only_same_port_same_node_stays_offline(self):
         burner = self.burners[0]
         burner.type = "Gowin USB Cable"
         burner.strategy = 2
@@ -133,7 +140,187 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
 
         updates = _resolve_discovery_status_updates([burner], [candidate], "all", set())
 
+        self.assertEqual(updates, [{"id": burner.id, "status": 1}])
+
+    def test_unplugged_al321_does_not_inherit_ch340_on_shared_parent_hub(self):
+        burner = self.burners[0]
+        burner.type = "AL321"
+        burner.strategy = 2
+        burner.sn = "210512180081"
+        burner.port = "Port_#0001.Hub_#0005"
+        burner.host_address = "192.168.137.2"
+        burner.is_enabled = True
+        burner.config_json = json.dumps(
+            {
+                "usb_binding": {
+                    "location_info": "Port_#0001.Hub_#0005",
+                    "pnp_device_id": r"USB\VID_0403&PID_6014\210512180081",
+                    "parent_id": r"USB\VID_2DC0&PID_2041\6&21F9C627&0&4",
+                    "container_id": "{ACE66FC9-631E-11F1-AB90-806E6F6E6963}",
+                    "vendor_id": "0403",
+                    "product_id": "6014",
+                }
+            }
+        )
+        candidate = {
+            "candidate_id": "ch340-on-shared-parent",
+            "type": LOCATION_PROBE_CANDIDATE_TYPE,
+            "device_category": "probe_only",
+            "detected_name": "USB-SERIAL CH340 (COM18)",
+            "sn": None,
+            "port": "Port_#0004.Hub_#0005",
+            "alternative_ports": [r"USB\VID_2DC0&PID_2041\6&21F9C627&0&4"],
+            "usb_binding": {
+                "pnp_device_id": r"USB\VID_1A86&PID_7523\7&1ED2188&0&4",
+                "parent_id": r"USB\VID_2DC0&PID_2041\6&21F9C627&0&4",
+                "container_id": "{ACE66FC9-631E-11F1-AB90-806E6F6E6963}",
+                "vendor_id": "1A86",
+                "product_id": "7523",
+            },
+            "node_key": "192.168.137.2",
+            "node_type": "local",
+            "node_label": "local",
+            "host_address": "192.168.137.2",
+            "probe_only": True,
+        }
+        self.db.query.return_value.all.return_value = [burner]
+
+        with (
+            patch("backend.routers.burners._discover_scan_nodes", return_value=[{"node_type": "local"}]),
+            patch("backend.routers.burners._discover_local_candidates", return_value=[candidate]),
+        ):
+            payload = _build_discovery_payload(self.db, "local")
+
+        updates = _resolve_discovery_status_updates([burner], [candidate], "all", set())
+        self.assertEqual(payload["changed_bindings"], [])
+        self.assertEqual(updates, [{"id": burner.id, "status": 1}])
+
+    def test_physical_port_strategy_ignores_serial_metadata_at_same_port(self):
+        burner = self.burners[0]
+        burner.type = "J-LINK"
+        burner.strategy = 2
+        burner.sn = "000941000029"
+        burner.port = "Port_#0001.Hub_#0001"
+        burner.host_address = "192.168.137.2"
+        burner.is_enabled = True
+        candidate = {
+            "candidate_id": "different-jlink",
+            "type": "J-LINK",
+            "device_category": "burner",
+            "detected_name": "J-Link",
+            "sn": "000941000030",
+            "port": "Port_#0001.Hub_#0001",
+            "vendor_id": "1366",
+            "product_id": "0105",
+            "node_key": "192.168.137.2",
+            "node_type": "local",
+            "node_label": "local",
+            "probe_only": False,
+        }
+
+        updates = _resolve_discovery_status_updates([burner], [candidate], "all", set())
         self.assertEqual(updates, [{"id": burner.id, "status": 0}])
+
+    def test_serial_mismatch_is_rejected_before_node_resolution(self):
+        burner = self.burners[0]
+        candidate = {
+            "candidate_id": "wrong-serial",
+            "type": burner.type,
+            "sn": "DIFFERENT-SERIAL",
+            "port": burner.port,
+            "node_key": "slow-hostname.example.invalid",
+            "probe_only": False,
+        }
+
+        with patch(
+            "backend.routers.burners._is_same_burner_candidate_node",
+            side_effect=AssertionError("node resolution should not run for a serial mismatch"),
+        ):
+            self.assertFalse(
+                _candidate_matches_registered_identity(
+                    burner,
+                    candidate,
+                    require_same_node=True,
+                )
+            )
+            self.assertIsNone(_find_discovery_binding_candidate(burner, [candidate]))
+
+    def test_serialless_same_type_on_shared_hub_but_different_port_does_not_match(self):
+        shared_parent = r"USB\VID_0BDA&PID_5411\8&SHARED&0&4"
+        burner = self.burners[0]
+        burner.type = "XDS510plus"
+        burner.strategy = 2
+        burner.sn = ""
+        burner.port = "Port_#0002.Hub_#0002"
+        burner.host_address = "192.168.137.2"
+        burner.is_enabled = True
+        burner.config_json = json.dumps(
+            {
+                "usb_binding": {
+                    "location_info": "Port_#0002.Hub_#0002",
+                    "pnp_device_id": r"USB\VID_0547&PID_1020\OLD",
+                    "parent_id": shared_parent,
+                }
+            }
+        )
+        candidate = {
+            "candidate_id": "other-xds-on-shared-hub",
+            "type": "XDS510plus",
+            "device_category": "burner",
+            "detected_name": "SEED USB2.0 PLUS Emulator",
+            "sn": None,
+            "port": "Port_#0003.Hub_#0002",
+            "alternative_ports": [shared_parent],
+            "usb_binding": {
+                "location_info": "Port_#0003.Hub_#0002",
+                "pnp_device_id": r"USB\VID_0547&PID_1020\NEW",
+                "parent_id": shared_parent,
+            },
+            "node_key": "192.168.137.2",
+            "node_type": "local",
+            "node_label": "local",
+            "probe_only": False,
+        }
+
+        updates = _resolve_discovery_status_updates([burner], [candidate], "all", set())
+        self.assertEqual(updates, [{"id": burner.id, "status": 1}])
+
+    def test_same_short_port_on_another_node_remains_unregistered_and_selectable(self):
+        burner = self.burners[0]
+        burner.type = "XDS510plus"
+        burner.strategy = 2
+        burner.sn = ""
+        burner.port = "Port_#0002.Hub_#0002"
+        burner.host_address = "10.0.0.8"
+        burner.agent_url = "http://10.0.0.8:8000"
+        burner.config_json = "{}"
+        candidate = {
+            "candidate_id": "same-port-other-node",
+            "type": "XDS510plus",
+            "device_category": "burner",
+            "detected_name": "SEED USB2.0 PLUS Emulator",
+            "sn": None,
+            "port": "Port_#0002.Hub_#0002",
+            "node_key": "http://10.0.0.9:8000",
+            "node_type": "agent",
+            "node_label": "10.0.0.9",
+            "agent_url": "http://10.0.0.9:8000",
+            "host_address": "10.0.0.9",
+            "probe_only": False,
+        }
+        self.db.query.return_value.all.return_value = [burner]
+
+        with (
+            patch(
+                "backend.routers.burners._discover_scan_nodes",
+                return_value=[{"node_type": "agent", "agent_url": "http://10.0.0.9:8000"}],
+            ),
+            patch("backend.routers.burners._scan_discovery_node", return_value=[candidate]),
+        ):
+            payload = _build_discovery_payload(self.db, "all")
+
+        self.assertEqual(payload["unregistered_devices"], [candidate])
+        self.assertEqual(payload["selectable_devices"], [candidate])
 
     def test_probe_only_candidate_is_not_selectable_or_unregistered(self):
         burner = self.burners[0]
@@ -440,6 +627,75 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_cached_status_does_not_keep_stale_busy_or_disabled_values(self):
+        burner = self.burners[0]
+        burner.is_enabled = True
+
+        burner.status = 2
+        self.assertEqual(_compute_burner_cached_status(burner, set()), 0)
+
+        burner.status = 3
+        self.assertEqual(_compute_burner_cached_status(burner, set()), 1)
+
+        burner.is_enabled = None
+        self.assertEqual(_compute_burner_cached_status(burner, set()), 1)
+
+    def test_local_scan_keeps_remote_state_without_preserving_stale_busy_status(self):
+        burner = self.burners[0]
+        burner.agent_url = "http://192.168.0.107:8000"
+        burner.host_address = "192.168.0.107"
+        burner.status = 2
+        burner.is_enabled = True
+
+        updates = _resolve_discovery_status_updates([burner], [], "local", set())
+
+        self.assertEqual(updates, [{"id": burner.id, "status": 0}])
+
+    def test_physical_port_strategy_never_falls_back_to_location(self):
+        burner = self.burners[0]
+        burner.strategy = 2
+        burner.sn = ""
+        burner.port = ""
+        burner.location = "OLD-LOCATION"
+        burner.config_json = "{}"
+
+        with patch("backend.routers.burners._match_usb_device") as match_mock:
+            result = _build_scan_result(
+                burner.type,
+                burner.location,
+                burner.strategy,
+                burner,
+                allow_fallback=False,
+                usb_devices=[],
+            )
+
+        self.assertIsNone(result)
+        match_mock.assert_not_called()
+
+    def test_serial_strategy_follows_same_probe_after_usb_port_change(self):
+        burner = self.burners[0]
+        burner.strategy = 1
+        burner.sn = "000941000029"
+        burner.port = "OLD-PORT"
+        burner.location = "OLD-PORT"
+        burner.config_json = "{}"
+
+        with patch(
+            "backend.routers.burners._match_usb_device",
+            return_value={"sn": "941000029", "port": "NEW-PORT", "source": "usb_probe", "name": "J-LINK"},
+        ) as match_mock:
+            result = _build_scan_result(
+                burner.type,
+                burner.location,
+                burner.strategy,
+                burner,
+                allow_fallback=False,
+                usb_devices=[],
+            )
+
+        self.assertTrue(result["online"])
+        self.assertIsNone(match_mock.call_args.args[1])
+
     def test_ambiguous_ftdi_is_resolved_by_unique_registered_serial(self):
         al321 = self.burners[-1]
         al321.id = 100
@@ -511,6 +767,38 @@ class BurnerDiscoveryAsyncOffloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed_node_keys, set())
         self.assertEqual(len(scan_thread_ids), 1)
         self.assertNotEqual(scan_thread_ids[0], threading.get_ident())
+
+    async def test_all_nodes_begin_scanning_concurrently_and_keep_input_order(self):
+        both_started = threading.Event()
+        start_lock = threading.Lock()
+        started: list[str] = []
+
+        def coordinated_scan(node):
+            with start_lock:
+                started.append(node["node_key"])
+                if len(started) == 2:
+                    both_started.set()
+            if not both_started.wait(timeout=1):
+                raise AssertionError("node scans were executed serially")
+            return [{"candidate_id": node["node_key"]}]
+
+        nodes = [
+            {"node_key": "node-a", "node_type": "local", "agent_url": None},
+            {"node_key": "node-b", "node_type": "agent", "agent_url": "http://node-b:8000"},
+        ]
+        with patch("backend.routers.burners._scan_discovery_node", side_effect=coordinated_scan):
+            candidates, failed_node_keys = await _scan_discovery_nodes_async(
+                nodes,
+                "all",
+                None,
+                "test-concurrent",
+            )
+
+        self.assertEqual(
+            candidates,
+            [[{"candidate_id": "node-a"}], [{"candidate_id": "node-b"}]],
+        )
+        self.assertEqual(failed_node_keys, set())
 
 
 if __name__ == "__main__":

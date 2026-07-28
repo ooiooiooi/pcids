@@ -1,6 +1,6 @@
 import { Table, Button, Space, Modal, App as AntdApp, Tag, Select, Input, InputNumber, Row, Col, Typography, Checkbox, Drawer, Badge, Tabs, Tooltip } from 'antd'
 import { PlusOutlined, SearchOutlined, DesktopOutlined, AppstoreOutlined, MinusOutlined, SyncOutlined, LinkOutlined, QuestionCircleOutlined, CopyOutlined } from '@ant-design/icons'
-import { Fragment, useState, useEffect, useMemo } from 'react'
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { taskApi, productApi, burnerApi, scriptApi, repositoryApi } from '../../services/api'
 import { Permission } from '../../hooks'
@@ -547,6 +547,8 @@ const Burning: React.FC = () => {
   const [burnerStatusMap, setBurnerStatusMap] = useState<Record<number, number | undefined>>({})
   const [burnerScanLoading, setBurnerScanLoading] = useState(false)
   const [burnerScanError, setBurnerScanError] = useState('')
+  const burnerScanInFlightRef = useRef(false)
+  const pendingBurnerScanRef = useRef<any[] | null>(null)
   const [filterBoards, setFilterBoards] = useState<any[]>([])
   const [artifactKeyword, setArtifactKeyword] = useState('')
   const [artifactLocationFilter, setArtifactLocationFilter] = useState('全部')
@@ -774,23 +776,30 @@ const Burning: React.FC = () => {
     }
   }
 
-  const scanBurnerOnlineStatus = async (burnerList = burners) => {
+  const scanBurnerOnlineStatus = async (burnerList = burners): Promise<void> => {
     if (!burnerList.length) {
       setBurnerOnlineMap({})
       setBurnerStatusMap({})
       setBurnerScanError('')
       return
     }
+    const targetIds = burnerList
+      .map((item: any) => Number(item?.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+      .sort((left, right) => left - right)
+    const scanKey = targetIds.join(',')
+    if (burnerScanInFlightRef.current) {
+      pendingBurnerScanRef.current = burnerList
+      return
+    }
+    burnerScanInFlightRef.current = true
     setBurnerScanLoading(true)
     setBurnerScanError('')
     try {
-      const targetIds = burnerList
-        .map((item: any) => Number(item?.id))
-        .filter((id) => Number.isFinite(id) && id > 0)
       const res: any = await burnerApi.getList({
         page: 1,
         page_size: Math.max(targetIds.length, 1),
-        ids: targetIds.join(','),
+        ids: scanKey,
         include_runtime_status: true,
       })
       const runtimeBurners = Array.isArray(res?.data) ? res.data : []
@@ -801,11 +810,24 @@ const Burning: React.FC = () => {
           return runtime ? { ...item, ...runtime } : item
         }),
       )
-      applyBurnerRuntimeState(runtimeBurners.length ? runtimeBurners : burnerList)
+      applyBurnerRuntimeState(runtimeBurners)
     } catch {
       setBurnerScanError('设备状态检测失败，请稍后重试')
     } finally {
+      burnerScanInFlightRef.current = false
       setBurnerScanLoading(false)
+      const pendingBurners = pendingBurnerScanRef.current
+      pendingBurnerScanRef.current = null
+      if (pendingBurners) {
+        const pendingKey = pendingBurners
+          .map((item: any) => Number(item?.id))
+          .filter((id) => Number.isFinite(id) && id > 0)
+          .sort((left, right) => left - right)
+          .join(',')
+        if (pendingKey && pendingKey !== scanKey) {
+          void scanBurnerOnlineStatus(pendingBurners)
+        }
+      }
     }
   }
 
@@ -1022,8 +1044,23 @@ const Burning: React.FC = () => {
         setHybridConnectionPassed(false)
         message.error(res?.data?.message || '连接测试失败')
       }
-    } catch {
-      /* interceptor handles it */
+    } catch (error: any) {
+      setHybridConnectionPassed(false)
+      const targetIp = String(wizardData.boardTargetAddress || '').trim() || '-'
+      const targetPort = Number(wizardData.serverPort || 69)
+      const responseDetail = String(
+        error?.response?.data?.detail
+        || error?.response?.data?.message
+        || '',
+      ).trim()
+      const isTimeout = String(error?.code || '').toUpperCase() === 'ECONNABORTED'
+        || /timeout/i.test(String(error?.message || ''))
+      message.error(
+        responseDetail
+        || (isTimeout
+          ? `连接测试超时：${targetIp}:${targetPort}。请检查目标地址、端口和网络连接。`
+          : `连接测试请求失败：${targetIp}:${targetPort}。请稍后重试并检查目标机服务。`),
+      )
     } finally {
       setHybridConnectionTesting(false)
     }
@@ -1053,8 +1090,23 @@ const Burning: React.FC = () => {
       setOsConnectionResult(result)
       if (result?.success) message.success('连接测试通过')
       else message.error(result?.message || '连接测试失败')
-    } catch {
-      setOsConnectionResult(null)
+    } catch (error: any) {
+      const targetIp = String(wizardData.targetIp || '').trim() || '-'
+      const targetPort = Number(wizardData.targetPort || 22)
+      const responseDetail = String(
+        error?.response?.data?.detail
+        || error?.response?.data?.message
+        || '',
+      ).trim()
+      const isTimeout = String(error?.code || '').toUpperCase() === 'ECONNABORTED'
+        || /timeout/i.test(String(error?.message || ''))
+      const failureMessage = responseDetail
+        || (isTimeout
+          ? `SSH 连接测试超时：${targetIp}:${targetPort}。请检查目标 IP、SSH 端口和网络路由。`
+          : `连接测试请求失败：${targetIp}:${targetPort}。目标机上的 PCIDS 服务未返回测试结果，请重试并检查后端日志。`)
+      const failureResult = { success: false, message: failureMessage }
+      setOsConnectionResult(failureResult)
+      message.error(failureMessage)
     } finally {
       setOsConnectionTesting(false)
     }
@@ -1508,6 +1560,10 @@ const Burning: React.FC = () => {
       message.warning('所选设备不存在，请重新选择')
       return false
     }
+    if (burnerScanLoading) {
+      message.warning('设备状态仍在检测中，请等待刷新完成后再提交')
+      return false
+    }
     if (selectedBurner.is_enabled === false || selectedBurner.is_enabled === 0) {
       message.warning('所选设备已被禁用，请更换其他设备')
       return false
@@ -1516,8 +1572,8 @@ const Burning: React.FC = () => {
       message.warning('所选设备正在执行其他烧录任务，请等待任务结束或更换设备')
       return false
     }
-    if (burnerOnlineMap[wizardData.burnerId] === false) {
-      message.warning('所选设备当前离线，请更换在线设备')
+    if (burnerOnlineMap[wizardData.burnerId] !== true) {
+      message.warning(burnerScanError || '尚未确认所选设备在线，请先刷新设备状态')
       return false
     }
     if (!wizardData.scriptId || !selectedScript) {
@@ -1989,7 +2045,7 @@ const Burning: React.FC = () => {
     return {
       label: burner.name,
       value: burner.id,
-      disabled: !isEnabled || isBusy || online === false,
+      disabled: !isEnabled || isBusy || online !== true,
       recommended: recommendedBurnerRank.has(burner.id),
       dropdownMeta: [burner.type || '未知型号', nodeDisplayLabel || '本地'].filter(Boolean).join(' · '),
       statusTag,
@@ -2252,7 +2308,9 @@ const Burning: React.FC = () => {
     }
   }, [wizardData.scriptId, scriptDetailsMap])
 
-  const recommendedBurnerIds = recommendedBurners.map((item) => item.id)
+  const recommendedBurnerIds = recommendedBurners
+    .map((item) => Number(item.id))
+    .sort((left, right) => left - right)
   const visibleBoardScriptIds = visibleBoardScripts.map((item) => item.id).join(',')
   const recommendedBurnerIdsKey = recommendedBurnerIds.join(',')
   const recommendedBurnerStateKey = recommendedBurners.map((item) => `${item.id}:${String(burnerOnlineMap[item.id])}:${String(burnerStatusMap[item.id] ?? item.status)}`).join(',')
@@ -2263,7 +2321,7 @@ const Burning: React.FC = () => {
     const isBurnerAvailable = (item: any) =>
       item.is_enabled !== false &&
       item.is_enabled !== 0 &&
-      burnerOnlineMap[item.id] !== false &&
+      burnerOnlineMap[item.id] === true &&
       burnerStatusMap[item.id] !== 2 &&
       Number(item.status) !== 2
     const preferredBurner =
