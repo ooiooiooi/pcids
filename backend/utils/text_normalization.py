@@ -26,6 +26,8 @@ MOJIBAKE_HINTS = (
     "銆",
 )
 
+LATIN_MOJIBAKE_HINTS = ("Ã", "Â", "â", "ä", "å", "æ", "ç", "è", "ï")
+
 
 KNOWN_TEXT_REPAIRS: dict[str, str] = {
     "澶嶄綅杩愯": "复位运行",
@@ -90,7 +92,9 @@ def _has_mojibake_hint(text: str) -> bool:
     if any(bad in text for bad in KNOWN_TEXT_REPAIRS):
         return True
     hint_count = sum(text.count(hint) for hint in MOJIBAKE_HINTS)
-    return hint_count >= 1
+    latin_hint_count = sum(text.count(hint) for hint in LATIN_MOJIBAKE_HINTS)
+    has_c1_control = any("\u0080" <= char <= "\u009f" for char in text)
+    return hint_count >= 1 or latin_hint_count >= 2 or has_c1_control
 
 
 def _quality_score(text: str) -> int:
@@ -149,6 +153,18 @@ def normalize_text(value: Any) -> Any:
     text = value.strip("\ufeff")
     if not text or not _has_mojibake_hint(text):
         return text
+
+    latin_hint_count = sum(text.count(hint) for hint in LATIN_MOJIBAKE_HINTS)
+    has_c1_control = any("\u0080" <= char <= "\u009f" for char in text)
+    if latin_hint_count >= 2 or has_c1_control:
+        # A strict latin-1/cp1252 -> UTF-8 round trip is much stronger evidence
+        # than the generic Chinese quality heuristic.  Prefer it before trying
+        # GBK-based repairs, otherwise a longer but incorrect Chinese candidate
+        # can win on character count alone.
+        for codec in ("latin1", "cp1252"):
+            repaired = _decode_candidate(text, codec, "utf-8")
+            if repaired and repaired != text and _has_chinese(repaired) and "�" not in repaired:
+                return _dictionary_repair(repaired)
 
     candidates = _encoding_repair_candidates(text)
     candidates.extend(_dictionary_repair(candidate) for candidate in list(candidates))

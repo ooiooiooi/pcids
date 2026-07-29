@@ -71,6 +71,7 @@ from backend.routers.repositories import (
     _get_repository_server_storage_root,
     _get_repository_server_transport_config,
     _guess_download_filename,
+    _is_codearts_web_private_config,
     _normalize_repository_file_url,
     _remove_repository_file_by_path,
     _remove_repository_server_artifact,
@@ -1453,6 +1454,7 @@ def _build_task_codearts_download_auth(db: Session, repo: Repository, current_us
 
 
 def _download_repository_artifact_to_local_storage(db: Session, repo: Repository, current_user: User) -> Repository:
+    trace_id = f"task-artifact-local-{uuid.uuid4().hex[:12]}"
     repo_detail = repository_to_dict(repo)
     file_detail = repo_detail.get("file_detail") if isinstance(repo_detail.get("file_detail"), dict) else {}
     download_uri = str(
@@ -1467,11 +1469,31 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
 
     download_root = _get_repository_download_root()
     file_path = build_encrypted_artifact_path(download_root, _guess_download_filename(download_uri, getattr(repo, "name", None)))
+    source_mode = "web_session" if str(repo_detail.get("private_source") or "").lower() == "web" else "codearts_api"
+    logger.info(
+        "task.artifact.download_local.begin | %s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "repo_id": getattr(repo, "id", None),
+                "project_key": getattr(repo, "project_key", None),
+                "source_mode": source_mode,
+                "artifact_name": getattr(repo, "name", None),
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     try:
         if str(repo_detail.get("private_source") or "").lower() == "web":
             web_cfg = _get_project_codearts_config(db, str(getattr(repo, "project_key", "") or ""), current_user)
-            stored_artifact, _ = _encrypt_codearts_web_download(cfg=web_cfg, download_uri=download_uri, destination_path=file_path, original_name=getattr(repo, "name", None) or "artifact.bin")
+            stored_artifact, _ = _encrypt_codearts_web_download(
+                cfg=web_cfg,
+                download_uri=download_uri,
+                destination_path=file_path,
+                original_name=getattr(repo, "name", None) or "artifact.bin",
+                trace_id=trace_id,
+            )
         else:
             download_auth = _build_task_codearts_download_auth(db, repo, current_user)
             stored_artifact = _encrypt_remote_artifact_to_storage(download_uri=download_uri, destination_path=file_path, original_name=getattr(repo, "name", None), token=download_auth["token"], username=download_auth["username"], password=download_auth["password"], timeout_seconds=300)
@@ -1481,6 +1503,10 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
                 os.remove(file_path)
             except Exception:
                 pass
+        logger.exception(
+            "task.artifact.download_local.encryption_failed | %s",
+            json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "source_mode": source_mode, "error": str(exc)}, ensure_ascii=False),
+        )
         raise HTTPException(status_code=500, detail=f"执行前加密制品失败：{str(exc)}") from exc
     except HTTPException:
         raise
@@ -1490,6 +1516,10 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
                 os.remove(file_path)
             except Exception:
                 pass
+        logger.exception(
+            "task.artifact.download_local.source_failed | %s",
+            json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "source_mode": source_mode, "error": str(exc)}, ensure_ascii=False),
+        )
         raise HTTPException(status_code=502, detail=f"执行前下载制品失败：{str(exc)}") from exc
 
     md5v, sha256v = stored_artifact.md5, stored_artifact.sha256
@@ -1511,10 +1541,27 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
     db.add(repo)
     db.commit()
     db.refresh(repo)
+    logger.info(
+        "task.artifact.download_local.success | %s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "repo_id": getattr(repo, "id", None),
+                "project_key": getattr(repo, "project_key", None),
+                "source_mode": source_mode,
+                "plaintext_size": stored_artifact.plaintext_size,
+                "md5": md5v,
+                "sha256": sha256v,
+                "local_path": _normalize_repository_file_url(file_path),
+            },
+            ensure_ascii=False,
+        ),
+    )
     return repo
 
 
 def _download_repository_artifact_to_server_storage(db: Session, repo: Repository, current_user: User) -> Repository:
+    trace_id = f"task-artifact-server-{uuid.uuid4().hex[:12]}"
     repo_detail = repository_to_dict(repo)
     file_detail = repo_detail.get("file_detail") if isinstance(repo_detail.get("file_detail"), dict) else {}
     download_uri = str(
@@ -1527,27 +1574,61 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
     if not download_uri:
         raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
 
-    download_auth = _build_task_codearts_download_auth(db, repo, current_user)
     download_root = _get_repository_download_root()
     filename = _guess_download_filename(download_uri, getattr(repo, "name", None))
     file_path = build_encrypted_artifact_path(download_root, filename)
+    source_mode = "web_session" if str(repo_detail.get("private_source") or "").lower() == "web" else "codearts_api"
+    logger.info(
+        "task.artifact.download_server.begin | %s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "repo_id": getattr(repo, "id", None),
+                "project_key": getattr(repo, "project_key", None),
+                "source_mode": source_mode,
+                "artifact_name": filename,
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     try:
-        stored_artifact = _encrypt_remote_artifact_to_storage(
-            download_uri=download_uri,
-            destination_path=file_path,
-            original_name=getattr(repo, "name", None),
-            token=download_auth["token"],
-            username=download_auth["username"],
-            password=download_auth["password"],
-            timeout_seconds=300,
-        )
+        if source_mode == "web_session":
+            web_cfg = _get_project_codearts_config(
+                db,
+                str(getattr(repo, "project_key", "") or ""),
+                current_user,
+            )
+            if not _is_codearts_web_private_config(web_cfg):
+                raise HTTPException(status_code=409, detail="当前项目的 Web 页面库配置与制品来源不一致，请重新同步项目")
+            stored_artifact, _ = _encrypt_codearts_web_download(
+                cfg=web_cfg,
+                download_uri=download_uri,
+                destination_path=file_path,
+                original_name=getattr(repo, "name", None) or filename,
+                trace_id=trace_id,
+            )
+        else:
+            download_auth = _build_task_codearts_download_auth(db, repo, current_user)
+            stored_artifact = _encrypt_remote_artifact_to_storage(
+                download_uri=download_uri,
+                destination_path=file_path,
+                original_name=getattr(repo, "name", None),
+                token=download_auth["token"],
+                username=download_auth["username"],
+                password=download_auth["password"],
+                timeout_seconds=300,
+            )
     except (ArtifactEncryptionError, ArtifactKeyValidationError, ArtifactPermissionDeniedError) as exc:
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except Exception:
                 pass
+        logger.exception(
+            "task.artifact.download_server.encryption_failed | %s",
+            json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "source_mode": source_mode, "error": str(exc)}, ensure_ascii=False),
+        )
         raise HTTPException(status_code=500, detail=f"执行前加密制品失败：{str(exc)}") from exc
     except HTTPException:
         raise
@@ -1557,6 +1638,10 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
                 os.remove(file_path)
             except Exception:
                 pass
+        logger.exception(
+            "task.artifact.download_server.source_failed | %s",
+            json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "source_mode": source_mode, "error": str(exc)}, ensure_ascii=False),
+        )
         raise HTTPException(status_code=502, detail=f"执行前下载制品失败：{str(exc)}") from exc
 
     md5v = stored_artifact.md5
@@ -1571,10 +1656,17 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
     server_saved_path = None
 
     if server_config["transport"] == "ssh":
+        logger.info(
+            "task.artifact.server_transfer.begin | %s",
+            json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "transport": "ssh", "target_server": target_server}, ensure_ascii=False),
+        )
         try:
             server_saved_path, target_server = _transfer_repository_artifact_via_ssh(file_path, filename, server_config)
         except Exception as exc:
-            logger.exception("task.execution.server_transfer_failed | %s", str(exc))
+            logger.exception(
+                "task.execution.server_transfer_failed | %s",
+                json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "target_server": target_server, "error": str(exc)}, ensure_ascii=False),
+            )
             raise HTTPException(status_code=502, detail=f"通过 SSH 传输到目标服务器失败：{str(exc)}") from exc
     elif server_ip and server_port:
         import urllib.request
@@ -1586,6 +1678,10 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
             server_storage_root,
         )
         target_url = f"http://{server_ip}:{server_port}{server_api_path}"
+        logger.info(
+            "task.artifact.server_transfer.begin | %s",
+            json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "transport": "http", "target_server": target_server}, ensure_ascii=False),
+        )
         try:
             boundary = f"----PCIDSBoundary{uuid.uuid4().hex}"
             body_prefix = (
@@ -1609,7 +1705,10 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
                 if getattr(resp, "status", 200) >= 400:
                     raise RuntimeError(f"HTTP {resp.status}")
         except Exception as exc:
-            logger.exception("task.execution.server_transfer_http_failed | %s", str(exc))
+            logger.exception(
+                "task.execution.server_transfer_http_failed | %s",
+                json.dumps({"trace_id": trace_id, "repo_id": getattr(repo, "id", None), "target_server": target_server, "error": str(exc)}, ensure_ascii=False),
+            )
             raise HTTPException(status_code=502, detail=f"内网传输到目标服务器失败：{str(exc)}") from exc
 
     local_saved_path = _normalize_repository_file_url(file_path)
@@ -1633,6 +1732,23 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
     db.add(repo)
     db.commit()
     db.refresh(repo)
+    logger.info(
+        "task.artifact.download_server.success | %s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "repo_id": getattr(repo, "id", None),
+                "project_key": getattr(repo, "project_key", None),
+                "source_mode": source_mode,
+                "plaintext_size": stored_artifact.plaintext_size,
+                "md5": md5v,
+                "sha256": sha256v,
+                "server_target": target_server,
+                "server_path": server_saved_path or local_saved_path,
+            },
+            ensure_ascii=False,
+        ),
+    )
     return repo
 
 
@@ -1697,6 +1813,25 @@ def _ensure_repository_file_available_for_execution(
     )
     created_local_copy = False
     created_server_copy = False
+    execution_trace_id = f"task-artifact-prepare-{uuid.uuid4().hex[:12]}"
+    logger.info(
+        "task.artifact.prepare.begin | %s",
+        json.dumps(
+            {
+                "trace_id": execution_trace_id,
+                "repo_id": getattr(repo, "id", None),
+                "project_key": getattr(repo, "project_key", None),
+                "install_source": install_source,
+                "storage_mode": storage_mode,
+                "keep_local": retain_downloaded_artifact,
+                "local_exists": bool(location_state.get("local_exists")),
+                "server_exists": bool(location_state.get("server_exists")),
+                "burner_id": getattr(burner, "id", None) if burner else None,
+                "burner_host_type": getattr(burner, "host_type", None) if burner else None,
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     if install_source == "codearts" and retain_downloaded_artifact and storage_mode == "server" and not location_state["server_exists"]:
         repo = _download_repository_artifact_to_server_storage(db, repo, current_user)
@@ -1728,6 +1863,19 @@ def _ensure_repository_file_available_for_execution(
         ),
         "storage_location": location_state.get("storage_location"),
     }
+    logger.info(
+        "task.artifact.prepare.ready | %s",
+        json.dumps(
+            {
+                "trace_id": execution_trace_id,
+                "repo_id": getattr(repo, "id", None),
+                "created_local_copy": created_local_copy,
+                "created_server_copy": created_server_copy,
+                **cleanup_plan,
+            },
+            ensure_ascii=False,
+        ),
+    )
     return repo, cleanup_plan
 
 
@@ -1948,7 +2096,7 @@ async def execute_task(
     """
     模拟执行烧录任务
     """
-    source_task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    source_task = _get_scoped_task_or_404(db, current_user, task_id)
     if not source_task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -1960,7 +2108,8 @@ async def execute_task(
     selected_burner = db.query(Burner).filter(Burner.id == source_task.burner_id).first() if getattr(source_task, "burner_id", None) else None
     if repo and str(getattr(repo, "project_key", "") or "").strip():
         _require_project_permission(db, str(repo.project_key), current_user, "mark_flash_file")
-    repo, artifact_cleanup_plan = _ensure_repository_file_available_for_execution(
+    repo, artifact_cleanup_plan = await asyncio.to_thread(
+        _ensure_repository_file_available_for_execution,
         db,
         repo,
         current_user,
@@ -6187,7 +6336,8 @@ async def simulate_burning_process(
         used_file_path = None
         if repo:
             try:
-                repo, encrypted_artifact_path = _ensure_repository_local_file_available_for_runtime(
+                repo, encrypted_artifact_path = await asyncio.to_thread(
+                    _ensure_repository_local_file_available_for_runtime,
                     db,
                     repo,
                     operator_user,
@@ -7563,6 +7713,17 @@ def _apply_task_scope(query, db: Session, current_user: User):
     return query
 
 
+def _get_scoped_task_or_404(db: Session, current_user: User, task_id: int) -> BurningTask:
+    task = (
+        _apply_task_scope(db.query(BurningTask), db, current_user)
+        .filter(BurningTask.id == task_id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
+
+
 @router.get("", response_model=PaginatedResponse)
 async def get_tasks(
     page: int = Query(1, ge=1),
@@ -7626,10 +7787,10 @@ async def download_consistency_report_html(
     task_id: int,
     print: int = 0,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:report")),
 ):
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
@@ -7647,10 +7808,10 @@ async def download_consistency_report_html(
 async def download_consistency_report_csv(
     task_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:report")),
 ):
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
@@ -7752,7 +7913,8 @@ async def create_task(
             _require_project_permission(db, str(repo.project_key), current_user, "mark_flash_file")
         task_config = _parse_task_config(task)
         try:
-            repo, artifact_cleanup_plan = _ensure_repository_file_available_for_execution(
+            repo, artifact_cleanup_plan = await asyncio.to_thread(
+                _ensure_repository_file_available_for_execution,
                 db,
                 repo,
                 current_user,
@@ -7806,10 +7968,10 @@ async def create_task(
 async def override_task(
     task_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:override")),
 ):
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     task.override_confirmed = 1
@@ -7826,7 +7988,7 @@ async def terminate_task(
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:terminate")),
 ):
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     if int(task.status or 0) in {int(TaskStatus.TERMINATING), int(TaskStatus.TERMINATED)}:
@@ -7904,11 +8066,11 @@ async def terminate_task(
 async def get_task(
     task_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:view")),
 ):
     """获取任务详情"""
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -7923,10 +8085,10 @@ async def get_task(
 async def get_task_status(
     task_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:view")),
 ):
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return {
@@ -7954,10 +8116,12 @@ async def get_task_status(
 async def stream_task_events(
     task_id: int,
     request: Request,
-    _current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:view")),
 ):
     from backend.utils.db import SessionLocal
+    _get_scoped_task_or_404(db, current_user, task_id)
 
     async def event_stream():
         last_payload = None
@@ -8004,11 +8168,11 @@ async def update_task(
     task_id: int,
     task_data: TaskUpdate,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:add")),
 ):
     """更新任务"""
-    task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+    task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -8034,7 +8198,7 @@ async def update_task(
 async def delete_task(
     task_id: int,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:delete")),
 ):
     """删除任务"""
@@ -8042,7 +8206,7 @@ async def delete_task(
     # source task may be deleted. Keep the source independently deletable,
     # but turn transient SQLite writer contention into a business response.
     for attempt in range(3):
-        task = db.query(BurningTask).filter(BurningTask.id == task_id).first()
+        task = _get_scoped_task_or_404(db, current_user, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
         if _is_task_active_status(task.status):

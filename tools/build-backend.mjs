@@ -6,7 +6,9 @@ import process from 'node:process'
 const projectRoot = process.cwd()
 const backendDir = path.join(projectRoot, 'backend')
 const buildRoot = path.join(backendDir, 'build', 'pyinstaller')
-const distRoot = path.join(backendDir, 'dist')
+const distRoot = process.env.PCIDS_BACKEND_DIST_DIR
+  ? path.resolve(projectRoot, process.env.PCIDS_BACKEND_DIST_DIR)
+  : path.join(backendDir, 'dist')
 const backendSourcePath = path.join(projectRoot, 'backend')
 const backendEntryPath = path.join(backendSourcePath, 'run_backend.py')
 const isWindows = process.platform === 'win32'
@@ -67,6 +69,9 @@ function main() {
   }
 
   const addDataSeparator = isWindows ? ';' : ':'
+  const backendDataDirs = process.env.PCIDS_WIN7_WEB_BUILD === '1'
+    ? ['config']
+    : ['assets', 'config', 'scripts']
   const pyinstallerArgs = [
     '-m',
     'PyInstaller',
@@ -89,10 +94,20 @@ function main() {
     'passlib.handlers',
     '--exclude-module',
     'backend.tests',
-    '--add-data',
-    `${backendSourcePath}${addDataSeparator}backend`,
+    ...backendDataDirs.flatMap((name) => [
+      '--add-data',
+      `${path.join(backendSourcePath, name)}${addDataSeparator}${path.join('backend', name)}`,
+    ]),
     backendEntryPath,
   ]
+  if (process.env.PCIDS_WIN7_WEB_BUILD === '1') {
+    pyinstallerArgs.splice(
+      pyinstallerArgs.length - 1,
+      0,
+      '--exclude-module',
+      'cryptography.hazmat.bindings._rust',
+    )
+  }
 
   console.log('>>> 打包 Python 后端...')
   if (!run(pythonBin, pyinstallerArgs)) {

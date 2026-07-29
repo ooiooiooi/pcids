@@ -49,6 +49,7 @@ type AnyNode = DataNode & Record<string, any>
 type InstallSource = 'local' | 'server' | 'codearts'
 type DownloadTarget = 'local' | 'server'
 type CodeartsRepositoryMode = 'release' | 'private' | 'web'
+type ProjectConfigIntent = 'create' | 'edit'
 
 function normalizeServerLocationValue(value?: string | null, serverPath?: string | null) {
   const text = String(value || '').trim()
@@ -289,13 +290,17 @@ const CODEARTS_FORM_DRAFT_KEY = 'pcids.repository.codeartsFormDraft'
 const CODEARTS_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsFormSecretDraft'
 const CODEARTS_PRIVATE_FORM_DRAFT_KEY = 'pcids.repository.codeartsPrivateFormDraft'
 const CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsPrivateFormSecretDraft'
-const CODEARTS_PRIVATE_TEST_DEFAULTS = {
-  domain_name: 'CWGY',
-  username: 'cwgy-57373',
-  password: String((import.meta as any).env?.VITE_CODEARTS_PRIVATE_TEST_PASSWORD || ''),
+const CODEARTS_WEB_FORM_DRAFT_KEY = 'pcids.repository.codeartsWebFormDraft.v3'
+const CODEARTS_WEB_FORM_SECRET_DRAFT_KEY = 'pcids.repository.codeartsWebFormSecretDraft.v3'
+const CODEARTS_WEB_DEFAULTS = {
+  domain_name: '',
+  username: '',
+  password: '',
   region: 'cn-cq-1',
-  project_id: 'cf8f1be184bd4eb484b79139484b673a',
-  repo_id_0: 'cn-cq-1_bf7bbb8002b04002bd78a65557e7b7e4_generic_0',
+  project_id: '',
+  project_name: '',
+  repo_id_0: '',
+  devops_url: 'https://devops.cn-cq-1.cqcloud.cwgy.com',
 }
 
 const Repository: React.FC = () => {
@@ -320,6 +325,7 @@ const Repository: React.FC = () => {
   const initialProjectContextRef = useRef(getRepositoryProjectContext())
 
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
+  const [projectConfigIntent, setProjectConfigIntent] = useState<ProjectConfigIntent>('create')
   const [configurationModeOverride, setConfigurationModeOverride] = useState<CodeartsRepositoryMode | null>(null)
   const [isMemberPermissionOpen, setIsMemberPermissionOpen] = useState(false)
   const [createProjectSubmitting, setCreateProjectSubmitting] = useState(false)
@@ -537,8 +543,12 @@ const Repository: React.FC = () => {
   }
 
   const loadCodeartsFormDraft = () => {
-    const draftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
-    const secretDraftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
+    const draftKey = configurationMode === 'web'
+      ? CODEARTS_WEB_FORM_DRAFT_KEY
+      : configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
+    const secretDraftKey = configurationMode === 'web'
+      ? CODEARTS_WEB_FORM_SECRET_DRAFT_KEY
+      : configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
     let draft: Record<string, any> = {}
     let secretDraft: Record<string, any> = {}
     try {
@@ -555,13 +565,18 @@ const Repository: React.FC = () => {
   }
 
   const persistCodeartsFormDraft = (values: Record<string, any>) => {
-    const draftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
-    const secretDraftKey = configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
+    const draftKey = configurationMode === 'web'
+      ? CODEARTS_WEB_FORM_DRAFT_KEY
+      : configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
+    const secretDraftKey = configurationMode === 'web'
+      ? CODEARTS_WEB_FORM_SECRET_DRAFT_KEY
+      : configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
     const plainDraft = {
       domain_name: String(values.domain_name || '').trim(),
       username: String(values.username || '').trim(),
       region: String(values.region || '').trim(),
       project_id: String(values.project_id || '').trim(),
+      project_name: String(values.project_name || '').trim(),
       repo_id_0: String(values.repo_id_0 || '').trim(),
       devops_url: String(values.devops_url || '').trim(),
     }
@@ -570,6 +585,17 @@ const Repository: React.FC = () => {
     }
     window.localStorage.setItem(draftKey, JSON.stringify(plainDraft))
     window.sessionStorage.setItem(secretDraftKey, JSON.stringify(secretDraft))
+  }
+
+  const clearCodeartsFormDraft = () => {
+    const draftKey = configurationMode === 'web'
+      ? CODEARTS_WEB_FORM_DRAFT_KEY
+      : configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_DRAFT_KEY : CODEARTS_FORM_DRAFT_KEY
+    const secretDraftKey = configurationMode === 'web'
+      ? CODEARTS_WEB_FORM_SECRET_DRAFT_KEY
+      : configurationMode === 'private' ? CODEARTS_PRIVATE_FORM_SECRET_DRAFT_KEY : CODEARTS_FORM_SECRET_DRAFT_KEY
+    window.localStorage.removeItem(draftKey)
+    window.sessionStorage.removeItem(secretDraftKey)
   }
 
   useEffect(() => {
@@ -586,28 +612,40 @@ const Repository: React.FC = () => {
       ? String(codeartsCfg?.private_repo_id || '')
       : Array.isArray(codeartsCfg?.repo_ids) && codeartsCfg.repo_ids.length > 0 ? String(codeartsCfg.repo_ids[0]) : ''
     const inferredRegion = inferRegionFromRepoId(repoId0)
-    const values: any = configurationMode === 'web'
-      ? { ...CODEARTS_PRIVATE_TEST_DEFAULTS, repository_mode: configurationMode, devops_url: codeartsCfg?.devops_url || '' }
-      : {
+    const values: any = projectConfigIntent === 'edit'
+      ? {
           repository_mode: configurationMode,
           domain_name: codeartsCfg?.domain_name || '',
           username: codeartsCfg?.username || '',
           password: '',
           region: codeartsCfg?.region || inferredRegion || '',
           project_id: codeartsCfg?.project_id || '',
+          project_name: codeartsCfg?.project_name || codeartsCfg?.project_id || '',
           repo_id_0: repoId0,
+          devops_url: codeartsCfg?.devops_url || '',
         }
-    const draftValues = loadCodeartsFormDraft()
-    const mergedValues = configurationMode === 'web'
-      ? { ...values, ...draftValues, repository_mode: configurationMode }
-      : {
-          ...values,
-          ...draftValues,
-          repository_mode: configurationMode,
-          region: String(draftValues.region || values.region || inferRegionFromRepoId(draftValues.repo_id_0 || values.repo_id_0) || '').trim(),
-        }
+      : configurationMode === 'web'
+        ? { ...CODEARTS_WEB_DEFAULTS, repository_mode: configurationMode }
+        : {
+            repository_mode: configurationMode,
+            domain_name: '',
+            username: '',
+            password: '',
+            region: '',
+            project_id: '',
+            project_name: '',
+            repo_id_0: '',
+            devops_url: '',
+          }
+    const draftValues = projectConfigIntent === 'create' ? loadCodeartsFormDraft() : {}
+    const mergedValues = {
+      ...values,
+      ...draftValues,
+      repository_mode: configurationMode,
+      region: String(draftValues.region || values.region || inferRegionFromRepoId(draftValues.repo_id_0 || values.repo_id_0) || '').trim(),
+    }
     if (isCreateProjectOpen) createProjectForm.setFieldsValue(mergedValues)
-  }, [isCreateProjectOpen, codeartsCfg, createProjectForm, configurationMode])
+  }, [isCreateProjectOpen, codeartsCfg, createProjectForm, configurationMode, projectConfigIntent])
 
   useEffect(() => {
     if (!treeInitialized) return
@@ -619,7 +657,9 @@ const Repository: React.FC = () => {
           projects.push({
             label: String(n.title),
             value: String(n.key),
-            repositoryMode: n.repository_mode === 'private' ? 'private' : 'release',
+            repositoryMode: n.repository_mode === 'private'
+              ? (String(n.private_source || n.repo_detail?.private_source || '').toLowerCase() === 'web' ? 'web' : 'private')
+              : 'release',
           })
         }
         if (Array.isArray(n.children) && n.children.length > 0) walk(n.children as AnyNode[])
@@ -795,6 +835,19 @@ const Repository: React.FC = () => {
     message.error(detail || `请求失败${status ? `（${status}）` : ''}，请稍后重试。`)
   }
 
+  const triggerRepositoryDataSync = async (projectKey: string) => {
+    if (!projectKey) return
+    try {
+      await repositoryApi.triggerCodeartsAutoSync({
+        project_key: projectKey,
+        trigger_source: 'codearts_project_sync',
+      })
+    } catch {
+      // The CodeArts snapshot is already committed locally. A later connection
+      // trigger can retry pending repository-data changes.
+    }
+  }
+
   const handleSyncCurrentProject = async () => {
     const projectKey = deriveProjectKey()
     if (!projectKey || !projectKey.startsWith('proj_')) {
@@ -824,6 +877,7 @@ const Repository: React.FC = () => {
       if (res?.code === 0) {
         const syncedCount = Number(res?.data?.synced_count || 0)
         const successText = `CodeArts 同步成功，共同步 ${syncedCount} 个文件`
+        await triggerRepositoryDataSync(projectKey)
         setSyncTaskNotice({ type: 'success', message: successText })
         message.open({ key: messageKey, type: 'success', content: successText, duration: 3 })
         await refreshCodeartsConfig()
@@ -863,12 +917,14 @@ const Repository: React.FC = () => {
     const targetProject = projectOptions.find((project) => project.repositoryMode === nextMode)
     if (!targetProject) {
       setCreateProjectError(nextMode === 'private' ? '首次使用私有库，请配置仓库 ID' : '')
+      setProjectConfigIntent('create')
       setConfigurationModeOverride(nextMode)
       setIsCreateProjectOpen(true)
       return
     }
     handleProjectChange(targetProject.value)
-    message.success(`已切换到${nextMode === 'private' ? '私有库' : '发布库'}项目，需要更新数据时请点击同步CodeArts`)
+    const modeLabel = nextMode === 'web' ? 'Web 页面库' : nextMode === 'private' ? '私有库' : '发布库'
+    message.success(`已切换到${modeLabel}项目，需要更新数据时请点击同步CodeArts`)
   }
 
   const handleDownloadArtifact = async (target: DownloadTarget, node: AnyNode, jumpAfterDownload = false) => {
@@ -1062,14 +1118,28 @@ const Repository: React.FC = () => {
   const moreMenuItems = useMemo(() => {
     const items: Array<{ key: string; label: string; danger?: boolean }> = []
     if (canSyncRepository) items.push({ key: 'create-project', label: '新增项目' })
+    if (canSyncRepository && currentProjectKey) items.push({ key: 'edit-project', label: '修改当前项目' })
     if (canInviteProjectMembers || canManageProjectPermissionsEffective) items.push({ key: 'member-permission', label: '项目成员及权限' })
     if (canDeleteCurrentProject) items.push({ key: 'delete-project', label: '删除当前项目', danger: true })
     return items
-  }, [canDeleteCurrentProject, canInviteProjectMembers, canManageProjectPermissionsEffective, canSyncRepository])
+  }, [canDeleteCurrentProject, canInviteProjectMembers, canManageProjectPermissionsEffective, canSyncRepository, currentProjectKey])
 
   const handleMoreMenuClick = async ({ key }: { key: string }) => {
     if (key === 'create-project') {
-      await refreshCodeartsConfig()
+      createProjectForm.resetFields()
+      setProjectConfigIntent('create')
+      setConfigurationModeOverride(null)
+      setCreateProjectError('')
+      setIsCreateProjectOpen(true)
+    }
+    if (key === 'edit-project') {
+      if (!currentProjectKey) {
+        message.error('请先选择项目')
+        return
+      }
+      createProjectForm.resetFields()
+      await refreshCodeartsConfig(currentProjectKey)
+      setProjectConfigIntent('edit')
       setConfigurationModeOverride(null)
       setCreateProjectError('')
       setIsCreateProjectOpen(true)
@@ -1137,7 +1207,9 @@ const Repository: React.FC = () => {
     <Form
       layout="vertical"
       form={createProjectForm}
-      onValuesChange={(_, allValues) => persistCodeartsFormDraft(allValues)}
+      onValuesChange={(_, allValues) => {
+        if (projectConfigIntent === 'create') persistCodeartsFormDraft(allValues)
+      }}
       onFinishFailed={(errorInfo) => {
         showCreateProjectValidationError(errorInfo)
       }}
@@ -1148,6 +1220,7 @@ const Repository: React.FC = () => {
           const repoIds = [String(values.repo_id_0 || '').trim()].filter(Boolean)
           const inferredRegion = inferRegionFromRepoId(repoIds[0])
           const payload: any = {
+            operation: projectConfigIntent,
             enabled: true,
             repository_mode: configurationMode === 'web' ? 'private' : configurationMode,
             domain_name: String(values.domain_name || '').trim(),
@@ -1155,11 +1228,14 @@ const Repository: React.FC = () => {
             password: String(values.password || '').trim() || undefined, // undefined if empty to avoid overriding with empty string
             region: String(values.region || inferredRegion || '').trim(),
             project_id: String(values.project_id || '').trim(),
+            project_name: String(values.project_name || '').trim(),
             ...(configurationMode === 'web'
               ? { private_source: 'web', devops_url: String(values.devops_url || '').trim() }
-              : configurationMode === 'private' ? { private_repo_id: repoIds[0] || '' } : { repo_ids: repoIds }),
+              : configurationMode === 'private'
+                ? { private_source: 'api', private_repo_id: repoIds[0] || '' }
+                : { private_source: null, repo_ids: repoIds }),
           }
-          persistCodeartsFormDraft(values)
+          if (projectConfigIntent === 'create') persistCodeartsFormDraft(values)
           await repositoryApi.setCodeartsConfig(payload)
           // A newly created project must be immediately usable.  Save the
           // connection first, then perform the same full CodeArts sync as the
@@ -1176,15 +1252,18 @@ const Repository: React.FC = () => {
           if (payload.project_id) {
             const syncedCount = Number(syncResult?.data?.synced_count || 0)
             const skippedCount = Number(syncResult?.data?.skipped_count || 0)
-            message.success(`项目创建并同步成功，已拉取 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`)
+            const newProjectKey = `proj_${payload.project_id}`
+            await triggerRepositoryDataSync(newProjectKey)
+            if (projectConfigIntent === 'create') clearCodeartsFormDraft()
+            message.success(`项目${projectConfigIntent === 'edit' ? '修改' : '创建'}并同步成功，已拉取 ${syncedCount} 个文件${skippedCount > 0 ? `，跳过 ${skippedCount} 个文件` : ''}`)
             setCreateProjectError('')
             setIsCreateProjectOpen(false)
+            setProjectConfigIntent('create')
             setConfigurationModeOverride(null)
             createProjectForm.resetFields()
-            const newProjectKey = `proj_${payload.project_id}`
             await refreshTree()
             setCurrentProjectKey(newProjectKey)
-            setRepositoryProjectContext({ projectKey: newProjectKey, projectName: payload.project_id })
+            setRepositoryProjectContext({ projectKey: newProjectKey, projectName: payload.project_name || payload.project_id })
             setSelectedKeys([newProjectKey])
             setSelectedNodeKey(newProjectKey)
             await refreshCodeartsConfig(newProjectKey)
@@ -1228,11 +1307,18 @@ const Repository: React.FC = () => {
       >
         配置CodeArts用户、项目ID等信息，用于获取当前用户项目下指定制品仓库信息
       </div>
+      <div
+        aria-hidden="true"
+        style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', left: -10000, top: -10000 }}
+      >
+        <input name="pcids_login_username" autoComplete="username" tabIndex={-1} />
+        <input name="pcids_login_password" type="password" autoComplete="current-password" tabIndex={-1} />
+      </div>
       <RepoFormField label="IAM用户名" name="username" form={createProjectForm} rules={[{ required: true, message: '请输入IAM用户名' }]}>
         <Input
-          name="username"
-          autoComplete="username"
-          placeholder="请输入入账号"
+          name="codearts_iam_username"
+          autoComplete="one-time-code"
+          placeholder="请输入 IAM 用户名"
           prefix={<UserOutlined style={{ color: '#c9cdd4' }} />}
         />
       </RepoFormField>
@@ -1240,30 +1326,36 @@ const Repository: React.FC = () => {
         label="IAM密码"
         name="password"
         form={createProjectForm}
-        rules={[{ required: true, message: '请输入IAM密码' }]}
+        rules={[{
+          required: projectConfigIntent === 'create' || !codeartsCfg?.password_present,
+          message: '请输入IAM密码',
+        }]}
       >
         <Input.Password
-          name="password"
-          autoComplete="current-password"
-          placeholder="请输入入密码"
+          name="codearts_iam_password"
+          autoComplete="one-time-code"
+          placeholder="请输入 IAM 密码"
           prefix={<LockOutlined style={{ color: '#c9cdd4' }} />}
         />
       </RepoFormField>
       <RepoFormField label="租户名(DOMAIN NAME)" name="domain_name" form={createProjectForm} rules={[{ required: true, message: '请输入租户名' }]}>
-        <Input name="domain_name" autoComplete="organization" placeholder="请输入租户名" />
+        <Input name="codearts_domain_name" autoComplete="off" placeholder="请输入租户名" />
       </RepoFormField>
       <RepoFormField label="区域" name="region" form={createProjectForm} rules={[{ required: true, message: '请输入区域' }]}>
         <Input name="region" autoComplete="off" placeholder="例如：cn-east-3" />
       </RepoFormField>
       <RepoFormField label="项目ID" name="project_id" form={createProjectForm} rules={[{ required: true, message: '请输入项目ID' }]}>
-        <Input name="project_id" autoComplete="off" placeholder="请输入项目ID" />
+        <Input name="project_id" autoComplete="off" placeholder="请输入项目ID" disabled={projectConfigIntent === 'edit'} />
+      </RepoFormField>
+      <RepoFormField label="项目名称" name="project_name" form={createProjectForm} rules={[{ required: true, message: '请输入项目名称' }]}>
+        <Input name="project_name" autoComplete="off" placeholder="请输入页面中要展示的项目名称" />
       </RepoFormField>
       {configurationMode === 'private' ? (
         <RepoFormField label="仓库ID" name="repo_id_0" form={createProjectForm} rules={[{ required: true, message: '请输入仓库ID' }]}>
           <Input name="repo_id_0" autoComplete="off" placeholder="请输入仓库ID" />
         </RepoFormField>
       ) : null}
-      {false && configurationMode === 'web' ? (
+      {configurationMode === 'web' ? (
         <RepoFormField label="DevOps 域名" name="devops_url" form={createProjectForm} rules={[{ required: true, message: '请输入 DevOps 域名' }]}>
           <Input name="devops_url" autoComplete="url" placeholder="例如：https://codearts.example.com" />
         </RepoFormField>
@@ -2045,7 +2137,7 @@ const Repository: React.FC = () => {
 
       <Modal
         className="pcids-modal pcids-modal--form user-form-modal"
-        title="新建项目"
+        title={projectConfigIntent === 'edit' ? '修改项目' : '新建项目'}
         open={isCreateProjectOpen}
         okText="确 定"
         cancelText="取 消"
@@ -2063,6 +2155,7 @@ const Repository: React.FC = () => {
           if (createProjectSubmitting) return
           setCreateProjectError('')
           setIsCreateProjectOpen(false)
+          setProjectConfigIntent('create')
           setConfigurationModeOverride(null)
           createProjectForm.resetFields()
         }}

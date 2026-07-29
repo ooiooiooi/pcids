@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import Optional, Union
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
@@ -31,6 +32,15 @@ from backend.utils.network_injection import (
 from backend.utils.power_supply import PowerSupplyError, blind_scan_power_ports, bytes_to_hex, power_off, power_on
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+_INJECTION_SECRET_FIELDS = {
+    "login_password",
+    "password",
+    "private_key",
+    "private_key_content",
+    "ssh_private_key",
+}
 
 
 def _build_user_brief(user: Optional[User]) -> Optional[dict]:
@@ -56,6 +66,29 @@ def _load_config_dict(raw_config: Optional[str]) -> dict:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _redact_injection_config(raw_config: Optional[str]) -> Optional[str]:
+    if not raw_config:
+        return raw_config
+    try:
+        config = json.loads(raw_config)
+    except (TypeError, ValueError):
+        return "******"
+    if not isinstance(config, dict):
+        return "******"
+
+    def redact(value):
+        if isinstance(value, dict):
+            return {
+                key: "******" if str(key).lower() in _INJECTION_SECRET_FIELDS and item else redact(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    return json.dumps(redact(config), ensure_ascii=False)
 
 
 def _injection_type_label(injection_type: str) -> str:
@@ -370,6 +403,7 @@ async def _execute_power_off_and_record(run_id: int, injection_id: int) -> None:
             config["power_port"] = power_port
             config["power_label"] = first_port.get("label") or power_port
             injection.config = json.dumps(config, ensure_ascii=False)
+            run.config = injection.config
             db.commit()
 
         duration_seconds = int(config.get("duration_seconds") or 5)
@@ -892,7 +926,11 @@ async def _execute_script_and_record(run_id: int, injection_id: int) -> None:
             db.commit()
             return
 
-        config_json = injection.config or "{}"
+        config = _load_config_dict(injection.config)
+        if injection.type == "storage_full":
+            config["run_marker"] = str(run.id)
+        config_json = json.dumps(config, ensure_ascii=False)
+        run.config = config_json
         run.result = ""
         _append_run_log(run, f"[INFO] 已准备执行异常脚本：{script_path.name}")
         db.commit()
@@ -938,6 +976,176 @@ async def _execute_script_and_record(run_id: int, injection_id: int) -> None:
             db.commit()
         except Exception:
             pass
+    finally:
+        db.close()
+
+
+async def shutdown_active_injections() -> None:
+    """Best-effort recovery before the backend event loop stops."""
+    db = SessionLocal()
+    try:
+        for run_id, session in list(_power_off_sessions.items()):
+            run = db.query(InjectionRun).filter(InjectionRun.id == run_id).first()
+            injection = db.query(Injection).filter(Injection.id == session.injection_id).first()
+            if not run or not injection or session.is_power_restored:
+                continue
+            try:
+                await asyncio.to_thread(power_on, session.power_port)
+                session.is_power_restored = True
+                session.recovery_reason = "shutdown"
+                session.recovery_event.set()
+                _append_run_log(run, "[RECOVERY] 服务退出前已自动恢复供电")
+                db.commit()
+            except Exception as exc:
+                _append_run_log(run, f"[RECOVERY-ERROR] 服务退出前恢复供电失败: {exc}")
+                db.commit()
+                logger.exception("injection.shutdown.power_recovery_failed | run_id=%s", run_id)
+
+        for run_id, session in list(_network_error_sessions.items()):
+            run = db.query(InjectionRun).filter(InjectionRun.id == run_id).first()
+            injection = db.query(Injection).filter(Injection.id == session.injection_id).first()
+            if not run or not injection or session.recovered:
+                continue
+            try:
+                await _recover_network_error_session(session, run, injection, db, "shutdown")
+                _append_run_log(run, _network_log("RECOVERY", "服务退出前已自动恢复网络"))
+                db.commit()
+            except Exception as exc:
+                _append_run_log(run, _network_log("RECOVERY-ERROR", f"服务退出前恢复网络失败: {exc}"))
+                db.commit()
+                logger.exception("injection.shutdown.network_recovery_failed | run_id=%s", run_id)
+
+        for run_id, session in list(_permission_error_sessions.items()):
+            run = db.query(InjectionRun).filter(InjectionRun.id == run_id).first()
+            injection = db.query(Injection).filter(Injection.id == session.injection_id).first()
+            if not run or not injection or session.recovered:
+                continue
+            try:
+                await _recover_permission_error_session(session, run, injection, db, "shutdown")
+                _append_run_log(run, _permission_log("RECOVERY", "服务退出前已自动恢复目标权限"))
+                db.commit()
+            except Exception as exc:
+                _append_run_log(run, _permission_log("RECOVERY-ERROR", f"服务退出前恢复目标权限失败: {exc}"))
+                db.commit()
+                logger.exception("injection.shutdown.permission_recovery_failed | run_id=%s", run_id)
+    finally:
+        db.close()
+
+    pending = [task for task in list(_running_tasks) if not task.done()]
+    if pending:
+        done, still_pending = await asyncio.wait(pending, timeout=10)
+        for task in done:
+            try:
+                task.result()
+            except Exception:
+                logger.exception("injection.shutdown.task_failed")
+        if still_pending:
+            logger.error("injection.shutdown.tasks_still_pending | count=%s", len(still_pending))
+
+
+async def recover_interrupted_injections() -> None:
+    """Recover persisted fault injections left active by a previous process."""
+    db = SessionLocal()
+    try:
+        interrupted_runs = (
+            db.query(InjectionRun)
+            .filter(InjectionRun.exec_status == 1)
+            .order_by(InjectionRun.id.asc())
+            .all()
+        )
+        for run in interrupted_runs:
+            injection = db.query(Injection).filter(Injection.id == run.injection_id).first()
+            config = _load_config_dict(run.config or (injection.config if injection else None))
+            try:
+                if run.type == "power_off":
+                    power_port = str(config.get("power_port") or "").strip()
+                    if not power_port:
+                        raise RuntimeError("缺少断电恢复所需的电源串口")
+                    await asyncio.to_thread(power_on, power_port)
+                    _append_run_log(run, "[RECOVERY] 后端重启后已自动恢复供电")
+                elif run.type == "network_error":
+                    normalized = _normalize_network_error_config_or_raise(
+                        config,
+                        target=run.target,
+                        require_interface=False,
+                    )
+                    cleanup_path = str(config.get("cleanup_script_path") or _build_network_cleanup_script_path(run.id))
+                    cleanup_path_q = quote_remote(cleanup_path)
+                    cleanup_command = (
+                        f"if [ ! -x {cleanup_path_q} ]; then exit 44; fi; "
+                        f"{cleanup_path_q}; rm -f {cleanup_path_q}"
+                    )
+                    return_code, output = await asyncio.to_thread(
+                        run_remote_shell_command,
+                        normalized,
+                        cleanup_command,
+                        timeout_seconds=20,
+                    )
+                    if return_code != 0:
+                        raise RuntimeError(output or "网络恢复脚本执行失败")
+                    _append_run_log(run, _network_log("RECOVERY", "后端重启后已执行网络恢复脚本"))
+                elif run.type == "storage_full":
+                    normalized = normalize_network_error_config(
+                        config,
+                        target=run.target,
+                        require_interface=False,
+                    )
+                    location = str(config.get("location") or "/tmp").strip()
+                    if location == "custom":
+                        location = str(config.get("custom_location") or "").strip()
+                    if not location.startswith("/"):
+                        raise RuntimeError("storage recovery location must be an absolute path")
+                    marker = str(config.get("run_marker") or run.id).strip()
+                    cleanup_command = "\n".join(
+                        [
+                            f"LOCATION={quote_remote(location)}",
+                            f"PREFIX={quote_remote(f'.pcids_storage_full_{marker}')}",
+                            'find "$LOCATION" -maxdepth 1 -type f -name "$PREFIX.*.bin" -delete',
+                        ]
+                    )
+                    return_code, output = await asyncio.to_thread(
+                        run_remote_shell_command,
+                        normalized,
+                        cleanup_command,
+                        timeout_seconds=20,
+                    )
+                    if return_code != 0:
+                        raise RuntimeError(output or "storage recovery cleanup failed")
+                    _append_run_log(run, "[RECOVERY] storage allocation files removed after restart")
+                elif run.type == "permission_error":
+                    normalized = _normalize_permission_error_config_or_raise(config, target=run.target)
+                    cleanup_path = str(config.get("cleanup_script_path") or _build_permission_cleanup_script_path(run.id))
+                    cleanup_path_q = quote_remote(cleanup_path)
+                    cleanup_command = (
+                        f"if [ ! -x {cleanup_path_q} ]; then exit 44; fi; "
+                        f"{cleanup_path_q}; rm -f {cleanup_path_q}"
+                    )
+                    return_code, output = await asyncio.to_thread(
+                        run_remote_shell_command,
+                        normalized,
+                        cleanup_command,
+                        timeout_seconds=20,
+                    )
+                    if return_code != 0:
+                        raise RuntimeError(output or "权限恢复脚本不存在或执行失败")
+                    _append_run_log(run, _permission_log("RECOVERY", "后端重启后已恢复目标权限"))
+                else:
+                    raise RuntimeError("服务重启中断了异常注入子进程")
+
+                run.exec_status = 4
+                run.exec_time = datetime.now()
+                if injection:
+                    injection.status = 2
+                    injection.result = "服务重启后已自动恢复"
+            except Exception as exc:
+                run.exec_status = 3
+                run.exec_time = datetime.now()
+                _append_run_log(run, f"[RECOVERY-ERROR] {exc}")
+                if injection:
+                    injection.status = 3
+                    injection.result = "服务重启恢复失败，请人工检查目标状态"
+                logger.exception("injection.startup.recovery_failed | run_id=%s type=%s", run.id, run.type)
+            db.commit()
     finally:
         db.close()
 
@@ -1162,7 +1370,7 @@ def injection_to_dict(i):
         "id": i.id,
         "type": i.type,
         "target": i.target,
-        "config": i.config,
+        "config": _redact_injection_config(i.config),
         "status": i.status,
         "result": i.result,
         "created_at": database_time_to_local(i.created_at),
@@ -1177,7 +1385,7 @@ def injection_run_to_dict(r: InjectionRun, executor_user: Optional[User] = None)
         "task_no": getattr(r, "task_no", None),
         "type": r.type,
         "target": r.target,
-        "config": r.config,
+        "config": _redact_injection_config(r.config),
         "exec_status": r.exec_status,
         "result": r.result,
         "executor": r.executor,

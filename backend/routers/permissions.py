@@ -10,7 +10,13 @@ from backend.models.user import User
 from backend.models.permission import Menu, Permission
 from backend.schemas import Response
 from backend.routers.auth import get_current_user
-from backend.utils.permission import normalize_role_permission_ids
+from backend.utils.permission import (
+    ensure_permission_ids_assignable,
+    ensure_role_assignable,
+    is_super_admin,
+    require_permission,
+    require_super_admin,
+)
 
 router = APIRouter()
 
@@ -100,7 +106,8 @@ async def create_menu(
     sort_order: int = 0,
     is_hidden: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_super_admin()),
 ):
     """创建菜单"""
     menu = Menu(
@@ -127,7 +134,8 @@ async def update_menu(
     sort_order: Optional[int] = None,
     is_hidden: Optional[bool] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_super_admin()),
 ):
     """更新菜单"""
     menu = db.query(Menu).filter(Menu.id == menu_id).first()
@@ -148,7 +156,8 @@ async def update_menu(
 async def delete_menu(
     menu_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_super_admin()),
 ):
     """删除菜单"""
     menu = db.query(Menu).filter(Menu.id == menu_id).first()
@@ -166,10 +175,13 @@ async def delete_menu(
 async def get_permissions(
     menu_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("role:view")),
 ):
     """获取权限点列表"""
     query = db.query(Permission)
+    if not is_super_admin(current_user):
+        query = query.filter(Permission.code.in_(current_user.get_permissions()))
     if menu_id:
         query = query.filter(Permission.menu_id == menu_id)
 
@@ -201,7 +213,8 @@ async def create_permission(
     api_path: Optional[str] = None,
     api_method: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_super_admin()),
 ):
     """创建权限点"""
     existing = db.query(Permission).filter(Permission.code == code).first()
@@ -227,7 +240,8 @@ async def create_permission(
 async def delete_permission(
     permission_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_super_admin()),
 ):
     """删除权限点"""
     permission = db.query(Permission).filter(Permission.id == permission_id).first()
@@ -246,7 +260,8 @@ async def assign_permissions(
     role_id: int,
     permission_ids: List[int],
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("role:edit")),
 ):
     """分配权限给角色"""
     from backend.models.role import Role
@@ -256,7 +271,8 @@ async def assign_permissions(
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
 
-    normalized_permission_ids = normalize_role_permission_ids(db, permission_ids)
+    ensure_role_assignable(db, current_user, role)
+    normalized_permission_ids = ensure_permission_ids_assignable(db, current_user, permission_ids)
 
     # 删除现有权限
     db.query(RolePermission).filter(RolePermission.role_id == role_id).delete()
@@ -274,7 +290,8 @@ async def assign_permissions(
 async def get_role_permissions(
     role_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(require_permission("role:view")),
 ):
     """获取角色的权限"""
     from backend.models.role import Role

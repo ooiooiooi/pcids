@@ -1,0 +1,8 @@
+-r requirements.txt
+
+# Win7 Web 同步测试包专用。正式 Win10 包继续使用主环境的新版 cryptography。
+# 3.4.8 的异常与 AES-GCM 路径使用旧式 OpenSSL/CFFI 后端，不在启动时加载 _rust。
+cryptography==3.4.8
+# 4.x 的 Windows 轮子使用 Rust 扩展，未完整更新的 Win7 会在加载 _bcrypt.pyd 时失败。
+# 3.2.2 是 CPython 3.6+ 的旧式 CFFI Windows x64 轮子，兼容 Python 3.8 和 passlib 1.7.4。
+bcrypt==3.2.2

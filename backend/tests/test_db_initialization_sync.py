@@ -34,6 +34,7 @@ class DatabaseInitializationSyncTests(unittest.TestCase):
             patch.object(db_utils, "_is_initial_seed_completed", return_value=False),
             patch.object(db_utils, "_has_existing_business_data", return_value=True),
             patch.object(db_utils, "SessionLocal", return_value=session),
+            patch.object(db_utils, "_sync_recurring_application_data") as sync_migrations,
             patch.object(db_utils, "ensure_default_system_scripts") as ensure_scripts,
             patch.object(db_utils, "ensure_script_task_types") as ensure_task_types,
             patch.object(db_utils, "ensure_default_products") as ensure_products,
@@ -42,12 +43,31 @@ class DatabaseInitializationSyncTests(unittest.TestCase):
         ):
             db_utils.init_db()
 
+        sync_migrations.assert_called_once_with(session)
         ensure_scripts.assert_called_once_with(session)
         ensure_task_types.assert_called_once_with(session)
         ensure_products.assert_called_once_with(session)
         ensure_interfaces.assert_called_once_with(session)
         session.close.assert_called_once_with()
         mark_completed.assert_called_once_with()
+
+    def test_completed_database_still_runs_recurring_data_migrations(self):
+        session = MagicMock()
+        with (
+            patch.object(Base.metadata, "create_all"),
+            patch.object(db_utils, "ensure_schema"),
+            patch.object(db_utils, "_is_initial_seed_completed", return_value=True),
+            patch.object(db_utils, "SessionLocal", return_value=session),
+            patch.object(db_utils, "_sync_recurring_application_data") as sync_migrations,
+            patch.object(db_utils, "ensure_default_system_scripts"),
+            patch.object(db_utils, "ensure_script_task_types"),
+            patch.object(db_utils, "ensure_default_products"),
+            patch.object(db_utils, "ensure_product_burn_interfaces"),
+        ):
+            db_utils.init_db()
+
+        sync_migrations.assert_called_once_with(session)
+        session.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

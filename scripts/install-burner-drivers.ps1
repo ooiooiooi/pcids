@@ -131,6 +131,7 @@ function Configure-ToolEnvironment {
   Invoke-Step "PCIDS tool environment" {
     Set-MachineEnvValue "PCIDS_BUNDLED_TOOLS_DIR" $Root
 
+    Set-MachineEnvValue "STLINK_UTILITY_CLI" (Find-FirstFile (Join-Path $Root "ST-LINK\ST-LINK-Utility-CLI-3.6") @("ST-LINK_CLI.exe", "ST-LINK_CLI"))
     Set-MachineEnvValue "STM32_PROGRAMMER_CLI" (Find-FirstFile (Join-Path $Root "ST-LINK") @("STM32_Programmer_CLI.exe", "STM32_Programmer_CLI"))
     Set-MachineEnvValue "JLINK_EXE" (Find-FirstFile (Join-Path $Root "J-LINK") @("JLink.exe", "JLinkExe.exe", "JLinkExe"))
     Set-MachineEnvValue "PYOCD_EXE" (Find-FirstFile (Join-Path $Root "SWD_Downloader") @("pyocd.exe", "pyocd"))
@@ -148,8 +149,9 @@ function Configure-ToolEnvironment {
     Set-MachineEnvValue "XSDB_EXE" (Find-FirstFile (Join-Path $Root "AL321\Vitis") @("xsdb.bat", "xsdb.exe", "xsdb"))
     Set-MachineEnvValue "HW_SERVER_EXE" (Find-FirstFile (Join-Path $Root "AL321\Vitis") @("hw_server.bat", "hw_server.exe", "hw_server"))
 
-    Set-MachineEnvValue "HDSC_ISP_CLI" (Find-FirstFile (Join-Path $Root "HDSC_CCID") @("*isp*.exe", "*programmer*.exe", "*HDSC*.exe"))
-    Set-MachineEnvValue "HDSC_CCID_V604_EXE" (Find-FirstFile (Join-Path $Root "HDSC_CCID") @("HDSC+CCID+Prog+REV6.04.exe", "*CCID*Prog*REV6.04*.exe"))
+    Set-MachineEnvValue "HDSC_ISP_CLI" (Find-FirstFile (Join-Path $Root "HDSC") @("*isp*.exe", "*programmer*.exe", "*HDSC*.exe"))
+    Set-MachineEnvValue "HDSC_CCID_AGENT" (Find-FirstFile (Join-Path $Root "HDSC") @("hdsc_ccid_agent.py"))
+    Set-MachineEnvValue "HDSC_CCID_V604_EXE" (Find-FirstFile (Join-Path $Root "HDSC") @("HDSC+CCID+Prog+REV6.04.exe", "*CCID*Prog*REV6.04*.exe"))
     Set-MachineEnvValue "IPECMD_EXE" (Find-FirstFile (Join-Path $Root "MPLAB_ICD_3") @("ipecmd.exe", "ipecmd"))
     Set-MachineEnvValue "QUARTUS_PGM" (Find-FirstFile (Join-Path $Root "Altera_Blaster_II") @("quartus_pgm.exe", "quartus_pgm"))
     Set-MachineEnvValue "GOWIN_PROGRAMMER_CLI" (Find-FirstFile (Join-Path $Root "GOWIN") @("programmer_cli.exe", "programmer_cli"))

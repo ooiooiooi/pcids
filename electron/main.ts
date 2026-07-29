@@ -4,6 +4,7 @@ import * as net from 'net'
 import * as path from 'path'
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
+import { resolveSingleDataRoot } from './dataRoot'
 
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: childProcess.ChildProcess | null = null
@@ -13,6 +14,31 @@ let backendRestarting = false
 const backendOutputTail: string[] = []
 const BACKEND_START_ATTEMPTS = 3
 const BACKEND_START_TIMEOUT_MS = 120000
+
+const legacyUserDataRoot = app.getPath('userData')
+
+function configureSingleDatabaseRoot(): string {
+  if (!app.isPackaged || process.platform !== 'win32') {
+    return legacyUserDataRoot
+  }
+
+  const commonAppData = String(process.env.ProgramData || 'C:\\ProgramData').trim()
+  const resolution = resolveSingleDataRoot({
+    machineRoot: path.join(commonAppData, 'PCIDS'),
+    legacyRoot: legacyUserDataRoot,
+    configuredRoot: process.env.PCIDS_DATA_DIR,
+  })
+  app.setPath('userData', resolution.dataRoot)
+  return resolution.dataRoot
+}
+
+let singleDataRoot = legacyUserDataRoot
+let singleDataRootError: Error | null = null
+try {
+  singleDataRoot = configureSingleDatabaseRoot()
+} catch (error) {
+  singleDataRootError = error instanceof Error ? error : new Error(String(error))
+}
 
 // A second desktop instance used to race the first one for port 8000.  Each
 // instance could then terminate the other's backend while it was starting,
@@ -36,7 +62,10 @@ function getRuntimeRoot(): string {
 }
 
 function getBackendStartupLogPath(): string {
-  return path.join(app.getPath('userData'), 'logs', 'desktop-backend-startup.log')
+  const logRoot = app.isPackaged
+    ? path.join(getRuntimeRoot(), 'logs')
+    : path.join(app.getPath('userData'), 'logs')
+  return path.join(logRoot, 'desktop-backend-startup.log')
 }
 
 function recordBackendOutput(message: string): void {
@@ -61,18 +90,54 @@ function recordBackendOutput(message: string): void {
 
 function resolveBundledToolsDir(): string {
   const configured = String(process.env.PCIDS_BUNDLED_TOOLS_DIR || '').trim()
-  if (configured) return configured
 
   const candidates = app.isPackaged
     ? [
         path.join(process.resourcesPath, 'tools', 'burners'),
+        configured,
+        'D:\\PCIDS-Deploy\\burners',
         'C:\\PCIDS\\burner-drivers',
         'C:\\pcids-burner-drivers',
       ]
-    : [path.join(__dirname, '../../tools/burners')]
+    : [configured, path.join(__dirname, '../../tools/burners')]
 
-  const existing = candidates.find((candidate) => fs.existsSync(candidate))
-  return existing || candidates[0]
+  const usable = candidates.filter(Boolean)
+  const existing = usable.find((candidate) => fs.existsSync(candidate))
+  return existing || usable[0]
+}
+
+function resolveProtocolAdaptersDir(): string {
+  const configured = String(process.env.PCIDS_PROTOCOL_ADAPTERS_DIR || '').trim()
+
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, 'tools', 'protocol_adapters'),
+        configured,
+        'D:\\PCIDS-Deploy\\protocol_adapters',
+        'C:\\PCIDS\\protocol_adapters',
+      ]
+    : [configured, path.join(__dirname, '../../tools/protocol_adapters')]
+
+  const usable = candidates.filter(Boolean)
+  const existing = usable.find((candidate) => fs.existsSync(candidate))
+  return existing || usable[0]
+}
+
+function resolveCodeArtsWebRuntimeDir(): string {
+  const configured = String(process.env.PCIDS_CODEARTS_WEB_RUNTIME || '').trim()
+
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, 'tools', 'codearts_browser_runtime'),
+        configured,
+        'D:\\PCIDS-Deploy\\codearts_browser_runtime',
+        'C:\\PCIDS\\codearts_browser_runtime',
+      ]
+    : [configured, path.join(__dirname, '../../tools/codearts_release_debugger/browser_runtime')]
+
+  const usable = candidates.filter(Boolean)
+  const existing = usable.find((candidate) => fs.existsSync(candidate))
+  return existing || usable[0]
 }
 
 function getPreferredBackendPort(): number {
@@ -408,7 +473,8 @@ function startPythonBackend(port: number): childProcess.ChildProcess {
   const backendPath = getBackendPath()
   const backendBaseUrl = getBackendBaseUrl(port)
   const runtimeRoot = getRuntimeRoot()
-  const dataRoot = app.getPath('userData')
+  const dataRoot = singleDataRoot
+  const logRoot = app.isPackaged ? path.join(runtimeRoot, 'logs') : path.join(dataRoot, 'logs')
   const backendEnv = {
     ...process.env,
     PCIDS_BACKEND_HOST: '0.0.0.0',
@@ -416,16 +482,13 @@ function startPythonBackend(port: number): childProcess.ChildProcess {
     PCIDS_PUBLIC_BASE_URL: backendBaseUrl,
     PCIDS_ALLOWED_ORIGINS: 'http://127.0.0.1:5173,http://localhost:5173,null',
     PCIDS_BUNDLED_TOOLS_DIR: resolveBundledToolsDir(),
-    PCIDS_PROTOCOL_ADAPTERS_DIR: app.isPackaged
-      ? path.join(process.resourcesPath, 'tools', 'protocol_adapters')
-      : path.join(__dirname, '../../tools/protocol_adapters'),
-    PCIDS_CODEARTS_WEB_RUNTIME: app.isPackaged
-      ? path.join(process.resourcesPath, 'tools', 'codearts_browser_runtime')
-      : path.join(__dirname, '../../tools/codearts_release_debugger/browser_runtime'),
+    PCIDS_PROTOCOL_ADAPTERS_DIR: resolveProtocolAdaptersDir(),
+    PCIDS_CODEARTS_WEB_RUNTIME: resolveCodeArtsWebRuntimeDir(),
     PCIDS_NODE_BIN: process.execPath,
     PCIDS_RUNTIME_ROOT: runtimeRoot,
     PCIDS_DATA_DIR: dataRoot,
-    PCIDS_LOG_DIR: path.join(dataRoot, 'logs'),
+    DB_PATH: path.join(dataRoot, 'app_data.db'),
+    PCIDS_LOG_DIR: logRoot,
     ELECTRON_RUN_AS_NODE: '1',
   }
 
@@ -567,6 +630,9 @@ async function createWindow() {
   await mainWindow.loadURL(getStartupPageUrl())
 
   try {
+    if (singleDataRootError) {
+      throw singleDataRootError
+    }
     const startedBackend = await startBackendWithRetry()
     backendPort = startedBackend.port
     const backendBaseUrl = startedBackend.baseUrl

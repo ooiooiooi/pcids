@@ -80,54 +80,6 @@
       {
         "from": "scripts/pcids_flash.py",
         "to": "flash-adapter/pcids_flash.py"
-      },
-      {
-        "from": "tools/burners/HDSC",
-        "to": "tools/burners/HDSC"
-      },
-      {
-        "from": "tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6",
-        "to": "tools/burners/ST-LINK/ST-LINK-Utility-CLI-3.6",
-        "filter": [
-          "ST-LINK_CLI.exe",
-          "STLinkUSBDriver.dll",
-          "FlashLoader/*.stldr"
-        ]
-      },
-      {
-        "from": "tools/burners/GOWIN",
-        "to": "tools/burners/GOWIN",
-        "filter": [
-          "bin/**/*",
-          "driver/**/*",
-          "drivers/**/*"
-        ]
-      },
-      {
-        "from": "tools/burners/AL321",
-        "to": "tools/burners/AL321",
-        "filter": [
-          "drivers/**/*",
-          "openFPGALoader/**/*",
-          "run-program-flash-stream.ps1"
-        ]
-      },
-      {
-        "from": "tools/protocol_adapters",
-        "to": "tools/protocol_adapters",
-        "filter": [
-          "**/*",
-          "!**/*.c",
-          "!**/*.cc",
-          "!**/*.cpp",
-          "!**/*.h",
-          "!**/*.hpp",
-          "!**/*.o",
-          "!**/*.obj",
-          "!**/*.pdb",
-          "!**/*.tmp",
-          "!**/*.tmp.*"
-        ]
       }
     ],
     "mac": {

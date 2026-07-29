@@ -21,6 +21,7 @@ class User(Base, TimestampMixin):
     )
     status: Mapped[int] = mapped_column(Integer, default=1)
     last_active_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     codearts_config_json: Mapped[Optional[str]] = mapped_column(Text, default=None)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(255), default=None)
 

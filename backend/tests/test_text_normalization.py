@@ -31,6 +31,11 @@ class TextNormalizationTests(unittest.TestCase):
     def test_keeps_clean_text_unchanged(self):
         self.assertEqual(normalize_text("复位运行"), "复位运行")
         self.assertEqual(normalize_text("STM32F103C8T6"), "STM32F103C8T6")
+        self.assertEqual(normalize_text("Mädchen"), "Mädchen")
+
+    def test_repairs_utf8_text_decoded_as_latin1(self):
+        broken = "中文目录/烧录文件.bin".encode("utf-8").decode("latin1")
+        self.assertEqual(normalize_text(broken), "中文目录/烧录文件.bin")
 
 
 if __name__ == "__main__":

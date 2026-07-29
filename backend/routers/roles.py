@@ -12,7 +12,12 @@ from backend.models.permission import RolePermission
 from backend.schemas import RoleCreate, RoleUpdate, Response, PaginatedResponse
 from backend.routers.auth import get_current_user
 from backend.utils.datetime_utils import database_time_to_local
-from backend.utils.permission import require_permission, normalize_role_permission_ids
+from backend.utils.permission import (
+    ensure_data_scope_assignable,
+    ensure_permission_ids_assignable,
+    ensure_role_assignable,
+    require_permission,
+)
 from backend.utils.notifications import create_structured_message
 
 router = APIRouter()
@@ -38,8 +43,12 @@ def _assign_permissions(db: Session, role: Role, permission_ids: List[int]):
         db.add(RolePermission(role_id=role.id, permission_id=pid))
 
 
-def _validate_role_permissions(db: Session, permission_ids: Optional[List[int]]) -> List[int]:
-    normalized = normalize_role_permission_ids(db, permission_ids or [])
+def _validate_role_permissions(
+    db: Session,
+    current_user: User,
+    permission_ids: Optional[List[int]],
+) -> List[int]:
+    normalized = ensure_permission_ids_assignable(db, current_user, permission_ids or [])
     if not normalized:
         raise HTTPException(status_code=400, detail="请至少选择一项菜单权限")
     return normalized
@@ -84,7 +93,8 @@ async def create_role(
     existing = db.query(Role).filter(Role.name == role_data.name).first()
     if existing:
         raise HTTPException(status_code=400, detail="角色名已存在")
-    permission_ids = _validate_role_permissions(db, role_data.permission_ids)
+    permission_ids = _validate_role_permissions(db, current_user, role_data.permission_ids)
+    ensure_data_scope_assignable(current_user, role_data.data_scope)
 
     role = Role(
         name=role_data.name,
@@ -140,6 +150,8 @@ async def update_role(
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
 
+    ensure_role_assignable(db, current_user, role)
+
     if role_data.name is not None:
         duplicate = db.query(Role).filter(Role.name == role_data.name, Role.id != role_id).first()
         if duplicate:
@@ -150,9 +162,10 @@ async def update_role(
     if role_data.status is not None:
         role.status = role_data.status
     if role_data.data_scope is not None:
+        ensure_data_scope_assignable(current_user, role_data.data_scope)
         role.data_scope = role_data.data_scope
     if role_data.permission_ids is not None:
-        _assign_permissions(db, role, _validate_role_permissions(db, role_data.permission_ids))
+        _assign_permissions(db, role, _validate_role_permissions(db, current_user, role_data.permission_ids))
 
     db.commit()
     db.refresh(role)
@@ -171,6 +184,8 @@ async def delete_role(
     role = db.query(Role).filter(Role.id == role_id).first()
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
+
+    ensure_role_assignable(db, current_user, role)
 
     users_count = db.query(User).filter(User.role_id == role_id).count()
     if users_count > 0:

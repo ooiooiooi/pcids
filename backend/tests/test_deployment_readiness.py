@@ -55,6 +55,21 @@ class DeploymentReadinessTests(unittest.TestCase):
         windows_check = next(item for item in readiness["checks"] if item["key"] == "windows_version")
         self.assertEqual(windows_check["status"], "warn")
 
+    def test_windows_7_web_test_package_is_supported(self):
+        ok_check = _build_check("probe", "ok", "ok")
+        with patch.dict(os.environ, {ARTIFACT_MASTER_KEY_ENV: _encode_key(b"7" * 32)}, clear=False):
+            with patch("backend.utils.deployment_readiness.platform.system", return_value="Windows"):
+                with patch("backend.utils.deployment_readiness.platform.release", return_value="7"):
+                    with patch("backend.utils.deployment_readiness.platform.version", return_value="6.1.7601"):
+                        with patch("backend.utils.deployment_readiness._check_upload_root", return_value=ok_check):
+                            with patch("backend.utils.deployment_readiness._check_temp_runtime_dir", return_value=ok_check):
+                                with patch("backend.utils.deployment_readiness._check_secure_data_dir", return_value=ok_check):
+                                    readiness = build_windows_deployment_readiness()
+
+        self.assertTrue(readiness["overall_ready"])
+        windows_check = next(item for item in readiness["checks"] if item["key"] == "windows_version")
+        self.assertEqual(windows_check["status"], "ok")
+
     def test_missing_burner_tools_are_reported_as_warnings(self):
         ok_check = _build_check("probe", "ok", "ok")
         burner_tools = [

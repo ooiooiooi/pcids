@@ -1,6 +1,7 @@
 {
   "appId": "com.pcids.win7.private-test",
   "productName": "程控安装部署系统-Win7私有库测试版",
+  "electronVersion": "22.3.27",
   "directories": {
     "output": "release-win7-private"
   },
@@ -11,42 +12,12 @@
   ],
   "extraResources": [
     {
-      "from": "backend/dist",
+      "from": "backend/dist-win7-web",
       "to": "backend",
       "filter": [
         "pcids_backend.exe"
       ]
     },
-    {
-      "from": "scripts/pcids-flash.cmd",
-      "to": "flash-adapter/pcids-flash.cmd"
-    },
-    {
-      "from": "scripts/pcids_flash.py",
-      "to": "flash-adapter/pcids_flash.py"
-    },
-    {
-      "from": "tools/burners/HDSC",
-      "to": "tools/burners/HDSC"
-    },
-      {
-        "from": "tools/burners/GOWIN",
-        "to": "tools/burners/GOWIN",
-        "filter": [
-          "bin/**/*",
-          "driver/**/*",
-          "drivers/**/*"
-        ]
-      },
-      {
-        "from": "tools/burners/AL321",
-        "to": "tools/burners/AL321",
-        "filter": [
-          "drivers/**/*",
-          "openFPGALoader/**/*",
-          "run-program-flash-stream.ps1"
-        ]
-      },
     {
       "from": "tools/codearts_release_debugger/browser_runtime",
       "to": "tools/codearts_browser_runtime",

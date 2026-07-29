@@ -4,15 +4,20 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.models import Base, Repository, User
+from backend.models import Base, Repository, RepositorySyncChange, User
 from backend.models.log import Record
 from backend.models.repository import RepositoryProjectSetting
 from backend.models.task import BurningTask
-from backend.routers.repositories import _filter_repositories_for_active_codearts_mode, sync_codearts_project
+from backend.routers.repositories import (
+    _filter_repositories_for_active_codearts_mode,
+    set_codearts_config,
+    sync_codearts_project,
+)
 
 
 class RepositoryCodeartsSyncTests(unittest.TestCase):
@@ -108,6 +113,12 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
             .count()
         )
         self.assertEqual(remaining, 0)
+        changes = self.db.query(RepositorySyncChange).filter(
+            RepositorySyncChange.project_key == project_key
+        ).all()
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].change_type, "delete_server")
+        self.assertEqual(changes[0].source, "codearts_sync")
 
     def test_full_refresh_detaches_historical_foreign_key_references_before_delete(self):
         project_id = "project-2"
@@ -296,6 +307,235 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
             [release_repo, private_repo], self.db, self.user
         )
         self.assertEqual([repo.name for repo in visible_private], ["private.bin"])
+
+    def test_legacy_repository_without_mode_remains_visible_in_private_mode(self):
+        project_key = "proj_legacy-mode"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            codearts_config_json=json.dumps({"repository_mode": "private"}),
+        )
+        legacy_repo = Repository(
+            name="legacy.bin",
+            project_key=project_key,
+            source_type="codearts_sync",
+            repo_detail_json=json.dumps({"project_name": "Legacy Project"}),
+        )
+        release_repo = Repository(
+            name="release.bin",
+            project_key=project_key,
+            source_type="codearts_sync",
+            repo_detail_json=json.dumps({"repository_mode": "release"}),
+        )
+        self.db.add_all([setting, legacy_repo, release_repo])
+        self.db.commit()
+
+        visible = _filter_repositories_for_active_codearts_mode(
+            [legacy_repo, release_repo], self.db, self.user
+        )
+
+        self.assertEqual([repo.name for repo in visible], ["legacy.bin"])
+
+    def test_web_refresh_uses_stable_path_identity_and_queues_data_sync(self):
+        project_id = "web-project"
+        project_key = f"proj_{project_id}"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            updated_by_user_id=self.user.id,
+            codearts_config_json=json.dumps(
+                {
+                    "enabled": True,
+                    "repository_mode": "private",
+                    "private_source": "web",
+                    "domain_name": "tenant",
+                    "username": "demo-user",
+                    "password": "demo-password",
+                    "region": "cn-cq-1",
+                    "project_id": project_id,
+                    "devops_url": "https://devops.example.com",
+                },
+                ensure_ascii=False,
+            ),
+        )
+        repo = Repository(
+            name="BOOT.bin",
+            project_key=project_key,
+            created_by_user_id=self.user.id,
+            source_type="codearts_sync",
+            remote_repo_id="web-private",
+            display_path="/firmware/BOOT.bin",
+            download_uri="https://devops.example.com/download?id=file&token=old",
+            file_url="D:/pcids/BOOT.bin.pcenc",
+            repo_detail_json=json.dumps(
+                {"repository_mode": "private", "private_source": "web"},
+                ensure_ascii=False,
+            ),
+        )
+        self.db.add_all([setting, repo])
+        self.db.commit()
+        self.db.refresh(repo)
+        original_id = repo.id
+
+        web_files = [
+            {
+                "project_id": project_id,
+                "project_name": "Web Project",
+                "remote_repo_id": "web-private",
+                "name": "BOOT.bin",
+                "display_path": "/firmware/BOOT.bin",
+                "download_uri": "https://devops.example.com/download?id=file&token=new",
+                "repo_detail": {
+                    "project_name": "Web Project",
+                    "repository_mode": "private",
+                    "private_source": "web",
+                },
+                "file_detail": {"size": 12},
+            }
+        ]
+
+        with (
+            patch("backend.routers.repositories.ensure_schema"),
+            patch(
+                "backend.routers.repositories._list_codearts_web_private_files",
+                return_value=(web_files, {"summary": {}, "request_records": [], "folders": []}),
+            ),
+            patch("backend.routers.repositories._list_running_tasks_for_project", return_value=[]),
+        ):
+            result = asyncio.run(
+                sync_codearts_project(
+                    {"project_id": project_id, "full_refresh": True},
+                    self.db,
+                    self.user,
+                    None,
+                )
+            )
+
+        self.assertEqual(result["code"], 0)
+        rows = self.db.query(Repository).filter(Repository.project_key == project_key).all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].id, original_id)
+        self.assertEqual(rows[0].file_url, "D:/pcids/BOOT.bin.pcenc")
+        self.assertIn("token=new", rows[0].download_uri)
+        changes = self.db.query(RepositorySyncChange).filter(
+            RepositorySyncChange.project_key == project_key
+        ).all()
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].change_type, "upsert")
+        self.assertEqual(changes[0].source, "codearts_sync")
+
+    def test_project_create_cannot_silently_overwrite_existing_config(self):
+        project_id = "existing-project"
+        project_key = f"proj_{project_id}"
+        self.db.add(
+            RepositoryProjectSetting(
+                project_key=project_key,
+                updated_by_user_id=self.user.id,
+                codearts_config_json=json.dumps(
+                    {
+                        "enabled": True,
+                        "repository_mode": "private",
+                        "private_source": "web",
+                        "project_id": project_id,
+                        "password": "saved-password",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                set_codearts_config(
+                    {
+                        "operation": "create",
+                        "enabled": True,
+                        "repository_mode": "private",
+                        "private_source": "web",
+                        "project_id": project_id,
+                    },
+                    self.db,
+                    self.user,
+                    None,
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_project_edit_preserves_saved_password_when_form_leaves_it_blank(self):
+        project_id = "editable-project"
+        project_key = f"proj_{project_id}"
+        self.db.add(
+            RepositoryProjectSetting(
+                project_key=project_key,
+                updated_by_user_id=self.user.id,
+                codearts_config_json=json.dumps(
+                    {
+                        "enabled": True,
+                        "repository_mode": "private",
+                        "private_source": "web",
+                        "domain_name": "tenant",
+                        "username": "user",
+                        "password": "saved-password",
+                        "region": "cn-cq-1",
+                        "project_id": project_id,
+                        "devops_url": "https://old.example.com",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        existing_repo = Repository(
+            name="firmware.bin",
+            project_key=project_key,
+            created_by_user_id=self.user.id,
+            source_type="codearts_sync",
+            repo_detail_json=json.dumps(
+                {
+                    "name": "旧项目名称",
+                    "project_name": "旧项目名称",
+                    "repository_mode": "private",
+                    "private_source": "web",
+                },
+                ensure_ascii=False,
+            ),
+        )
+        self.db.add(existing_repo)
+        self.db.commit()
+
+        result = asyncio.run(
+            set_codearts_config(
+                {
+                    "operation": "edit",
+                    "enabled": True,
+                    "repository_mode": "private",
+                    "private_source": "web",
+                    "domain_name": "tenant",
+                    "username": "user",
+                    "project_id": project_id,
+                    "project_name": "修正后的项目名称",
+                    "region": "cn-cq-1",
+                    "devops_url": "https://new.example.com",
+                },
+                self.db,
+                self.user,
+                None,
+            )
+        )
+
+        self.assertEqual(result["code"], 0)
+        stored = json.loads(
+            self.db.query(RepositoryProjectSetting)
+            .filter(RepositoryProjectSetting.project_key == project_key)
+            .one()
+            .codearts_config_json
+        )
+        self.assertEqual(stored["password"], "saved-password")
+        self.assertEqual(stored["devops_url"], "https://new.example.com")
+        self.assertEqual(stored["project_name"], "修正后的项目名称")
+        self.db.refresh(existing_repo)
+        renamed_detail = json.loads(existing_repo.repo_detail_json)
+        self.assertEqual(renamed_detail["name"], "修正后的项目名称")
+        self.assertEqual(renamed_detail["project_name"], "修正后的项目名称")
 
 
 if __name__ == "__main__":

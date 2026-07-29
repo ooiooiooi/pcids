@@ -8,6 +8,7 @@ from unittest.mock import ANY, MagicMock, patch
 from backend.routers.tasks import (
     _build_task_codearts_download_auth,
     _download_repository_artifact_to_local_storage,
+    _download_repository_artifact_to_server_storage,
     _ensure_repository_local_file_available_for_runtime,
     _refresh_repository_artifact_after_key_failure,
     _resolve_artifact_storage_mode,
@@ -96,6 +97,88 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
 
     def test_codearts_uses_server_storage_for_agent_burner(self):
         self.assertEqual(_resolve_artifact_storage_mode("codearts", "agent", "http://192.168.1.20:8000"), "server")
+
+    def test_web_codearts_server_storage_uses_browser_session_download(self):
+        repo = SimpleNamespace(
+            id=31,
+            project_key="proj_web",
+            name="firmware.bin",
+            download_uri="https://devops.example.com/download?id=file&signature=secret",
+            file_detail_json="{}",
+            file_url=None,
+            md5=None,
+            sha256=None,
+            size=None,
+        )
+        stored_artifact = SimpleNamespace(
+            md5="web-md5",
+            sha256="web-sha256",
+            plaintext_size=256,
+            to_storage_metadata=lambda: {"encrypted": True},
+        )
+        db = MagicMock()
+        current_user = SimpleNamespace(id=1, username="admin")
+        location_state = {
+            "local_exists": False,
+            "local_path": None,
+            "server_exists": False,
+            "server_path": None,
+            "server_target": None,
+        }
+
+        with patch(
+            "backend.routers.tasks.repository_to_dict",
+            return_value={
+                "download_uri": repo.download_uri,
+                "private_source": "web",
+                "file_detail": {},
+            },
+        ), patch(
+            "backend.routers.tasks._get_project_codearts_config",
+            return_value={
+                "enabled": True,
+                "repository_mode": "private",
+                "private_source": "web",
+                "project_id": "web",
+            },
+        ), patch(
+            "backend.routers.tasks._encrypt_codearts_web_download",
+            return_value=(stored_artifact, []),
+        ) as web_download, patch(
+            "backend.routers.tasks._build_task_codearts_download_auth",
+        ) as api_auth, patch(
+            "backend.routers.tasks._get_repository_download_root",
+            return_value=r"E:\PCIDS\data\repositories",
+        ), patch(
+            "backend.routers.tasks.build_encrypted_artifact_path",
+            return_value=r"E:\PCIDS\data\repositories\firmware.bin.pcenc",
+        ), patch(
+            "backend.routers.tasks._get_repository_server_transport_config",
+            return_value={
+                "transport": "local",
+                "host": "",
+                "port": 0,
+                "username": "",
+                "password": "",
+                "server_os": "windows",
+            },
+        ), patch(
+            "backend.routers.tasks._get_repository_download_config",
+            return_value={},
+        ), patch(
+            "backend.routers.tasks._get_repository_server_storage_root",
+            return_value=r"E:\PCIDS\data\server",
+        ), patch(
+            "backend.routers.tasks._get_repository_location_state",
+            return_value=location_state,
+        ), patch("backend.routers.tasks._apply_repository_location_state"):
+            result = _download_repository_artifact_to_server_storage(db, repo, current_user)
+
+        self.assertIs(result, repo)
+        self.assertEqual(repo.sha256, "web-sha256")
+        api_auth.assert_not_called()
+        self.assertEqual(web_download.call_args.kwargs["download_uri"], repo.download_uri)
+        self.assertTrue(str(web_download.call_args.kwargs["trace_id"]).startswith("task-artifact-server-"))
 
     def test_server_source_keeps_server_storage(self):
         self.assertEqual(_resolve_artifact_storage_mode("server", "local", None), "server")

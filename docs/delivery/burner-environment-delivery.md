@@ -8,9 +8,9 @@
 
 PCIDS 的完整环境不是一个安装包，而是以下四部分：
 
-1. **PCIDS 主程序**：Electron 前端和内置后端。
-2. **随程序打包的小型运行时**：HDSC、ST-LINK Utility CLI、Gowin、AL321 openFPGALoader、通信协议 SDK 等。
-3. **独立离线烧录环境**：J-Link、pyOCD、GD-Link、驱动包等，统一放在 `D:\PCIDS-Deploy\burners`。
+1. **PCIDS 轻量主程序**：Electron 前端、内置后端和部署入口脚本；安装包不再携带任何厂商烧录工具、驱动或通信协议 SDK。
+2. **独立离线烧录环境**：HDSC、ST-LINK、J-Link、pyOCD、GD-Link、Gowin、AL321、XDS510plus 等先暂存在 `D:\PCIDS-Deploy\burners`。
+3. **外置通信与 Web 运行组件**：通信协议适配器和 CodeArts Web 组件也先放入 `D:\PCIDS-Deploy`；主程序安装完成后，部署脚本再复制到软件安装目录的 `resources\tools` 下。
 4. **大型厂商软件**：Vitis/Vivado、MPLAB X、Quartus、CCS。这些不能只复制快捷方式，必须安装完整组件并注册驱动。
 
 推荐所有新工作站都使用相同目录：
@@ -29,6 +29,13 @@ D:\PCIDS-Deploy\
     ST-LINK\
     SWD_Downloader\
     XDS510plus\
+  protocol_adapters\
+    CH347\
+    USBCANFD-200U\
+    ZQWL\
+  codearts_browser_runtime\
+    codearts_web_session.js
+    node_modules\
   drivers\
     MOXA\
   installers\
@@ -41,7 +48,7 @@ D:\PCIDS-Deploy\
   install-burner-drivers.ps1
 ```
 
-不要只复制 `PCIDS.exe`。缺少 `resources\backend`、`resources\tools` 或上述外部目录时，界面可能能启动，但烧录和通信协议验证会在执行时失败。
+不要只复制 `PCIDS.exe`。安装包只负责主程序；每次部署新机器都必须另外传输上述三个目录。主程序安装完成后运行 `deploy-target-workstation.ps1 -Phase Configure`，脚本会将它们复制到 `C:\Program Files\pcids\resources\tools` 并写入机器级环境变量。程序优先从自己的安装位置查找，`D:\PCIDS-Deploy` 只作为传输暂存区。
 
 ## 2. 新机器部署前准备清单
 
@@ -562,10 +569,10 @@ Get-CimInstance Win32_SerialPort |
 
 ### 5.2 WCH CH347 GPIO
 
-PCIDS 打包内容：
+安装后通信适配器位置：
 
 ```text
-resources\tools\protocol_adapters\CH347\ch347_gpio_probe.py
+C:\Program Files\pcids\resources\tools\protocol_adapters\CH347\ch347_gpio_probe.py
 ```
 
 目标机还必须安装 WCH 官方驱动，并出现可用 COM 口。只有脚本、没有 WCH 驱动时，界面无法连接实际 GPIO。
@@ -575,16 +582,16 @@ resources\tools\protocol_adapters\CH347\ch347_gpio_probe.py
 目标机必须同时具备以下四层环境，缺一项都不能以“设备管理器能看到设备”判定部署成功：
 
 1. **ZLG 官方 USB 驱动**：设备管理器中 `USB\VID_3068&PID_0009` 状态正常。
-2. **ZLG x64 SDK**：安装包内包含 `zlgcan.dll`、`kerneldlls` 及 `sdk-manifest.json`。
+2. **ZLG x64 SDK**：外置协议适配器目录包含 `zlgcan.dll`、`kerneldlls` 及 `sdk-manifest.json`。
 3. **Microsoft Visual C++ 2013 Redistributable x64**：ZLG x64 SDK 依赖 `msvcp120.dll` 和 `msvcr120.dll`。只安装 VC++ 2015–2022 或只安装 x86 版不能替代。
-4. **PCIDS 协议适配器目录**：打包程序必须把 `resources\tools\protocol_adapters` 一并交付，并由 `PCIDS_PROTOCOL_ADAPTERS_DIR` 指向该目录。
+4. **PCIDS 协议适配器目录**：部署时先传输 `D:\PCIDS-Deploy\protocol_adapters`，安装完成后复制到软件目录，并由 `PCIDS_PROTOCOL_ADAPTERS_DIR` 指向安装位置。
 
-PCIDS 安装包中必须包含：
+外置协议适配器目录中必须包含：
 
 ```text
-resources\tools\protocol_adapters\USBCANFD-200U\sdk-manifest.json
-resources\tools\protocol_adapters\USBCANFD-200U\official_zlg\...\zlgcan.dll
-resources\tools\protocol_adapters\USBCANFD-200U\official_zlg\...\kerneldlls\
+C:\Program Files\pcids\resources\tools\protocol_adapters\USBCANFD-200U\sdk-manifest.json
+C:\Program Files\pcids\resources\tools\protocol_adapters\USBCANFD-200U\official_zlg\...\zlgcan.dll
+C:\Program Files\pcids\resources\tools\protocol_adapters\USBCANFD-200U\official_zlg\...\kerneldlls\
 ```
 
 当前 SDK 清单状态应为：
@@ -778,6 +785,30 @@ PCIDS 用户数据通常位于：
 2. 确认后台进程已结束。
 3. 备份整个 `%APPDATA%\PCIDS`，不能只备份 `app_data.db` 而漏掉仍有数据的 WAL。
 
+### 单一数据库规则
+
+安装版只允许使用一份 `app_data.db`：
+
+- 首次启动时在 `%ProgramData%\PCIDS\data-root.json` 写入机器级数据目录锁定记录。
+- 已升级机器若在原 `%APPDATA%\PCIDS` 中存在数据库，会锁定并继续使用该原库，不会新建空库。
+- 全新机器默认使用 `%ProgramData%\PCIDS\app_data.db`。
+- 后端同时收到固定的 `PCIDS_DATA_DIR` 与 `DB_PATH`，Windows 登录用户、管理员权限和安装目录变化都不会改变数据库位置。
+- 若已知目录中同时检测到两份数据库，程序会停止启动并明确列出冲突路径；禁止静默选择或创建第三份数据库。
+- 安装程序会为 `%ProgramData%\PCIDS` 配置普通工作站用户的修改权限。
+
+排障时先检查 `%ProgramData%\PCIDS\data-root.json`，再检查其中 `dataRoot` 指向的唯一数据库。不要手工复制单个 `app_data.db`；在线数据库启用 WAL 时，应使用 SQLite 在线备份或在后端完全退出后整体备份数据目录。
+
+### 运行日志目录规则
+
+安装版的桌面启动日志和后端运行日志统一写入“实际安装目录下的 `logs`”，路径必须由当前程序 EXE 的所在目录动态计算，禁止写死盘符或 `C:\Program Files\pcids`。例如软件安装在 `D:\Applications\pcids` 时，日志目录应自动变为 `D:\Applications\pcids\logs`。
+
+- `logs\desktop-backend-startup.log`：桌面程序拉起、监控和恢复后端时的输出。
+- `logs\backend.log`：后端服务的运行日志。
+- 安装程序必须为实际的 `$INSTDIR\logs` 配置工作站用户写入权限。
+- 开发模式仍使用用户数据目录下的 `logs`，不污染源码目录。
+
+验收时应完全退出并重新打开软件，确认上述两个文件在实际安装目录中产生新时间戳；不能只检查目录是否存在。
+
 示例：
 
 ```powershell
@@ -845,6 +876,8 @@ Copy-Item `
 ```powershell
 $names = @(
   "PCIDS_BUNDLED_TOOLS_DIR",
+  "PCIDS_PROTOCOL_ADAPTERS_DIR",
+  "PCIDS_CODEARTS_WEB_RUNTIME",
   "STLINK_UTILITY_CLI",
   "JLINK_EXE",
   "PYOCD_EXE",

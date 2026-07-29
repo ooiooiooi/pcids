@@ -87,12 +87,15 @@ async def get_current_user(
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
+        token_version = int(payload.get("ver", -1))
         token_data = TokenData(username=username)
-    except JWTError:
+    except (JWTError, TypeError, ValueError):
         raise credentials_exception
 
     user = db.query(User).filter(User.username == token_data.username).first()
     if user is None:
+        raise credentials_exception
+    if token_version != int(user.token_version or 0):
         raise credentials_exception
 
     if user.status != 1:
@@ -193,7 +196,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     # 创建 Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.username, "uid": user.id},
+        data={"sub": user.username, "uid": user.id, "ver": int(user.token_version or 0)},
         expires_delta=access_token_expires
     )
 
@@ -220,6 +223,7 @@ async def logout(request: Request, db: Session = Depends(get_db), current_user: 
         result="登出成功"
     ))
     current_user.last_active_at = None
+    current_user.token_version = int(current_user.token_version or 0) + 1
     db.commit()
     return {"code": 0, "message": "success", "data": None}
 
@@ -263,6 +267,7 @@ async def update_password(request_data: UpdatePasswordRequest, db: Session = Dep
     from passlib.context import CryptContext
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
     current_user.password_hash = pwd_context.hash(request_data.new_password)
+    current_user.token_version = int(current_user.token_version or 0) + 1
     db.commit()
     return {"code": 0, "message": "success", "data": None}
 

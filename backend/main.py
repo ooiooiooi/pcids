@@ -11,6 +11,8 @@ from starlette.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
+import contextvars
+import functools
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import json
@@ -20,6 +22,19 @@ import tempfile
 import time
 from urllib.parse import parse_qs
 import uvicorn
+
+# Python 3.8 is the last CPython release supported on Windows 7, while
+# asyncio.to_thread was introduced in Python 3.9.  Install the same behavior
+# before importing routers so every existing async hardware/repository call can
+# keep using the shared API in the Win7 packaged backend.
+if not hasattr(asyncio, "to_thread"):
+    async def _asyncio_to_thread_compat(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+        call = functools.partial(context.run, func, *args, **kwargs)
+        return await loop.run_in_executor(None, call)
+
+    asyncio.to_thread = _asyncio_to_thread_compat
 
 from backend.utils.db import init_db, SessionLocal
 from backend.utils.deployment_readiness import build_windows_deployment_readiness
@@ -34,6 +49,16 @@ from backend.models.log import OperationLog
 from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, messages, dashboard
 from backend.routers.auth import SECRET_KEY, ALGORITHM
 from jose import jwt, JWTError
+
+class _CodeArtsDiagnosticFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return (
+            message.startswith("repository.codearts")
+            or message.startswith("task.artifact")
+            or message.startswith("task.execution.server_transfer")
+        )
+
 
 def _resolve_log_dir() -> Path:
     candidates: list[Path] = []
@@ -73,6 +98,7 @@ def configure_logging():
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     log_dir = _resolve_log_dir()
     log_file = log_dir / "backend.log"
+    codearts_log_file = log_dir / "codearts-web.log"
 
     root_logger.setLevel(level)
 
@@ -102,10 +128,39 @@ def configure_logging():
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
 
+    codearts_handler_exists = any(
+        isinstance(handler, TimedRotatingFileHandler)
+        and Path(getattr(handler, "baseFilename", "")) == codearts_log_file
+        for handler in root_logger.handlers
+    )
+    if not codearts_handler_exists:
+        codearts_handler = TimedRotatingFileHandler(
+            filename=codearts_log_file,
+            when="midnight",
+            interval=1,
+            backupCount=14,
+            encoding="utf-8",
+        )
+        codearts_handler.setLevel(level)
+        codearts_handler.setFormatter(formatter)
+        codearts_handler.addFilter(_CodeArtsDiagnosticFilter())
+        root_logger.addHandler(codearts_handler)
+
 
 configure_logging()
 logger = logging.getLogger(__name__)
-_SENSITIVE_LOG_KEYS = {"password", "token", "download_password", "authorization", "access_token", "refresh_token"}
+_SENSITIVE_LOG_KEYS = {
+    "password",
+    "login_password",
+    "private_key",
+    "private_key_content",
+    "ssh_private_key",
+    "token",
+    "download_password",
+    "authorization",
+    "access_token",
+    "refresh_token",
+}
 _MAX_BODY_SUMMARY_LENGTH = 1000
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIST_DIR = PROJECT_ROOT / "dist"
@@ -174,8 +229,17 @@ def _sanitize_log_data(value):
     if isinstance(value, dict):
         sanitized = {}
         for k, v in value.items():
-            if str(k).lower() in _SENSITIVE_LOG_KEYS:
+            normalized_key = str(k).lower()
+            if normalized_key in _SENSITIVE_LOG_KEYS:
                 sanitized[k] = "***"
+            elif normalized_key == "config" and isinstance(v, str):
+                try:
+                    sanitized[k] = json.dumps(
+                        _sanitize_log_data(json.loads(v)),
+                        ensure_ascii=False,
+                    )
+                except (TypeError, ValueError):
+                    sanitized[k] = "***"
             else:
                 sanitized[k] = _sanitize_log_data(v)
         return sanitized
@@ -451,6 +515,7 @@ async def lifespan(app: FastAPI):
     init_db()
     tasks.recover_interrupted_tasks()
     repositories.recover_repository_auto_sync_jobs()
+    await injections.recover_interrupted_injections()
     logger.info("startup.core.ready | elapsed_seconds=%.3f", time.monotonic() - startup_started_at)
     print("数据库初始化完成")
 
@@ -465,6 +530,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await injections.shutdown_active_injections()
         protocol_tests.cleanup_protocol_session_resources()
         if diagnostics_task.done():
             try:

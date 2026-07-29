@@ -6,12 +6,34 @@
 
 ## 通用调用方式
 
-安装包会在机器环境变量中写入 `PCIDS_FLASH_ADAPTER`。升级 PCIDS 后，需要重启 CodeArts Agent 服务，使服务进程读取新变量。
+安装包会在机器环境变量中写入 `PCIDS_FLASH_ADAPTER`。升级或移动 PCIDS 后，必须确认该变量指向当前真实存在的 `pcids-flash.cmd`，再重启 CodeArts Agent 服务（或当前 Agent Java 进程），使新进程读取机器环境变量。仅在当前 PowerShell 窗口修改 `$env:PCIDS_FLASH_ADAPTER` 不能保证 CodeArts Agent 收到该值。
+
+Windows Agent 启动前先在管理员 PowerShell 中检查：
+
+```powershell
+$adapter = [Environment]::GetEnvironmentVariable('PCIDS_FLASH_ADAPTER', 'Machine')
+if (-not $adapter -or -not (Test-Path -LiteralPath $adapter -PathType Leaf)) {
+  throw "Machine PCIDS_FLASH_ADAPTER is invalid: $adapter"
+}
+if (-not (Test-Path -LiteralPath 'C:\Program Files\Git\usr\bin\nohup.exe' -PathType Leaf)) {
+  throw 'Git for Windows usr\bin\nohup.exe is missing.'
+}
+```
+
+CodeArts 的“执行 Shell 命令”会先通过 `nohup` 启动 Git Bash。Agent 进程的 `PATH` 至少应包含 `C:\Program Files\Git\usr\bin`、`C:\Program Files\Git\bin`、`C:\Program Files\Git\cmd` 和 `C:\Program Files\Git\mingw64\bin`；缺少 `usr\bin` 时，命令还未进入适配器就会报 `Cannot run program "nohup"`。
 
 在 CodeArts 的 **执行 Shell 命令** 步骤中使用 Git Bash；前置“下载发布仓库包”步骤必须先把制品下载到 `$WORKSPACE`。不要把命令再包进 `cmd.exe /c call`。
 
 ```bash
 [ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "PW-LINK" --target-chip "STM32F107VCT6" --board "STM32F107VCT6" --burner-sn "427427618AA11689D7012DB4818082D1" --firmware "$WORKSPACE/pcids_stm32f107_can_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+```
+
+首次接入时先执行不会写板的链路检查：
+
+```bash
+command -v nohup >/dev/null || { echo '[ERROR] nohup is missing from Agent PATH.'; exit 2; }
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo '[ERROR] PCIDS_FLASH_ADAPTER is missing.'; exit 2; }
+"$PCIDS_FLASH_ADAPTER" list-burners
 ```
 
 在已明确选择 Windows PowerShell 执行器时，使用以下公共开头；每个示例末尾的 `exit $LASTEXITCODE` 必须保留。
@@ -52,25 +74,27 @@ $logDir = "$env:WORKSPACE\pcids-logs"
 
 ## 可直接复制的 PowerShell 示例
 
+`PCIDS_FLASH_ADAPTER` 指向 `.cmd` 包装器，PowerShell 参数还会经过一层 `cmd.exe` 解析。因此，本节 `--config-json` 参数中的 JSON 双引号必须写成 `\"`；如果直接写成 `'{"key":"value"}'`，双引号会在进入 Python 适配器前丢失。后面的 Git Bash 示例不需要这种反斜杠转义。
+
 ### ST-LINK
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'ST-LINK' --target-chip 'STM32F407VGT6' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_STLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":4000,"completion_action":"复位运行"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'ST-LINK' --target-chip 'STM32F429ZIT6' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_STLINK_SN' --config-json '{\"interface_type\":\"SWD\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":4000,\"completion_action\":\"复位运行\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
-`.bin` 固件把 JSON 改为：
+`.bin` 固件把 PowerShell 参数值改为：
 
-```json
-{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":4000,"start_address":"0x08000000","completion_action":"复位运行"}
+```powershell
+'{\"interface_type\":\"SWD\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":4000,\"start_address\":\"0x08000000\",\"completion_action\":\"复位运行\"}'
 ```
 
 ### J-LINK
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'J-LINK' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_JLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":4000,"completion_action":"复位运行"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'J-LINK' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_JLINK_SN' --config-json '{\"interface_type\":\"SWD\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":4000,\"completion_action\":\"复位运行\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -78,7 +102,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'PW-LINK' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_PWLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'PW-LINK' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_PWLINK_SN' --config-json '{\"interface_type\":\"SWD\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":1000,\"completion_action\":\"复位运行\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -86,7 +110,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'GDLINK' --target-chip 'REPLACE_GD32_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_GDLINK_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'GDLINK' --target-chip 'REPLACE_GD32_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_GDLINK_SN' --config-json '{\"interface_type\":\"SWD\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":1000,\"completion_action\":\"复位运行\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -96,7 +120,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'SWD下载器' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_SWD_SN' --config-json '{"interface_type":"SWD","erase_mode":"全片擦除","write_speed_khz":1000,"completion_action":"复位运行"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'SWD下载器' --target-chip 'REPLACE_ARM_CHIP' --board 'REPLACE_BOARD_NAME' --burner-sn 'REPLACE_SWD_SN' --config-json '{\"interface_type\":\"SWD\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":1000,\"completion_action\":\"复位运行\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -104,17 +128,17 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'HDSC CCID' --target-chip 'HC32L130J8TA' --board 'REPLACE_HDSC_BOARD' --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":115200,"completion_action":"复位运行"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'HDSC CCID' --target-chip 'HC32L130J8TA' --config-json '{\"interface_type\":\"UART\",\"erase_mode\":\"全片擦除\",\"write_speed_khz\":115200,\"completion_action\":\"复位运行\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
-`write_speed_khz` 在 HDSC 中实际是 UART 波特率。当前脚本会自动选择唯一连接的 CCID Writer，不传 `--burner-sn`。
+`write_speed_khz` 在 HDSC 中实际是 UART 波特率。当前脚本会自动选择唯一连接的 CCID Writer，不传 `--burner-sn`；`--board` 仅用于日志追溯，所以示例不传占位板卡名。HDSC 脚本不读取 `write_verify`，不得把它加入 `--config-json`。
 
 ### XDS510plus / TMS320F28335
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.out"
-& $adapter run --burner 'XDS510plus' --target-chip 'TMS320F28335' --board 'REPLACE_DSP_BOARD' --config-json '{"target_config_file":""}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'XDS510plus' --target-chip 'TMS320F28335' --board 'REPLACE_DSP_BOARD' --config-json '{\"target_config_file\":\"\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -124,7 +148,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.hex"
-& $adapter run --burner 'MPLAB ICD 3 DV164035' --target-chip 'REPLACE_PIC_CHIP' --board 'REPLACE_PIC_BOARD' --config-json '{"erase_mode":"全片擦除","eeprom_write":"否","blank_check":"否","execute_program":"是","completion_action":"编程复位后运行","write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'MPLAB ICD 3 DV164035' --target-chip 'REPLACE_PIC_CHIP' --board 'REPLACE_PIC_BOARD' --config-json '{\"erase_mode\":\"全片擦除\",\"eeprom_write\":\"否\",\"blank_check\":\"否\",\"execute_program\":\"是\",\"completion_action\":\"编程复位后运行\",\"write_verify\":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -132,7 +156,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.bit"
-& $adapter run --burner 'AL321' --target-chip 'REPLACE_XILINX_PART' --board 'REPLACE_FPGA_BOARD' --burner-sn 'REPLACE_AL321_SN' --config-json '{"execution_operation":"SRAM下载"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'AL321' --target-chip 'REPLACE_XILINX_PART' --board 'REPLACE_FPGA_BOARD' --burner-sn 'REPLACE_AL321_SN' --config-json '{\"execution_operation\":\"SRAM下载\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -140,7 +164,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\BOOT.bin"
-& $adapter run --burner 'AL321' --target-chip 'REPLACE_XILINX_PART' --board 'REPLACE_FPGA_BOARD' --burner-sn 'REPLACE_AL321_SN' --config-json '{"execution_operation":"Flash固化","qspi_flash_model":"qspi-x4-single","target_config_file":"D:\\PCIDS-AgentData\\REPLACE_FSBL.elf","start_address":"0x0"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'AL321' --target-chip 'REPLACE_XILINX_PART' --board 'REPLACE_FPGA_BOARD' --burner-sn 'REPLACE_AL321_SN' --config-json '{\"execution_operation\":\"Flash固化\",\"qspi_flash_model\":\"qspi-x4-single\",\"target_config_file\":\"D:\\PCIDS-AgentData\\REPLACE_FSBL.elf\",\"start_address\":\"0x0\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -150,7 +174,7 @@ Flash 固化必须使用 `.bin` 固件和 Agent 本地 `.elf`。不要传 `erase
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.sof"
-& $adapter run --burner 'Altera Blaster II' --script 'altera_blaster_ii_fpga_flash' --target-chip 'REPLACE_INTEL_FPGA_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{"cable_index":0,"write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'Altera Blaster II' --script 'altera_blaster_ii_fpga_flash' --target-chip 'REPLACE_INTEL_FPGA_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{\"cable_index\":0,\"write_verify\":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -158,7 +182,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.pof"
-& $adapter run --burner 'Altera Blaster II' --script 'altera_blaster_ii_cpld_flash' --target-chip 'REPLACE_CPLD_PART' --board 'REPLACE_CPLD_BOARD' --config-json '{"cable_index":0,"write_verify":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'Altera Blaster II' --script 'altera_blaster_ii_cpld_flash' --target-chip 'REPLACE_CPLD_PART' --board 'REPLACE_CPLD_BOARD' --config-json '{\"cable_index\":0,\"write_verify\":true}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -168,7 +192,7 @@ exit $LASTEXITCODE
 
 ```powershell
 $firmware = "$env:WORKSPACE\Project.fs"
-& $adapter run --burner 'Gowin USB Cable' --target-chip 'REPLACE_GOWIN_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{"execution_operation":"Flash固化","cable_index":1,"tck_frequency":"1MHz","write_verify":true,"completion_action":"不处理"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
+& $adapter run --burner 'Gowin USB Cable' --target-chip 'REPLACE_GOWIN_PART' --board 'REPLACE_FPGA_BOARD' --config-json '{\"execution_operation\":\"Flash固化\",\"cable_index\":1,\"tck_frequency\":\"1MHz\",\"write_verify\":true,\"completion_action\":\"不处理\"}' --firmware $firmware --run-id $env:BUILD_ID --log-dir $logDir
 exit $LASTEXITCODE
 ```
 
@@ -181,8 +205,10 @@ exit $LASTEXITCODE
 ### HDSC CCID
 
 ```bash
-[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "HDSC CCID" --target-chip "HC32L130J8TA" --board "REPLACE_HDSC_BOARD" --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":115200,"completion_action":"复位运行"}' --firmware "$WORKSPACE/hc32l130j8ta_led_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
+[ -n "$PCIDS_FLASH_ADAPTER" ] || { echo "[ERROR] PCIDS_FLASH_ADAPTER is missing."; exit 2; }; "$PCIDS_FLASH_ADAPTER" run --burner "HDSC CCID" --target-chip "HC32L130J8TA" --config-json '{"interface_type":"UART","erase_mode":"全片擦除","write_speed_khz":115200,"completion_action":"复位运行"}' --firmware "$WORKSPACE/hc32l130j8ta_led_test.hex" --run-id "$BUILD_ID" --log-dir "$WORKSPACE/pcids-logs"
 ```
+
+先验证 CodeArts → Agent → Adapter → HDSC 脚本选择链路时，在上述命令末尾临时追加 `--dry-run`。成功日志必须同时出现 `event:"started"`、`script:"hdsc_ccid_arm_mcu_flash"`、`event:"completed"` 和 `message:"dry run completed"`；确认后删除 `--dry-run`，否则后续任务不会真实烧录。
 
 ### XDS510plus
 

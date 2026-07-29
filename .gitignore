@@ -113,6 +113,13 @@ frontend_source*.docx
 release-win7-private/
 tools/*
 !tools/build-backend.mjs
+!tools/codearts_release_debugger/
+tools/codearts_release_debugger/*
+!tools/codearts_release_debugger/browser_runtime/
+tools/codearts_release_debugger/browser_runtime/*
+!tools/codearts_release_debugger/browser_runtime/codearts_web_session.js
+!tools/codearts_release_debugger/browser_runtime/package.json
+!tools/codearts_release_debugger/browser_runtime/package-lock.json
 !tools/burners/
 tools/burners/*
 !tools/burners/AL321/

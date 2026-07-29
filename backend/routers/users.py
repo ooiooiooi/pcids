@@ -20,7 +20,7 @@ from backend.schemas import (
 from backend.routers.auth import get_current_user
 from backend.models.role import Role
 from backend.utils.datetime_utils import database_time_to_local
-from backend.utils.permission import require_permission
+from backend.utils.permission import ensure_role_assignable, require_permission
 from backend.utils.notifications import create_structured_message
 
 router = APIRouter()
@@ -173,6 +173,7 @@ async def kick_user(
         raise HTTPException(status_code=404, detail="用户不存在")
         
     user.last_active_at = None
+    user.token_version = int(user.token_version or 0) + 1
     db.commit()
     
     return {
@@ -299,6 +300,9 @@ async def create_user(
     display_name = _validate_display_name(user_data.display_name or user_data.username)
     username = _validate_username(user_data.username, db)
     password = _validate_password(user_data.password, username)
+    role = db.query(Role).filter(Role.id == user_data.role_id).first() if user_data.role_id else None
+    if user_data.role_id:
+        ensure_role_assignable(db, current_user, role)
 
     # 创建用户
     user = User(
@@ -310,7 +314,6 @@ async def create_user(
         status=user_data.status if user_data.status is not None else 1,
     )
     db.add(user)
-    role = db.query(Role).filter(Role.id == user.role_id).first() if user.role_id else None
     role_name = role.name if role else "-"
     status_text = "账号已启用" if user.status == 1 else "账号已禁用"
     create_structured_message(
@@ -351,6 +354,8 @@ async def update_user(
     if user_data.email is not None:
         user.email = user_data.email
     if user_data.role_id is not None:
+        next_role = db.query(Role).filter(Role.id == user_data.role_id).first()
+        ensure_role_assignable(db, current_user, next_role)
         user.role_id = user_data.role_id
     if user_data.status is not None:
         user.status = user_data.status
@@ -453,6 +458,7 @@ async def reset_password(
 
     reset_password_value = _ensure_reset_password_constant()
     user.password_hash = pwd_context.hash(reset_password_value)
+    user.token_version = int(user.token_version or 0) + 1
     db.commit()
     db.refresh(user)
 

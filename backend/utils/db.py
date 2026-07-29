@@ -2368,6 +2368,7 @@ def _ensure_schema_uncached():
     ensure_column("repositories", "repo_detail_json", "TEXT")
     ensure_column("repositories", "file_detail_json", "TEXT")
     ensure_column("users", "codearts_config_json", "TEXT")
+    ensure_column("users", "token_version", "INTEGER NOT NULL DEFAULT 0")
     ensure_column("repository_project_settings", "codearts_config_json", "TEXT")
     ensure_column("repository_project_settings", "auto_sync_state_json", "TEXT")
     ensure_column("repository_project_settings", "auto_sync_last_job_id", "INTEGER")
@@ -2800,6 +2801,19 @@ def _has_existing_business_data() -> bool:
     return False
 
 
+def _sync_recurring_application_data(db):
+    """Apply idempotent data migrations on every application startup."""
+    init_menus_and_permissions(db)
+    ensure_default_role_permissions(db)
+    sync_historical_task_durations(db)
+    migrate_legacy_task_terminated_statuses(db)
+    sync_menu_sort_order(db)
+    sync_device_menu_labels(db)
+    ensure_task_numbers(db)
+    ensure_injection_run_numbers(db)
+    ensure_protocol_session_numbers(db)
+
+
 def init_db():
     """初始化数据库，创建所有表"""
     from backend.models.base import Base
@@ -2809,6 +2823,7 @@ def init_db():
     if _is_initial_seed_completed():
         db = SessionLocal()
         try:
+            _sync_recurring_application_data(db)
             ensure_default_system_scripts(db)
             ensure_script_task_types(db)
             ensure_default_products(db)
@@ -2821,6 +2836,7 @@ def init_db():
     if _has_existing_business_data():
         db = SessionLocal()
         try:
+            _sync_recurring_application_data(db)
             # 旧版本数据库首次升级时也必须立即同步权威系统脚本。
             # 否则仅写入初始化标记会导致新脚本/新默认参数要到下次启动才生效。
             ensure_default_system_scripts(db)

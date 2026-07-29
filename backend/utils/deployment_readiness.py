@@ -18,7 +18,7 @@ from backend.utils.app_paths import get_repository_download_root_path
 from backend.utils.runtime_dependencies import build_burner_tool_readiness
 
 
-SUPPORTED_WINDOWS_RELEASES = {"10", "11"}
+SUPPORTED_WINDOWS_RELEASES = {"7", "10", "11"}
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,12 @@
   ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" "Common AppData"
   StrCpy $1 "$0\PCIDS"
   CreateDirectory "$1"
+  DetailPrint "Granting workstation users access to the single PCIDS data directory..."
+  ExecWait '"$SYSDIR\icacls.exe" "$1" /grant "*S-1-5-32-545:(OI)(CI)M" /T /C' $9
+  ${If} $9 != 0
+    MessageBox MB_ICONSTOP "Failed to set PCIDS data directory permissions. Exit code: $9$\r$\nPath: $1"
+    Abort
+  ${EndIf}
   IfFileExists "$1\agent-discovery.yaml" +3 0
     SetOutPath "$1"
     File /oname=agent-discovery.yaml "${PROJECT_DIR}\backend\config\agent-discovery.yaml"

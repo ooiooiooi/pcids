@@ -1,10 +1,10 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from backend.routers.repositories import _require_project_permission
+from backend.routers.repositories import _ensure_project_member_seed, _require_project_permission
 
 
 class RepositoryProjectPermissionTests(unittest.TestCase):
@@ -44,6 +44,32 @@ class RepositoryProjectPermissionTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 403)
         self.assertEqual(context.exception.detail, "无项目权限")
+
+    def test_non_admin_cannot_claim_an_unseeded_existing_project(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        self.user.id = 9
+
+        with self.assertRaises(HTTPException) as context:
+            _ensure_project_member_seed(db, "proj_existing", self.user)
+
+        self.assertEqual(context.exception.status_code, 403)
+        db.add.assert_not_called()
+
+    def test_new_project_creator_can_seed_membership_explicitly(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        self.user.id = 9
+
+        _ensure_project_member_seed(
+            db,
+            "proj_new",
+            self.user,
+            allow_creator=True,
+        )
+
+        db.add.assert_called_once()
+        db.commit.assert_called_once_with()
 
 
 if __name__ == "__main__":
