@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 from datetime import datetime
+import asyncio
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import json
@@ -415,29 +416,61 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
 
         return response
 
+def _run_startup_diagnostics() -> None:
+    """Run non-critical workstation probes without delaying API readiness."""
+    started_at = time.monotonic()
+    try:
+        configured_tools = configure_bundled_tools()
+        recover_pending_al321_driver_state()
+        logger.info("runtime.dependencies | %s", json.dumps(build_runtime_dependency_report(), ensure_ascii=False))
+        if configured_tools:
+            logger.info("runtime.bundled_tools_configured | %s", json.dumps(configured_tools, ensure_ascii=False))
+        logger.info("deployment.readiness | %s", json.dumps(build_windows_deployment_readiness(), ensure_ascii=False))
+        logger.info(
+            "repository.download_config | %s",
+            json.dumps(repositories.get_repository_download_config_summary(), ensure_ascii=False),
+        )
+    except Exception:
+        # Burner/tool readiness is diagnostic information. A missing or slow
+        # vendor runtime must never prevent the core API from starting.
+        logger.exception("startup.diagnostics.failed")
+    finally:
+        logger.info("startup.diagnostics.finished | elapsed_seconds=%.3f", time.monotonic() - started_at)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    configured_tools = configure_bundled_tools()
-    recover_pending_al321_driver_state()
-    logger.info("runtime.dependencies | %s", json.dumps(build_runtime_dependency_report(), ensure_ascii=False))
-    if configured_tools:
-        logger.info("runtime.bundled_tools_configured | %s", json.dumps(configured_tools, ensure_ascii=False))
+    startup_started_at = time.monotonic()
+    logger.info("startup.core.begin")
     try:
         logger.info("artifact.master_key.ready | %s", json.dumps(describe_artifact_master_key_source(), ensure_ascii=False))
     except MasterKeyError:
         logger.exception("artifact.master_key.init_failed")
         raise
-    logger.info("deployment.readiness | %s", json.dumps(build_windows_deployment_readiness(), ensure_ascii=False))
-    logger.info("repository.download_config | %s", json.dumps(repositories.get_repository_download_config_summary(), ensure_ascii=False))
     init_db()
     tasks.recover_interrupted_tasks()
     repositories.recover_repository_auto_sync_jobs()
+    logger.info("startup.core.ready | elapsed_seconds=%.3f", time.monotonic() - startup_started_at)
     print("数据库初始化完成")
+
+    # Do not place hardware/tool discovery before ``yield``. Uvicorn does not
+    # expose /health until lifespan startup finishes, and legacy vendor probes
+    # can take tens of seconds on fully equipped workstations.
+    diagnostics_task = asyncio.create_task(
+        asyncio.to_thread(_run_startup_diagnostics),
+        name="pcids-startup-diagnostics",
+    )
+    app.state.startup_diagnostics_task = diagnostics_task
     try:
         yield
     finally:
         protocol_tests.cleanup_protocol_session_resources()
+        if diagnostics_task.done():
+            try:
+                diagnostics_task.result()
+            except Exception:
+                logger.exception("startup.diagnostics.task_failed")
         print("应用关闭")
 
 app = FastAPI(

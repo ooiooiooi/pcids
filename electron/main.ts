@@ -8,6 +8,11 @@ import * as fs from 'fs'
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: childProcess.ChildProcess | null = null
 let backendPort: number | null = null
+let isQuitting = false
+let backendRestarting = false
+const backendOutputTail: string[] = []
+const BACKEND_START_ATTEMPTS = 3
+const BACKEND_START_TIMEOUT_MS = 120000
 
 // A second desktop instance used to race the first one for port 8000.  Each
 // instance could then terminate the other's backend while it was starting,
@@ -28,6 +33,30 @@ app.on('second-instance', () => {
 
 function getRuntimeRoot(): string {
   return app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '../../')
+}
+
+function getBackendStartupLogPath(): string {
+  return path.join(app.getPath('userData'), 'logs', 'desktop-backend-startup.log')
+}
+
+function recordBackendOutput(message: string): void {
+  const normalized = String(message || '').replace(/\r\n/g, '\n').trim()
+  if (!normalized) return
+
+  for (const line of normalized.split('\n')) {
+    backendOutputTail.push(line)
+  }
+  if (backendOutputTail.length > 120) {
+    backendOutputTail.splice(0, backendOutputTail.length - 120)
+  }
+
+  try {
+    const logPath = getBackendStartupLogPath()
+    fs.mkdirSync(path.dirname(logPath), { recursive: true })
+    fs.appendFileSync(logPath, `${new Date().toISOString()} ${normalized}\n`, 'utf8')
+  } catch (error) {
+    console.error(`Unable to persist backend startup log: ${error}`)
+  }
 }
 
 function resolveBundledToolsDir(): string {
@@ -296,16 +325,46 @@ function getErrorPageUrl(detail: string): string {
 // vendor runtimes during backend startup. Keep the startup page visible while
 // that work completes instead of turning a healthy-but-slow initialization
 // into a permanent desktop error page after only 60 seconds.
-function waitForBackend(baseUrl: string, timeoutMs = 300000): Promise<void> {
+function waitForBackend(
+  baseUrl: string,
+  backendProcess: childProcess.ChildProcess,
+  timeoutMs = BACKEND_START_TIMEOUT_MS,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
   const healthUrl = new URL('/health', baseUrl)
 
   return new Promise((resolve, reject) => {
+    let settled = false
+
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      backendProcess.off('exit', onExit)
+      backendProcess.off('error', onError)
+      if (error) reject(error)
+      else resolve()
+    }
+
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      const tail = backendOutputTail.slice(-20).join('\n')
+      finish(
+        new Error(
+          `后端进程在健康检查通过前退出（exit=${code ?? '-'}, signal=${signal ?? '-'}）` +
+            (tail ? `\n${tail}` : ''),
+        ),
+      )
+    }
+
+    const onError = (error: Error) => {
+      finish(new Error(`后端进程无法启动：${error.message}`))
+    }
+
     const check = () => {
+      if (settled) return
       const req = http.get(healthUrl, (res) => {
         if (res.statusCode === 200) {
           res.resume()
-          resolve()
+          finish()
           return
         }
         res.resume()
@@ -320,13 +379,22 @@ function waitForBackend(baseUrl: string, timeoutMs = 300000): Promise<void> {
     }
 
     const retry = () => {
+      if (settled) return
       if (Date.now() >= deadline) {
-        reject(new Error(`后端启动超时：${healthUrl.toString()}`))
+        const tail = backendOutputTail.slice(-20).join('\n')
+        finish(
+          new Error(
+            `后端启动超时：${healthUrl.toString()}` +
+              (tail ? `\n最近的后端输出：\n${tail}` : ''),
+          ),
+        )
         return
       }
       setTimeout(check, 250)
     }
 
+    backendProcess.once('exit', onExit)
+    backendProcess.once('error', onError)
     check()
   })
 }
@@ -336,10 +404,11 @@ function resolvePythonCommand(): string {
   return process.platform === 'win32' ? 'python' : 'python3'
 }
 
-function startPythonBackend(port: number) {
+function startPythonBackend(port: number): childProcess.ChildProcess {
   const backendPath = getBackendPath()
   const backendBaseUrl = getBackendBaseUrl(port)
   const runtimeRoot = getRuntimeRoot()
+  const dataRoot = app.getPath('userData')
   const backendEnv = {
     ...process.env,
     PCIDS_BACKEND_HOST: '0.0.0.0',
@@ -347,12 +416,16 @@ function startPythonBackend(port: number) {
     PCIDS_PUBLIC_BASE_URL: backendBaseUrl,
     PCIDS_ALLOWED_ORIGINS: 'http://127.0.0.1:5173,http://localhost:5173,null',
     PCIDS_BUNDLED_TOOLS_DIR: resolveBundledToolsDir(),
+    PCIDS_PROTOCOL_ADAPTERS_DIR: app.isPackaged
+      ? path.join(process.resourcesPath, 'tools', 'protocol_adapters')
+      : path.join(__dirname, '../../tools/protocol_adapters'),
     PCIDS_CODEARTS_WEB_RUNTIME: app.isPackaged
       ? path.join(process.resourcesPath, 'tools', 'codearts_browser_runtime')
       : path.join(__dirname, '../../tools/codearts_release_debugger/browser_runtime'),
     PCIDS_NODE_BIN: process.execPath,
     PCIDS_RUNTIME_ROOT: runtimeRoot,
-    PCIDS_LOG_DIR: path.join(runtimeRoot, 'logs'),
+    PCIDS_DATA_DIR: dataRoot,
+    PCIDS_LOG_DIR: path.join(dataRoot, 'logs'),
     ELECTRON_RUN_AS_NODE: '1',
   }
 
@@ -377,12 +450,97 @@ function startPythonBackend(port: number) {
     throw new Error('后端进程启动失败')
   }
 
+  const startedProcess = pythonProcess
+  recordBackendOutput(
+    `[desktop] starting backend pid=${startedProcess.pid ?? '-'} port=${port} executable=${backendPath}`,
+  )
   pythonProcess.stdout?.on('data', (data) => {
     console.log(`Backend stdout: ${data}`)
+    recordBackendOutput(`[stdout] ${String(data)}`)
   })
   pythonProcess.stderr?.on('data', (data) => {
     console.error(`Backend stderr: ${data}`)
+    recordBackendOutput(`[stderr] ${String(data)}`)
   })
+  pythonProcess.on('error', (error) => {
+    recordBackendOutput(`[desktop] backend process error: ${error.message}`)
+  })
+  pythonProcess.on('exit', (code, signal) => {
+    recordBackendOutput(`[desktop] backend exited code=${code ?? '-'} signal=${signal ?? '-'}`)
+  })
+  return startedProcess
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+function monitorRunningBackend(port: number, backendProcess: childProcess.ChildProcess): void {
+  backendProcess.once('exit', () => {
+    if (isQuitting || backendProcess !== pythonProcess) return
+    void restartBackendAfterUnexpectedExit(port)
+  })
+}
+
+async function startBackendWithRetry(): Promise<{ port: number; baseUrl: string }> {
+  let lastError: Error | null = null
+  backendOutputTail.length = 0
+
+  for (let attempt = 1; attempt <= BACKEND_START_ATTEMPTS; attempt += 1) {
+    const port = await resolveBackendPort()
+    const baseUrl = getBackendBaseUrl(port)
+    recordBackendOutput(`[desktop] backend startup attempt ${attempt}/${BACKEND_START_ATTEMPTS}`)
+    const backendProcess = startPythonBackend(port)
+    try {
+      await waitForBackend(baseUrl, backendProcess)
+      recordBackendOutput(`[desktop] backend health check passed on ${baseUrl}`)
+      monitorRunningBackend(port, backendProcess)
+      return { port, baseUrl }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      recordBackendOutput(`[desktop] backend startup attempt ${attempt} failed: ${lastError.message}`)
+      if (backendProcess.exitCode === null && backendProcess.signalCode === null) {
+        backendProcess.kill()
+      }
+      if (attempt < BACKEND_START_ATTEMPTS) {
+        await delay(attempt * 1000)
+      }
+    }
+  }
+
+  throw new Error(
+    `${lastError?.message || '后端启动失败'}\n启动日志：${getBackendStartupLogPath()}`,
+  )
+}
+
+async function restartBackendAfterUnexpectedExit(port: number): Promise<void> {
+  if (backendRestarting || isQuitting) return
+  backendRestarting = true
+  try {
+    for (let attempt = 1; attempt <= BACKEND_START_ATTEMPTS; attempt += 1) {
+      if (isQuitting) return
+      await delay(attempt * 1000)
+      recordBackendOutput(`[desktop] recovering backend attempt ${attempt}/${BACKEND_START_ATTEMPTS}`)
+      const backendProcess = startPythonBackend(port)
+      try {
+        await waitForBackend(getBackendBaseUrl(port), backendProcess)
+        recordBackendOutput(`[desktop] backend recovery succeeded on port ${port}`)
+        monitorRunningBackend(port, backendProcess)
+        return
+      } catch (error) {
+        recordBackendOutput(`[desktop] backend recovery failed: ${error}`)
+        if (backendProcess.exitCode === null && backendProcess.signalCode === null) {
+          backendProcess.kill()
+        }
+      }
+    }
+    dialog.showErrorBox(
+      '本地服务恢复失败',
+      `后端服务异常退出且自动恢复失败。请将日志交给维护人员：\n${getBackendStartupLogPath()}`,
+    )
+  } finally {
+    backendRestarting = false
+  }
 }
 
 async function createWindow() {
@@ -409,11 +567,9 @@ async function createWindow() {
   await mainWindow.loadURL(getStartupPageUrl())
 
   try {
-    backendPort = await resolveBackendPort()
-    startPythonBackend(backendPort)
-    await waitForBackend(getBackendBaseUrl(backendPort))
-
-    const backendBaseUrl = getBackendBaseUrl(backendPort)
+    const startedBackend = await startBackendWithRetry()
+    backendPort = startedBackend.port
+    const backendBaseUrl = startedBackend.baseUrl
     await mainWindow.loadURL(getFrontendUrl(backendBaseUrl))
 
     if (!app.isPackaged) {
@@ -467,6 +623,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  isQuitting = true
   if (pythonProcess) {
     pythonProcess.kill()
   }

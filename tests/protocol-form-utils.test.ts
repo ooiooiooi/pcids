@@ -2,11 +2,23 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  filterProtocolTrafficLogs,
   getIpValidationError,
   getProtocolFormSyncKey,
   ipValidator,
   shouldHydrateProtocolFormFromSession,
 } from '../src/pages/Protocol/formUtils.ts'
+
+test('通信日志页面只保留 Rx 和 Tx，系统诊断日志不参与展示', () => {
+  const logs = [
+    { id: 1, direction: 'System', data: '连接成功' },
+    { id: 2, direction: 'Rx', data: 'AA' },
+    { id: 3, direction: 'tx', data: 'BB' },
+    { id: 4, direction: 'Warning', data: '诊断信息' },
+  ]
+
+  assert.deepEqual(filterProtocolTrafficLogs(logs).map((item) => item.id), [2, 3])
+})
 
 test('合法 IP 通过失焦校验且内容保留', async () => {
   assert.equal(getIpValidationError('192.168.0.10'), '')

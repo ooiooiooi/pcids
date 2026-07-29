@@ -66,6 +66,12 @@ export const getProtocolFormSyncKey = ({
   currentModuleKind,
 }) ? 'session' : 'default'}`
 
+export const filterProtocolTrafficLogs = <T extends { direction?: unknown }>(logs: T[]) =>
+  logs.filter((log) => {
+    const direction = String(log?.direction || '').trim().toLowerCase()
+    return direction === 'rx' || direction === 'tx'
+  })
+
 const parseJsonConfigValue = (value: unknown) => {
   if (!value) return {}
   if (typeof value === 'object') return value as Record<string, unknown>

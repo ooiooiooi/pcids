@@ -181,6 +181,24 @@ class FakeZlgApi:
         return can_adapters.STATUS_OK
 
 
+class FakeZlgPropertyApi:
+    def __init__(self, *, status: int, readback: dict[str, bytes | None]):
+        self.status = status
+        self.readback = readback
+        self.set_calls: list[tuple[int, str]] = []
+        self.get_calls: list[tuple[int, str]] = []
+
+    def ZCAN_SetValue(self, device_handle: int, path: bytes, raw_value) -> int:
+        del raw_value
+        self.set_calls.append((device_handle, path.decode("ascii")))
+        return self.status
+
+    def ZCAN_GetValue(self, device_handle: int, path: bytes) -> bytes | None:
+        decoded_path = path.decode("ascii")
+        self.get_calls.append((device_handle, decoded_path))
+        return self.readback.get(decoded_path)
+
+
 class FakeProbeZlgApi:
     def __init__(
         self,
@@ -480,7 +498,7 @@ class CanProtocolBackendTests(unittest.TestCase):
         self.assertEqual(backend._api.init_calls, [(0x1000, 1, can_adapters.TYPE_CANFD, 0)])
         self.assertEqual(channel_handle.channel_name, "CAN1")
 
-    def test_usbcanfd_backend_supports_classic_can_protocol_and_uses_classic_init(self):
+    def test_usbcanfd_backend_uses_canfd_hardware_init_for_classic_can_protocol(self):
         backend = can_adapters.Usbcanfd200UBackend()
         backend._api = FakeZlgApi()
         device_handle = can_adapters._UsbcanfdDeviceHandle(api=backend._api, raw_handle=0x1000, device_index=0)
@@ -511,8 +529,32 @@ class CanProtocolBackendTests(unittest.TestCase):
                 (0, "tx_timeout", "120"),
             ],
         )
-        self.assertEqual(backend._api.init_calls, [(0x1000, 0, can_adapters.TYPE_CAN, 0)])
+        # ZLG's header requires CAN-FD-series hardware to use TYPE_CANFD even
+        # when the channel's wire protocol property is classic CAN.
+        self.assertEqual(backend._api.init_calls, [(0x1000, 0, can_adapters.TYPE_CANFD, 0)])
         self.assertEqual(channel_handle.protocol, "can")
+
+    def test_usbcanfd_set_value_accepts_zero_status_when_readback_matches(self):
+        backend = can_adapters.Usbcanfd200UBackend()
+        api = FakeZlgPropertyApi(status=0, readback={"0/protocol": b"0"})
+        device_handle = can_adapters._UsbcanfdDeviceHandle(api=api, raw_handle=0x1000, device_index=0)
+
+        backend._set_channel_value(device_handle, 0, "protocol", "0")
+
+        self.assertEqual(api.set_calls, [(0x1000, "0/protocol")])
+        self.assertEqual(api.get_calls, [(0x1000, "0/protocol")])
+
+    def test_usbcanfd_set_value_rejects_zero_status_when_readback_mismatches(self):
+        backend = can_adapters.Usbcanfd200UBackend()
+        api = FakeZlgPropertyApi(status=0, readback={"0/protocol": b"1"})
+        device_handle = can_adapters._UsbcanfdDeviceHandle(api=api, raw_handle=0x1000, device_index=0)
+
+        with self.assertRaises(CanAdapterError) as ctx:
+            backend._set_channel_value(device_handle, 0, "protocol", "0")
+
+        self.assertEqual(ctx.exception.code, "config_apply_failed")
+        self.assertIn("读取值=1", ctx.exception.message)
+        self.assertIn("期望值=0", ctx.exception.message)
 
     def test_usbcanfd_backend_init_channel_prioritizes_canfd_arbitration_bitrate_fields(self):
         backend = can_adapters.Usbcanfd200UBackend()
@@ -1212,11 +1254,42 @@ class CanProtocolBackendTests(unittest.TestCase):
         config = protocol_tests._normalize_can_runtime_config("can", {"adapter_key": "", "physical_channel": "CAN0"})
         self.assertFalse(config["termination_enabled"])
 
+    def test_can_termination_log_matches_selected_adapter(self):
+        self.assertEqual(
+            protocol_tests._format_can_termination_log("usbcanfd_200u", True),
+            "内部120Ω终端电阻=开启",
+        )
+        self.assertIn(
+            "ZQWL 设备拨码控制",
+            protocol_tests._format_can_termination_log("zqwl_ucan_cdc", False),
+        )
+
     def test_canfd_runtime_config_defaults_match_zcanpro(self):
         config = protocol_tests._normalize_can_runtime_config("canfd", {"adapter_key": "", "physical_channel": "CAN0"})
         self.assertTrue(config["termination_enabled"])
         self.assertFalse(config["brs"])
         self.assertFalse(config["canfd_non_iso"])
+
+    def test_bound_can_runtime_config_does_not_rescan_its_own_open_device(self):
+        original = {
+            "adapter_key": "usbcanfd_200u:SERIAL-A",
+            "adapter_serial": "SERIAL-A",
+            "sdk_device_index": 0,
+            "dependency_status": "ready",
+            "dependency_message": "",
+            "physical_channel": "CAN0",
+        }
+        with patch.object(protocol_tests, "_probe_can_adapters") as probe:
+            config = protocol_tests._normalize_can_runtime_config(
+                "can",
+                original,
+                refresh_adapter=False,
+            )
+
+        probe.assert_not_called()
+        self.assertEqual(config["sdk_device_index"], 0)
+        self.assertEqual(config["dependency_status"], "ready")
+        self.assertEqual(config["physical_channel"], "CAN0")
 
     def test_duplicate_channel_connection_is_rejected(self):
         backend = FakeCanBackend([make_device("fake_can:abc", "ABC123", ["CAN0"])])
@@ -1410,6 +1483,47 @@ class CanProtocolBackendTests(unittest.TestCase):
         self.assertFalse(frames[0].is_fd)
         self.assertTrue(frames[0].is_extended_id)
         self.assertEqual(frames[0].frame_id, 0x1ABCDE)
+
+    def test_usbcanfd_transmit_failure_includes_channel_error_detail(self):
+        class FailingApi:
+            def ZCAN_Transmit(self, raw_handle, payload_ptr, count):
+                del raw_handle, payload_ptr, count
+                return 0
+
+            def ZCAN_ReadChannelErrInfo(self, raw_handle, error_ptr):
+                del raw_handle
+                error_ptr._obj.error_code = 0x0030
+                error_ptr._obj.passive_ErrData[0] = 1
+                error_ptr._obj.passive_ErrData[1] = 2
+                error_ptr._obj.passive_ErrData[2] = 3
+                return can_adapters.STATUS_OK
+
+        backend = can_adapters.Usbcanfd200UBackend()
+        connection = CanAdapterConnection(
+            backend_key=backend.backend_key,
+            device=make_device("fake_can:abc", "ABC123", ["CAN0"]),
+            device_handle=None,
+            channel_handle=can_adapters._UsbcanfdChannelHandle(
+                api=FailingApi(),
+                raw_handle=0x2000,
+                channel_index=0,
+                channel_name="CAN0",
+                protocol="can",
+            ),
+            channel_name="CAN0",
+            protocol="can",
+        )
+
+        with self.assertRaises(CanAdapterError) as context:
+            backend.transmit(
+                connection,
+                make_frame(frame_id=0x123, is_fd=False, data=b"\x01", channel_name="CAN0"),
+            )
+
+        self.assertEqual(context.exception.code, "tx_failed")
+        self.assertIn("channel_error=0x00000030", context.exception.message)
+        self.assertIn("总线错误", context.exception.message)
+        self.assertIn("总线关闭", context.exception.message)
 
     def test_usbcanfd_backend_transmit_rejects_protocol_frame_mismatch(self):
         backend = can_adapters.Usbcanfd200UBackend()

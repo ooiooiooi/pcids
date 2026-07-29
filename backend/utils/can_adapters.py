@@ -21,7 +21,23 @@ except Exception:  # pragma: no cover
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PROTOCOL_ADAPTERS_ROOT = PROJECT_ROOT / "tools" / "protocol_adapters"
+
+
+def _resolve_protocol_adapters_root() -> Path:
+    configured = str(os.environ.get("PCIDS_PROTOCOL_ADAPTERS_DIR") or "").strip()
+    bundled_tools_dir = str(os.environ.get("PCIDS_BUNDLED_TOOLS_DIR") or "").strip()
+    runtime_root = str(os.environ.get("PCIDS_RUNTIME_ROOT") or "").strip()
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path(bundled_tools_dir).expanduser().parent / "protocol_adapters" if bundled_tools_dir else None,
+        Path(runtime_root).expanduser() / "resources" / "tools" / "protocol_adapters" if runtime_root else None,
+        PROJECT_ROOT / "tools" / "protocol_adapters",
+    ]
+    normalized = [candidate.resolve(strict=False) for candidate in candidates if candidate is not None]
+    return next((candidate for candidate in normalized if candidate.exists()), normalized[0])
+
+
+PROTOCOL_ADAPTERS_ROOT = _resolve_protocol_adapters_root()
 USBCANFD_200U_ROOT = PROTOCOL_ADAPTERS_ROOT / "USBCANFD-200U"
 USBCANFD_200U_MANIFEST = USBCANFD_200U_ROOT / "sdk-manifest.json"
 USBCANFD_200U_HARDWARE_IDS = ("USB\\VID_3068&PID_0009",)
@@ -310,6 +326,14 @@ class _ZCAN_CHANNEL_INIT_CONFIG(ctypes.Structure):
     ]
 
 
+class _ZCAN_CHANNEL_ERR_INFO(ctypes.Structure):
+    _fields_ = [
+        ("error_code", ctypes.c_uint),
+        ("passive_ErrData", ctypes.c_ubyte * 3),
+        ("arLost_ErrData", ctypes.c_ubyte),
+    ]
+
+
 class _CAN_FRAME(ctypes.Structure):
     _fields_ = [
         ("can_id", ctypes.c_uint),
@@ -438,6 +462,10 @@ class _ZlgCanApi:
         self.ZCAN_ResetCAN.argtypes = [ctypes.c_void_p]
         self.ZCAN_ResetCAN.restype = ctypes.c_uint
 
+        self.ZCAN_ReadChannelErrInfo = self.dll.ZCAN_ReadChannelErrInfo
+        self.ZCAN_ReadChannelErrInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ZCAN_CHANNEL_ERR_INFO)]
+        self.ZCAN_ReadChannelErrInfo.restype = ctypes.c_uint
+
         self.ZCAN_Transmit = self.dll.ZCAN_Transmit
         self.ZCAN_Transmit.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ZCAN_TRANSMIT_DATA), ctypes.c_uint]
         self.ZCAN_Transmit.restype = ctypes.c_uint
@@ -457,6 +485,10 @@ class _ZlgCanApi:
         self.ZCAN_SetValue = self.dll.ZCAN_SetValue
         self.ZCAN_SetValue.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
         self.ZCAN_SetValue.restype = ctypes.c_uint
+
+        self.ZCAN_GetValue = self.dll.ZCAN_GetValue
+        self.ZCAN_GetValue.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self.ZCAN_GetValue.restype = ctypes.c_char_p
 
 
 def can_fd_length_to_dlc(length: int) -> int:
@@ -1261,13 +1293,20 @@ class Usbcanfd200UBackend(CanAdapterBackend):
 
     def _set_channel_value(self, device_handle: _UsbcanfdDeviceHandle, channel_index: int, item_name: str, value: Any) -> None:
         path = f"{channel_index}/{item_name}".encode("ascii")
+        expected_text: Optional[str] = None
         if isinstance(value, str):
+            expected_text = value
             payload = ctypes.c_char_p(value.encode("ascii"))
             raw_value = ctypes.cast(payload, ctypes.c_void_p)
         elif isinstance(value, int):
+            expected_text = str(value)
             payload = ctypes.c_int(value)
             raw_value = ctypes.cast(ctypes.byref(payload), ctypes.c_void_p)
         elif isinstance(value, bytes):
+            try:
+                expected_text = value.decode("ascii")
+            except UnicodeDecodeError:
+                expected_text = None
             payload = ctypes.create_string_buffer(value)
             raw_value = ctypes.cast(payload, ctypes.c_void_p)
         elif isinstance(value, ctypes.Array):
@@ -1280,9 +1319,33 @@ class Usbcanfd200UBackend(CanAdapterBackend):
             raise CanAdapterError("config_invalid", f"不支持的 ZLG 配置类型：{item_name}")
         status = int(device_handle.api.ZCAN_SetValue(device_handle.raw_handle, path, raw_value))
         if status != STATUS_OK:
+            # Some ZLG SDK builds return 0 from ZCAN_SetValue even though the
+            # property was applied successfully. Treat the operation as
+            # successful only when the official readback API confirms the exact
+            # requested value; a missing/mismatched value remains a hard error.
+            actual_text: Optional[str] = None
+            try:
+                actual_value = device_handle.api.ZCAN_GetValue(device_handle.raw_handle, path)
+                if isinstance(actual_value, bytes):
+                    actual_text = actual_value.decode("ascii", errors="replace")
+                elif actual_value:
+                    actual_text = ctypes.cast(actual_value, ctypes.c_char_p).value.decode("ascii", errors="replace")
+            except Exception:
+                actual_text = None
+            if expected_text is not None and actual_text == expected_text:
+                logger.warning(
+                    "%s ZCAN_SetValue returned %s for %s but readback matched %s; accepting applied value",
+                    self.adapter_name,
+                    status,
+                    path.decode("ascii"),
+                    expected_text,
+                )
+                return
             raise CanAdapterError(
                 "config_apply_failed",
-                f"{self.adapter_name} 配置失败：{channel_index}/{item_name}，ZCAN_SetValue={status}",
+                f"{self.adapter_name} 配置失败：{channel_index}/{item_name}，"
+                f"ZCAN_SetValue={status}，读取值={actual_text if actual_text is not None else '-'}，"
+                f"期望值={expected_text if expected_text is not None else '-'}",
             )
 
     def init_channel(self, device_handle: Any, channel_name: str, *, protocol: str, config: dict[str, Any]) -> Any:
@@ -1318,24 +1381,18 @@ class Usbcanfd200UBackend(CanAdapterBackend):
 
         init_config = _ZCAN_CHANNEL_INIT_CONFIG()
         ctypes.memset(ctypes.byref(init_config), 0, ctypes.sizeof(init_config))
-        if protocol_key == "canfd":
-            init_config.can_type = TYPE_CANFD
-            init_config.config.canfd.mode = 0
-            init_config.config.canfd.acc_code = 0
-            init_config.config.canfd.acc_mask = 0xFFFFFFFF
-            init_config.config.canfd.filter = 0
-            init_config.config.canfd.abit_timing = 0
-            init_config.config.canfd.dbit_timing = 0
-            init_config.config.canfd.brp = 0
-        else:
-            init_config.can_type = TYPE_CAN
-            init_config.config.can.acc_code = 0
-            init_config.config.can.acc_mask = 0xFFFFFFFF
-            init_config.config.can.reserved = 0
-            init_config.config.can.filter = 0
-            init_config.config.can.timing0 = 0
-            init_config.config.can.timing1 = 0
-            init_config.config.can.mode = 0
+        # The vendor header explicitly requires every CAN-FD-series product to
+        # use TYPE_CANFD here, even when the wire protocol is classic CAN. The
+        # pre-init ``protocol`` property selects classic CAN (0) or CAN FD (1);
+        # ``can_type`` describes the physical controller family.
+        init_config.can_type = TYPE_CANFD
+        init_config.config.canfd.mode = 0
+        init_config.config.canfd.acc_code = 0
+        init_config.config.canfd.acc_mask = 0xFFFFFFFF
+        init_config.config.canfd.filter = 0
+        init_config.config.canfd.abit_timing = 0
+        init_config.config.canfd.dbit_timing = 0
+        init_config.config.canfd.brp = 0
 
         raw_channel_handle = typed_device_handle.api.ZCAN_InitCAN(typed_device_handle.raw_handle, channel_index, ctypes.byref(init_config))
         if not raw_channel_handle:
@@ -1392,10 +1449,48 @@ class Usbcanfd200UBackend(CanAdapterBackend):
             transmitted = typed_channel_handle.api.ZCAN_Transmit(typed_channel_handle.raw_handle, ctypes.byref(payload), 1)
         if transmitted != 1:
             api_name = "ZCAN_TransmitFD" if frame.is_fd else "ZCAN_Transmit"
+            error_detail = self._read_channel_error_detail(typed_channel_handle)
             raise CanAdapterError(
                 "tx_failed",
-                f"{self.adapter_name} 发送失败，通道 {typed_channel_handle.channel_name}，{api_name}={int(transmitted)}",
+                f"{self.adapter_name} 发送失败，通道 {typed_channel_handle.channel_name}，"
+                f"{api_name}={int(transmitted)}{error_detail}",
             )
+
+    def _read_channel_error_detail(self, channel_handle: _UsbcanfdChannelHandle) -> str:
+        error_info = _ZCAN_CHANNEL_ERR_INFO()
+        ctypes.memset(ctypes.byref(error_info), 0, ctypes.sizeof(error_info))
+        try:
+            status = int(
+                channel_handle.api.ZCAN_ReadChannelErrInfo(
+                    channel_handle.raw_handle,
+                    ctypes.byref(error_info),
+                )
+            )
+        except Exception as exc:
+            return f"，读取通道错误失败：{exc}"
+        if status != STATUS_OK:
+            return f"，ZCAN_ReadChannelErrInfo={status}"
+
+        error_code = int(error_info.error_code)
+        labels = [
+            label
+            for bit, label in (
+                (0x0001, "接收缓冲区溢出"),
+                (0x0002, "错误告警"),
+                (0x0004, "错误被动"),
+                (0x0008, "仲裁丢失"),
+                (0x0010, "总线错误"),
+                (0x0020, "总线关闭"),
+                (0x0040, "控制器缓冲区溢出"),
+            )
+            if error_code & bit
+        ]
+        label_text = "/".join(labels) if labels else "未报告控制器错误"
+        passive = ",".join(str(int(value)) for value in error_info.passive_ErrData)
+        return (
+            f"，channel_error=0x{error_code:08X}（{label_text}），"
+            f"passive=[{passive}]，arbitration_lost={int(error_info.arLost_ErrData)}"
+        )
 
     def receive(
         self,

@@ -65,6 +65,7 @@ Get-Volume | Select-Object DriveLetter, SizeRemaining
 - 当前正式 PCIDS 安装包。
 - 完整 `burners` 目录，不能只复制某个 EXE。
 - Microsoft Visual C++ 2015–2022 Redistributable **x86** 安装包 `vc_redist.x86.exe`。即使系统已经安装 x64 版本也不能省略。
+- Microsoft Visual C++ 2013 Redistributable **x64** 安装包。ZLG USBCANFD-200U 的 x64 SDK 依赖该运行库，必须随离线介质保存。
 - Vitis/Vivado 2020.2 离线安装介质。
 - MPLAB X 6.20、MPLAB XC8、MPLAB XC16。
 - Quartus/Quartus Programmer 和 USB-Blaster II 独立驱动包。
@@ -101,10 +102,11 @@ Start-Process `
 建议顺序：
 
 1. Microsoft Visual C++ 2015–2022 Redistributable **x86**。
-2. Vitis/Vivado 2020.2。
-3. MPLAB X 6.20、XC8、XC16。
-4. Quartus/Quartus Programmer 和 USB-Blaster II 驱动。
-5. CCS 和 XDS510Plus 驱动。
+2. Microsoft Visual C++ 2013 Redistributable **x64**（交付 ZLG USBCANFD-200U 时必装）。
+3. Vitis/Vivado 2020.2。
+4. MPLAB X 6.20、XC8、XC16。
+5. Quartus/Quartus Programmer 和 USB-Blaster II 驱动。
+6. CCS 和 XDS510Plus 驱动。
 
 ST-LINK Utility CLI 是 32 位程序，必须安装 x86 运行库；只安装 x64 运行库不能满足依赖。离线静默安装：
 
@@ -570,6 +572,13 @@ resources\tools\protocol_adapters\CH347\ch347_gpio_probe.py
 
 ### 5.3 ZLG USBCANFD-200U
 
+目标机必须同时具备以下四层环境，缺一项都不能以“设备管理器能看到设备”判定部署成功：
+
+1. **ZLG 官方 USB 驱动**：设备管理器中 `USB\VID_3068&PID_0009` 状态正常。
+2. **ZLG x64 SDK**：安装包内包含 `zlgcan.dll`、`kerneldlls` 及 `sdk-manifest.json`。
+3. **Microsoft Visual C++ 2013 Redistributable x64**：ZLG x64 SDK 依赖 `msvcp120.dll` 和 `msvcr120.dll`。只安装 VC++ 2015–2022 或只安装 x86 版不能替代。
+4. **PCIDS 协议适配器目录**：打包程序必须把 `resources\tools\protocol_adapters` 一并交付，并由 `PCIDS_PROTOCOL_ADAPTERS_DIR` 指向该目录。
+
 PCIDS 安装包中必须包含：
 
 ```text
@@ -595,7 +604,37 @@ resources\tools\protocol_adapters\USBCANFD-200U\official_zlg\...\kerneldlls\
 USB\VID_3068&PID_0009
 ```
 
-验收不能只确认 PnP 扫描到设备，还必须在 PCIDS 中连接 CAN0/CAN1，并完成至少一次发送和接收。
+运行库验收：
+
+```powershell
+$required = @(
+  "$env:WINDIR\System32\msvcp120.dll",
+  "$env:WINDIR\System32\msvcr120.dll"
+)
+$required | ForEach-Object {
+  [pscustomobject]@{
+    Path   = $_
+    Exists = Test-Path -LiteralPath $_
+  }
+} | Format-Table -AutoSize
+```
+
+两个文件都必须显示 `Exists=True`。如果缺失，安装微软官方 **Visual C++ Redistributable Packages for Visual Studio 2013 x64**，安装后重新启动 PCIDS；禁止从其他电脑单独复制 DLL 到应用目录代替运行库安装。
+
+PCIDS 的协议能力与硬件适配器分开：
+
+- **普通经典 CAN** 是系统级协议能力，不限定 USBCANFD-200U。ZQWL USB-CAN 等普通 CAN 适配器继续使用各自后端和驱动。
+- **USBCANFD-200U** 同时支持经典 CAN 和 CAN FD。按 ZLG SDK 约束，二者都通过 CAN FD 系列通道结构初始化，再由通道协议参数选择经典 CAN 或 CAN FD；不能因为任务选择经典 CAN 就把硬件类型初始化成旧式 `TYPE_CAN`。
+- 每种新适配器必须实现自己的扫描、打开、初始化、发送和接收后端，不能仅凭相同 VID/PID 或历史设备记录复用其他适配器。
+
+验收不能只确认 PnP 扫描到设备，还必须：
+
+1. 完全退出 ZCANPro 等可能独占同一适配器的软件。
+2. 在 PCIDS 中分别识别 CAN0/CAN1，设备序列号与厂商工具一致。
+3. 使用与测试源一致的通道、仲裁域波特率和终端电阻配置。
+4. 对普通经典 CAN 完成至少一次真实发送和接收，确认日志出现 `Tx` 和 `Rx`。
+5. 计划使用 CAN FD 时，再单独完成一次 CAN FD 发送和接收。
+6. 发送失败时记录 `ZCAN_Transmit` 结果和通道错误码；不能只显示“发送失败”。
 
 ### 5.4 以太网协议
 
@@ -794,6 +833,10 @@ Copy-Item `
 | MOXA 串口在另一台电脑变成不同 COM 号 | Windows 按机器和 USB 口重新分配 COM | 部署后重新枚举并打开测试，项目不写死源机器 COM |
 | 长时间烧录在 10 分钟时被中止 | 默认超时小于设备实际耗时 | AL321 等长任务默认至少设置 1200 秒，并以最长实测时间复核 |
 | 通信协议页面有设备但不能收发 | 只有 PnP 驱动，没有 SDK DLL/通道验证 | 同时验收驱动、DLL、CAN0/CAN1 和真实收发 |
+| USBCANFD-200U 能枚举但连接、收发失败，SDK 报依赖缺失 | 目标机缺少 VC++ 2013 x64，`zlgcan.dll` 无法完整加载 | 安装微软官方 VC++ 2013 x64，确认 `System32\msvcp120.dll`、`msvcr120.dll` 存在后重启 PCIDS |
+| ZCANPro 能收发，但 PCIDS 无数据 | ZCANPro 独占设备、通道/波特率不一致，或 USBCANFD 经典 CAN 使用了错误硬件初始化类型 | 退出 ZCANPro；核对 CAN0/CAN1 和仲裁域波特率；部署包含 USBCANFD 专用初始化修复的当前包 |
+| PCIDS 已连接 USBCANFD，但发送返回 `ZCAN_Transmit=0` | 通道初始化、总线状态、接线、终端电阻或波特率异常 | 查看任务日志中的通道错误码，按 bus off/被动错误/仲裁丢失/总线错误分类排查 |
+| 普通 USB-CAN 被误当成 USBCANFD-200U | 扫描逻辑只按历史记录或宽泛 VID/PID 匹配 | 按适配器自身探测结果和稳定标识绑定；普通 CAN 使用自己的后端，不复用 ZLG SDK |
 
 ## 10. 部署后总体验收
 
@@ -861,6 +904,8 @@ Get-PnpDevice -PresentOnly |
 6. 其他节点显示实际 IP。
 7. 新增、编辑、换绑时有 loading，完成后数据正确。
 8. 通信协议验证能识别串口、CAN/CAN FD、WCH GPIO 中的计划交付设备。
+9. 普通经典 CAN 适配器完成一次真实 Tx/Rx；若交付 USBCANFD-200U，再分别验证经典 CAN 和 CAN FD。
+10. 关闭并重新打开软件后后端自动启动，协议适配器目录和厂商 SDK 仍能被找到。
 
 ### 10.4 烧录验收顺序
 

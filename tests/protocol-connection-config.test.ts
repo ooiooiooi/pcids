@@ -129,3 +129,20 @@ test('CAN FD 合并配置时保留终端电阻和 ISO 标准配置', () => {
   assert.equal(merged.canfd_non_iso, false)
   assert.equal(merged.brs, false)
 })
+
+test('经典 CAN 合并配置时保留内部终端电阻开关', () => {
+  const merged = mergeProtocolConnectionConfig({
+    protocol: 'can',
+    responseConfigInput: {
+      backend_key: 'usbcanfd_200u',
+      adapter_key: 'usbcanfd_200u:SERIAL-A',
+      detected_devices: [{ adapter_key: 'usbcanfd_200u:SERIAL-A' }],
+      termination_enabled: false,
+    },
+    requestedConfigInput: {
+      termination_enabled: true,
+    },
+  })
+
+  assert.equal(merged.termination_enabled, true)
+})

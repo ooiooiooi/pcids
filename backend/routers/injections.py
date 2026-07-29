@@ -106,6 +106,26 @@ def _get_script_path(injection_type: str) -> Path:
     return Path(__file__).resolve().parent.parent / "scripts" / "injections" / name
 
 
+def _build_injection_script_command(
+    script_path: Path,
+    target: str,
+    config_json: str,
+) -> list[str]:
+    """Build a script command that also works in the frozen backend.
+
+    In a PyInstaller build ``sys.executable`` is ``pcids_backend.exe`` rather
+    than a Python interpreter.  The backend entry point exposes ``--run-script``
+    specifically so a child backend executable can execute the requested
+    script without starting another server (and without terminating the
+    existing port listener).
+    """
+    command = [sys.executable]
+    if bool(getattr(sys, "frozen", False)):
+        command.append("--run-script")
+    command.extend([str(script_path), str(target), config_json])
+    return command
+
+
 _running_tasks = set()
 _power_off_sessions: dict[int, "PowerOffSession"] = {}
 _network_error_sessions: dict[int, "NetworkErrorSession"] = {}
@@ -877,10 +897,11 @@ async def _execute_script_and_record(run_id: int, injection_id: int) -> None:
         _append_run_log(run, f"[INFO] 已准备执行异常脚本：{script_path.name}")
         db.commit()
         proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(script_path),
-            str(injection.target),
-            config_json,
+            *_build_injection_script_command(
+                script_path,
+                str(injection.target),
+                config_json,
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

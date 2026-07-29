@@ -43,6 +43,7 @@ import {
   canFdLengthToDlc,
   canFrameIdValidator,
   canLengthValidator,
+  filterProtocolTrafficLogs,
   getProtocolFormSyncKey,
   ipValidator,
   mergeProtocolConnectionConfig,
@@ -165,6 +166,7 @@ const pickConnectionConfig = (protocol: ModuleKind, values: Record<string, any>)
       id_format: values.id_format,
       frame_format: values.id_format,
       remote_frame: !!values.remote_frame,
+      termination_enabled: !!values.termination_enabled,
       data_length: values.data_length,
       dlc: values.data_length,
     }
@@ -244,7 +246,7 @@ const pickConnectionConfig = (protocol: ModuleKind, values: Record<string, any>)
 
 const getConnectionValidationFields = (protocol: ModuleKind, ethernetMode?: string) => {
   if (protocol === 'can') {
-    return ['adapter_key', 'physical_channel', 'baud_rate', 'id_format', 'data_length']
+    return ['adapter_key', 'physical_channel', 'baud_rate', 'id_format', 'data_length', 'termination_enabled']
   }
   if (protocol === 'canfd') {
     return ['adapter_key', 'physical_channel', 'arb_baud_rate', 'brs', 'data_baud_rate', 'id_format', 'data_length', 'termination_enabled']
@@ -888,6 +890,7 @@ const getDefaultProtocolFormValues = (protocol: ModuleKind) => {
         baud_rate: '500kbps',
         id_format: '标准帧(11位)',
         remote_frame: false,
+        termination_enabled: false,
         data_length: 8,
         frame_id: '',
         data: '',
@@ -973,6 +976,7 @@ const normalizeProtocolFormValues = (protocol: ModuleKind, configInput: any) => 
         baud_rate: config.baud_rate || config.bitrate || defaults.baud_rate,
         id_format: config.id_format || config.frame_format || defaults.id_format,
         remote_frame: typeof config.remote_frame === 'boolean' ? config.remote_frame : defaults.remote_frame,
+        termination_enabled: typeof config.termination_enabled === 'boolean' ? config.termination_enabled : defaults.termination_enabled,
         data_length: config.data_length ?? config.dlc ?? defaults.data_length,
       }
     case 'canfd':
@@ -1402,9 +1406,9 @@ const Protocol: React.FC = () => {
   const isEthernetConnectionLocked =
     currentModuleKind === 'ethernet' && isCurrentProtocolConfigLocked
   const isCurrentProtocolSession = Boolean(currentSession?.id) && connectedModuleKind === currentModuleKind
-  const displayedLogs = isCurrentProtocolSession ? dataSource : []
+  const displayedLogs = isCurrentProtocolSession ? filterProtocolTrafficLogs(dataSource) : []
   const displayedLogsNewestFirst = useMemo(() => sortLogsNewestFirst(displayedLogs), [displayedLogs])
-  const detailLogsNewestFirst = useMemo(() => sortLogsNewestFirst(detailLogs), [detailLogs])
+  const detailLogsNewestFirst = useMemo(() => sortLogsNewestFirst(filterProtocolTrafficLogs(detailLogs)), [detailLogs])
   const displayedTxCount = isCurrentProtocolSession ? txCount : 0
   const displayedRxCount = isCurrentProtocolSession ? rxCount : 0
   const shouldHydrateCurrentProtocolForm = useMemo(
@@ -2168,6 +2172,7 @@ const extractPayloadDisplayText = (value: any) => {
       com_port: String(selectedDevice?.adapter_device || selectedDevice?.device || '').trim(),
       physical_channel: nextPhysicalChannel,
       channel: nextPhysicalChannel,
+      termination_enabled: String(selectedDevice?.backend_key || '').trim() === 'usbcanfd_200u',
     })
   }
 
@@ -2211,6 +2216,7 @@ const extractPayloadDisplayText = (value: any) => {
               id_format: values.id_format,
               frame_format: values.id_format,
               remote_frame: !!values.remote_frame,
+              termination_enabled: !!values.termination_enabled,
               data_length: values.data_length,
               dlc: values.data_length,
               data_type: dataType,
@@ -3059,6 +3065,21 @@ const extractPayloadDisplayText = (value: any) => {
                     <span className="pcids-inline-option__label">远程帧</span>
                     <Form.Item name="remote_frame" valuePropName="checked" noStyle>
                       <Switch disabled={isCurrentProtocolConfigLocked} />
+                    </Form.Item>
+                  </div>
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item style={compactFormItemStyle}>
+                  <div className="pcids-inline-switch-row" style={{ justifyContent: 'flex-start', gap: 12 }}>
+                    <span className="pcids-inline-option__label">内部120Ω终端电阻</span>
+                    <Form.Item name="termination_enabled" valuePropName="checked" noStyle>
+                      <Switch
+                        disabled={
+                          isCurrentProtocolConfigLocked ||
+                          String(selectedCanDeviceMeta?.backend_key || currentModuleChannelConfig.backend_key || '') === 'zqwl_ucan_cdc'
+                        }
+                      />
                     </Form.Item>
                   </div>
                 </Form.Item>

@@ -623,6 +623,11 @@ def _append_can_rx_logs(session_id: int, frame_entries: list[tuple[int, CanFrame
         db.commit()
     except Exception:
         db.rollback()
+        logger.exception(
+            "can.rx_log.persist_failed | session_id=%s frame_count=%s",
+            session_id,
+            len(frame_entries),
+        )
     finally:
         db.close()
 
@@ -756,6 +761,7 @@ _CAN_EDITABLE_FIELDS = {
     "id_format",
     "frame_format",
     "remote_frame",
+    "termination_enabled",
     "data_length",
     "dlc",
     "expected_rx_id",
@@ -900,9 +906,18 @@ def _normalize_can_length_for_send(
     return normalized_length, payload_length
 
 
-def _normalize_can_runtime_config(protocol: str, config: dict[str, Any]) -> dict[str, Any]:
+def _normalize_can_runtime_config(
+    protocol: str,
+    config: dict[str, Any],
+    *,
+    refresh_adapter: bool = True,
+) -> dict[str, Any]:
     normalized = dict(config or {})
-    selected_device = _resolve_selected_can_device(normalized, _probe_can_adapters(protocol))
+    selected_device = (
+        _resolve_selected_can_device(normalized, _probe_can_adapters(protocol))
+        if refresh_adapter
+        else None
+    )
     if selected_device:
         adapter_device = selected_device.get("adapter_device") or selected_device.get("device") or selected_device.get("pnp_device_id") or ""
         normalized["adapter_key"] = selected_device.get("adapter_key") or normalized.get("adapter_key") or ""
@@ -973,6 +988,7 @@ def _build_auto_channel_config(protocol: str) -> tuple[dict, list[str]]:
             "id_format": "标准帧(11位)",
             "frame_format": "标准帧(11位)",
             "remote_frame": False,
+            "termination_enabled": str(primary.get("backend_key") or "").strip() == "usbcanfd_200u",
             "data_length": 8,
             "dlc": 8,
             "expected_rx_id": "",
@@ -2946,6 +2962,26 @@ def _run_serial_exchange(
             pass
 
 
+def _write_serial_payload(
+    connection: Any,
+    payload_bytes: bytes,
+    *,
+    io_lock: threading.Lock,
+) -> int:
+    """Write one serial payload without consuming bytes owned by the listener."""
+    if connection is None:
+        raise RuntimeError("串口连接已失效")
+    with io_lock:
+        if hasattr(connection, "is_open") and not bool(connection.is_open):
+            connection.open()
+        written = connection.write(payload_bytes)
+        if isinstance(written, int) and written != len(payload_bytes):
+            raise OSError(f"串口数据写入不完整：期望 {len(payload_bytes)} 字节，实际 {written} 字节")
+        if hasattr(connection, "flush"):
+            connection.flush()
+    return len(payload_bytes) if written is None else int(written)
+
+
 def _run_tcp_client_exchange(host: str, port: int, payload_bytes: bytes, timeout: float, data_type: Optional[str] = None) -> tuple[str, dict]:
     with socket.create_connection((host, int(port)), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -3211,6 +3247,15 @@ def _force_release_conflicting_can_session(config: dict[str, Any], physical_chan
             _close_can_session_connection(sid)
 
 
+def _format_can_termination_log(backend_key: str, termination_enabled: bool) -> str:
+    normalized_backend = str(backend_key or "").strip().lower()
+    if normalized_backend == "usbcanfd_200u":
+        return f"内部120Ω终端电阻={'开启' if termination_enabled else '关闭'}"
+    if normalized_backend == "zqwl_ucan_cdc":
+        return "120Ω终端电阻由 ZQWL 设备拨码控制，请检查接线与拨码状态"
+    return f"120Ω终端电阻配置={'开启' if termination_enabled else '关闭'}（由当前适配器能力决定是否生效）"
+
+
 def _open_protocol_channel_resources(protocol: str, config: dict[str, Any], logs: list[str]) -> tuple[Optional[Any], Optional[CanAdapterConnection], Optional[WchGpioConnection], list[str], dict[str, Any]]:
     serial_connection = None
     can_connection = None
@@ -3235,19 +3280,23 @@ def _open_protocol_channel_resources(protocol: str, config: dict[str, Any], logs
         resolved_config["sdk_device_index"] = can_connection.device.sdk_device_index
         resolved_config["physical_channel"] = can_connection.channel_name
         resolved_config["channel"] = can_connection.channel_name
+        termination_log = _format_can_termination_log(
+            can_connection.device.backend_key,
+            bool(resolved_config.get("termination_enabled")),
+        )
         if protocol == "can":
             logs = [
                 *logs,
                 f"适配器连接成功：{can_connection.device.adapter_name} / {can_connection.device.serial_number or '-'} / {resolved_config.get('com_port') or '-'}",
                 f"物理通道 {can_connection.channel_name} 初始化完成，已按经典 CAN 波特率 {resolved_config.get('baud_rate') or resolved_config.get('bitrate') or '-'} 配置",
-                "120Ω 终端电阻由 ZQWL 设备拨码控制，请检查接线与拨码状态",
+                termination_log,
                 f"物理通道 {can_connection.channel_name} 启动成功，持续接收线程将在会话建立后自动开始",
             ]
         else:
             logs = [
                 *logs,
                 f"适配器连接成功：{can_connection.device.adapter_name} / {can_connection.device.serial_number or '-'}",
-                f"物理通道 {can_connection.channel_name} 初始化完成，内部120Ω终端电阻={'开启' if bool(resolved_config.get('termination_enabled')) else '关闭'}",
+                f"物理通道 {can_connection.channel_name} 初始化完成，{termination_log}",
                 f"物理通道 {can_connection.channel_name} 启动成功，持续接收线程将在会话建立后自动开始",
             ]
         return serial_connection, can_connection, wch_connection, logs, resolved_config
@@ -3725,7 +3774,14 @@ async def send_frame(
     merged_config = {**session_config, **runtime_config}
     payload_data = payload.data
     if protocol in {"can", "canfd"}:
-        merged_config = _normalize_can_runtime_config(protocol, merged_config)
+        # The connection already owns the physical adapter. Re-enumerating it
+        # here makes the vendor SDK report our own open handle as "device busy"
+        # and overwrites the valid sdk_device_index stored at connect time.
+        merged_config = _normalize_can_runtime_config(
+            protocol,
+            merged_config,
+            refresh_adapter=False,
+        )
         return await _send_can_protocol_frame(
             db=db,
             session=session,
@@ -3873,7 +3929,6 @@ async def send_frame(
     rx_data: Optional[str] = None
     endpoint_info: dict[str, Any] = {}
     if protocol == "serial":
-        timeout = SERIAL_DEFAULT_TIMEOUT_SECONDS
         serial_connection = _get_serial_session_connection(session.id)
         serial_io_lock = _get_serial_session_io_lock(session.id)
         if serial_connection is None:
@@ -3887,22 +3942,11 @@ async def send_frame(
             )
         try:
             payload_bytes = _encode_protocol_payload(payload_data, merged_config.get("data_type"))
-            rx_data, rx_dlc = await asyncio.to_thread(
-                _run_serial_exchange,
-                str(merged_config.get("com_port") or ""),
+            await asyncio.to_thread(
+                _write_serial_payload,
+                serial_connection,
                 payload_bytes,
-                baud_rate=int(merged_config.get("baud_rate") or 115200),
-                data_bits=int(merged_config.get("data_bits") or 8),
-                stop_bits=float(merged_config.get("stop_bits") or 1),
-                parity=str(merged_config.get("parity") or "NONE"),
-                timeout=float(timeout),
-                flow_control=str(merged_config.get("flow_control") or "NONE"),
-                expected_length=_parse_non_negative_int(merged_config.get("length_bytes")),
-                data_type=merged_config.get("data_type"),
-                existing_connection=serial_connection,
-                existing_io_lock=serial_io_lock,
-                close_when_done=False,
-                require_reply=False,
+                io_lock=serial_io_lock,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             _close_serial_session_connection(session.id)
@@ -3981,11 +4025,7 @@ async def send_frame(
         db.add(rx)
         session.rx_count += 1
     if protocol == "serial":
-        success_detail = (
-            "验证通过：串口数据写入成功，收到回复数据作为补充证据"
-            if rx_data
-            else "验证通过：串口数据写入成功，观察窗口未收到回复不影响判定"
-        )
+        success_detail = "验证通过：串口数据写入成功；接收数据由监听线程持续采集，不将终端回显误判为命令回复"
         _persist_validation_result(session, merged_config, passed=True, detail=success_detail, code="serial_tx_passed", payload_length=payload_length)
         _append_system_log(db, session, success_detail)
     elif protocol == "ethernet":
