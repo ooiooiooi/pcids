@@ -9,6 +9,7 @@ const runtimePath = path.resolve(
 const {
   expandRepositoryFolder,
   findDownloadAddressLink,
+  isRootFilesListPayload,
   projectMetadataFromPage,
   selectRepositoryFile,
 } = require(runtimePath)
@@ -18,6 +19,28 @@ const { chromium } = require(
     'tools/codearts_release_debugger/browser_runtime/node_modules/playwright',
   ),
 )
+
+test('only the first project root page can seed a full sync snapshot', () => {
+  assert.equal(
+    isRootFilesListPayload({ projectId: 'project-1', pageNo: 1 }, 'project-1'),
+    true,
+  )
+  assert.equal(
+    isRootFilesListPayload(
+      { projectId: 'project-1', parentId: 'folder-1', pageNo: 1 },
+      'project-1',
+    ),
+    false,
+  )
+  assert.equal(
+    isRootFilesListPayload({ projectId: 'project-1', pageNo: 2 }, 'project-1'),
+    false,
+  )
+  assert.equal(
+    isRootFilesListPayload({ projectId: 'another-project', pageNo: 1 }, 'project-1'),
+    false,
+  )
+})
 
 test('按目录树选择文件后定位右侧“下载地址”链接', async (t) => {
   const browser = await chromium.launch({ headless: true })

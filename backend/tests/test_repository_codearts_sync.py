@@ -444,6 +444,113 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         self.assertEqual(changes[0].change_type, "upsert")
         self.assertEqual(changes[0].source, "codearts_sync")
 
+    def test_web_refresh_preserves_old_rows_when_browser_snapshot_is_partial(self):
+        project_id = "partial-web-project"
+        project_key = f"proj_{project_id}"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            updated_by_user_id=self.user.id,
+            codearts_config_json=json.dumps(
+                {
+                    "enabled": True,
+                    "repository_mode": "private",
+                    "private_source": "web",
+                    "domain_name": "tenant",
+                    "username": "demo-user",
+                    "password": "demo-password",
+                    "region": "cn-cq-1",
+                    "project_id": project_id,
+                    "devops_url": "https://devops.example.com",
+                },
+                ensure_ascii=False,
+            ),
+        )
+        old_repo = Repository(
+            name="old.bin",
+            project_key=project_key,
+            created_by_user_id=self.user.id,
+            source_type="codearts_sync",
+            remote_repo_id="web-private",
+            display_path="/old/old.bin",
+            download_uri="https://devops.example.com/download?id=old",
+            repo_detail_json=json.dumps(
+                {"repository_mode": "private", "private_source": "web"},
+                ensure_ascii=False,
+            ),
+        )
+        self.db.add_all([setting, old_repo])
+        self.db.commit()
+        self.db.refresh(old_repo)
+        old_repo_id = old_repo.id
+
+        partial_files = [
+            {
+                "project_id": project_id,
+                "project_name": "Partial Project",
+                "remote_repo_id": "web-private",
+                "name": "new.bin",
+                "display_path": "/selected-folder/new.bin",
+                "download_uri": "https://devops.example.com/download?id=new",
+                "repo_detail": {
+                    "project_name": "Partial Project",
+                    "repository_mode": "private",
+                    "private_source": "web",
+                },
+                "file_detail": {"size": 10},
+            }
+        ]
+
+        with (
+            patch("backend.routers.repositories.ensure_schema"),
+            patch(
+                "backend.routers.repositories._list_codearts_web_private_files",
+                return_value=(
+                    partial_files,
+                    {
+                        "summary": {
+                            "snapshotComplete": False,
+                            "directoryErrors": [
+                                {"path": "/", "message": "incomplete root traversal"}
+                            ],
+                            "detailErrors": [],
+                        },
+                        "request_records": [],
+                        "folders": [],
+                        "remote_project": {
+                            "id": project_id,
+                            "name": "Partial Project",
+                            "source": "page_breadcrumb",
+                        },
+                    },
+                ),
+            ),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(
+                    sync_codearts_project(
+                        {"project_id": project_id, "full_refresh": True},
+                        self.db,
+                        self.user,
+                        None,
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertIn("已保留原有仓库数据", raised.exception.detail)
+        rows = (
+            self.db.query(Repository)
+            .filter(Repository.project_key == project_key)
+            .all()
+        )
+        self.assertEqual([row.id for row in rows], [old_repo_id])
+        self.assertEqual(rows[0].name, "old.bin")
+        self.assertEqual(
+            self.db.query(RepositorySyncChange)
+            .filter(RepositorySyncChange.project_key == project_key)
+            .count(),
+            0,
+        )
+
     def test_project_create_cannot_silently_overwrite_existing_config(self):
         project_id = "existing-project"
         project_key = f"proj_{project_id}"

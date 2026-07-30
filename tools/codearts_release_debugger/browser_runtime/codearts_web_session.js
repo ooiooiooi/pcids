@@ -154,6 +154,18 @@ function projectMetadataFromResponse(body, payload, projectId) {
   return null;
 }
 
+function isRootFilesListPayload(payload, projectId) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const payloadProjectId = String(source.projectId || source.project_id || '').trim();
+  const expectedProjectId = String(projectId || '').trim();
+  const parentId = String(source.parentId || source.parent_id || '').trim();
+  const pageNo = Math.max(1, Number(source.pageNo || source.page_no) || 1);
+  return Boolean(expectedProjectId) &&
+    payloadProjectId === expectedProjectId &&
+    !parentId &&
+    pageNo === 1;
+}
+
 async function projectMetadataFromPage(page, projectId) {
   const encodedProjectId = encodeURIComponent(String(projectId || ''));
   // The Software Release Repository page shown by Huawei Cloud exposes the
@@ -867,7 +879,12 @@ async function main() {
       capturedRemoteProject = capturedRemoteProject ||
         projectMetadataFromResponse(body, payload, config.projectId);
       if (body.result.data.some(item => String(item && item.type || '').toLowerCase() === 'project')) return;
-      if (String(payload.projectId || '') !== String(config.projectId || '')) return;
+      // Folder navigation triggers the same files/list interface with parentId.
+      // Only the first page of the project root is a valid full-sync template.
+      // Otherwise whichever subfolder responds last can replace the root snapshot
+      // and a full refresh will incorrectly remove files outside that subfolder.
+      if (!isRootFilesListPayload(payload, config.projectId)) return;
+      if (capturedListTemplate) return;
       capturedCftk = headers.cftk || headers.Cftk || capturedCftk;
       const allowedHeaders = [
         'accept', 'content-type', 'cftk', 'language', 'x-language', 'x-requested-with',
@@ -957,6 +974,9 @@ async function main() {
       ...capturedListTemplate.payload,
       projectId: config.projectId,
     };
+    delete capturedPayload.parentId;
+    delete capturedPayload.parent_id;
+    delete capturedPayload.page_no;
     const templateCftk = capturedListTemplate.headers.cftk || capturedCftk || cftk;
 
     const requestJson = async (method, url, payload) => {
@@ -1009,6 +1029,8 @@ async function main() {
       };
       delete projectListPayload.projectId;
       delete projectListPayload.parentId;
+      delete projectListPayload.project_id;
+      delete projectListPayload.parent_id;
       const projectListUrl = `${capturedListUrl.split('?')[0]}?_=${Date.now()}`;
       const projectListResponse = await requestJson('POST', projectListUrl, projectListPayload);
       capturedRemoteProject = projectMetadataFromResponse(
@@ -1290,6 +1312,7 @@ async function main() {
 
     await fetchDirectory('', '/');
     const hasErrors = directoryErrors.length > 0 || detailErrors.length > 0;
+    const snapshotComplete = !sessionExpired && !hasErrors;
     const apiResult = {
       ok: !sessionExpired,
       status: sessionExpired ? Number(sessionFailureResponse && sessionFailureResponse.status) || 401 : (hasErrors ? 207 : 200),
@@ -1326,6 +1349,10 @@ async function main() {
       },
       requestRecords,
       summary: {
+        snapshotComplete,
+        rootTemplateProjectId: String(capturedListTemplate.payload.projectId || ''),
+        rootTemplateParentId: String(capturedListTemplate.payload.parentId || ''),
+        rootTemplatePageNo: Math.max(1, Number(capturedListTemplate.payload.pageNo) || 1),
         visitedDirectoryCount: visitedFolders.size,
         folderCount,
         fileCount,
@@ -1373,6 +1400,7 @@ module.exports = {
   expandRepositoryFolder,
   findDownloadAddressLink,
   findRepositoryTreeNode,
+  isRootFilesListPayload,
   projectMetadataFromPage,
   selectRepositoryFile,
 };

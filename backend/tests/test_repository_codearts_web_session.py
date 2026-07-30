@@ -13,6 +13,7 @@ from backend.routers.repositories import (
     _codearts_web_download_candidates,
     _codearts_web_child_env,
     _codearts_web_runtime_script,
+    _codearts_web_snapshot_status,
     _encrypt_codearts_web_download,
     _list_codearts_web_private_files,
     _normalize_codearts_web_display_text,
@@ -56,7 +57,10 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
     def test_runtime_uses_project_scoped_template_session_and_full_recursion(self):
         script = (Path(__file__).resolve().parents[2] / "tools" / "codearts_release_debugger" / "browser_runtime" / "codearts_web_session.js")
         source = script.read_text(encoding="utf-8")
-        self.assertIn("String(payload.projectId || '') !== String(config.projectId || '')", source)
+        self.assertIn("isRootFilesListPayload(payload, config.projectId)", source)
+        self.assertIn("if (capturedListTemplate) return", source)
+        self.assertIn("delete capturedPayload.parentId", source)
+        self.assertIn("snapshotComplete", source)
         self.assertIn("type || '').toLowerCase() === 'project'", source)
         self.assertIn("const templateCftk = capturedListTemplate.headers.cftk", source)
         self.assertIn("rawHeaders: headers", source)
@@ -91,6 +95,21 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
         self.assertIn("files_list_project", source)
         self.assertIn("page.waitForEvent('download'", source)
         self.assertIn("nativeDownload.saveAs(config.downloadOutputPath)", source)
+
+    def test_partial_web_snapshot_is_not_safe_for_full_refresh(self):
+        complete, reasons = _codearts_web_snapshot_status(
+            {
+                "summary": {
+                    "snapshotComplete": False,
+                    "directoryErrors": [{"path": "/firmware"}],
+                    "detailErrors": [],
+                }
+            }
+        )
+
+        self.assertFalse(complete)
+        self.assertIn("browser_runtime_marked_snapshot_incomplete", reasons)
+        self.assertIn("directory_errors=1", reasons)
 
     def test_normalizes_web_details_and_retains_directory_metadata(self):
         response = {

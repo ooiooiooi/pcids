@@ -1925,6 +1925,28 @@ def _codearts_web_child_env(runtime: Path) -> dict:
     return child_env
 
 
+def _codearts_web_snapshot_status(sync_meta: Optional[dict]) -> tuple[bool, list[str]]:
+    """Return whether a browser sync produced a complete, safe-to-apply snapshot."""
+    source = sync_meta if isinstance(sync_meta, dict) else {}
+    summary = source.get("summary") if isinstance(source.get("summary"), dict) else {}
+    reasons: list[str] = []
+
+    if summary.get("snapshotComplete") is False:
+        reasons.append("browser_runtime_marked_snapshot_incomplete")
+
+    directory_errors = summary.get("directoryErrors")
+    if isinstance(directory_errors, list) and directory_errors:
+        reasons.append(f"directory_errors={len(directory_errors)}")
+
+    detail_errors = summary.get("detailErrors")
+    if isinstance(detail_errors, list) and detail_errors:
+        reasons.append(f"detail_errors={len(detail_errors)}")
+
+    # Backward compatibility for tests and older runtime reports: an omitted
+    # snapshotComplete flag is acceptable only when no errors were reported.
+    return not reasons, reasons
+
+
 def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
     trace_id = f"web-list-{uuid.uuid4().hex[:12]}"
     started_at = time.monotonic()
@@ -2083,9 +2105,15 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
             "file_detail": detail})
     # Empty folders are retained as metadata; the common tree builder receives the
     # same normalized files, while folder paths below are materialized by the sync.
+    raw_summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
+    snapshot_complete, snapshot_incomplete_reasons = _codearts_web_snapshot_status(
+        {"summary": raw_summary}
+    )
     diagnostics = _sanitize_codearts_web_diagnostics({
         "trace_id": trace_id,
-        "summary": raw.get("summary") or {},
+        "summary": raw_summary,
+        "snapshot_complete": snapshot_complete,
+        "snapshot_incomplete_reasons": snapshot_incomplete_reasons,
         "request_records": raw.get("requestRecords") or [],
         "folders": folders,
         "remote_project": {
@@ -2117,6 +2145,8 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
         request_count=len(diagnostics.get("request_records") or []),
         browser_stdout_tail=getattr(completed, "stdout", "")[-2000:],
         progress=progress,
+        snapshot_complete=snapshot_complete,
+        snapshot_incomplete_reasons=snapshot_incomplete_reasons,
         login_diagnostics=(raw.get("summary") or {}).get("loginDiagnostics") or raw.get("loginDiagnostics") or [],
         interfaces=[
             str(item.get("interface") or "")
@@ -4525,6 +4555,23 @@ async def sync_codearts_project(
                 _list_codearts_web_private_files,
                 merged,
             )
+            snapshot_complete, snapshot_incomplete_reasons = (
+                _codearts_web_snapshot_status(web_sync_meta)
+            )
+            if not snapshot_complete:
+                _log_event(
+                    "repository.codearts_web_sync.snapshot_rejected",
+                    level="error",
+                    **_current_user_log_context(current_user),
+                    project_key=f"proj_{project_id}",
+                    remote_file_count=len(codearts_files),
+                    reasons=snapshot_incomplete_reasons,
+                    summary=web_sync_meta.get("summary") or {},
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="本次网页同步未获取到完整的制品快照，已保留原有仓库数据，请重新同步",
+                )
             remote_project_meta = (
                 web_sync_meta.get("remote_project")
                 if isinstance(web_sync_meta.get("remote_project"), dict)
