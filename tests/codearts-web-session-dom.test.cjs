@@ -44,8 +44,10 @@ test('按目录树选择文件后定位右侧“下载地址”链接', async (t
             <div id="al321" hidden>
               <div role="treeitem" data-file-id="file-123" onclick="
                   fetch('/cloudartifact/v1/files/file-123/info');
-                  document.getElementById('detail').innerHTML =
-                    '<div><span>下载地址</span><a download=&quot;BOOT_with_bit.bin&quot; href=&quot;data:application/octet-stream;base64,ZmlybXdhcmU=&quot;>https://example.test/cloudartifact/v1/files/download?filename=BOOT_with_bit.bin</a></div>'
+                  setTimeout(() => {
+                    document.getElementById('detail').innerHTML =
+                      '<div><span>下载地址</span><span class=&quot;flex-grow-0 flex-shrink truncate devui-link&quot; title=&quot;https://example.test/cloudartifact/v1/files/download?filename=BOOT_with_bit.bin&quot; onclick=&quot;const link=document.createElement(\\'a\\');link.download=\\'BOOT_with_bit.bin\\';link.href=\\'data:application/octet-stream;base64,ZmlybXdhcmU=\\';link.click()&quot;>https://example.test/cloudartifact/v1/files/download?filename=BOOT_with_bit.bin</span></div>'
+                  }, 1200)
                 ">
                 <span>BOOT_with_bit.bin</span>
               </div>
@@ -72,6 +74,8 @@ test('按目录树选择文件后定位右侧“下载地址”链接', async (t
   const downloadLink = await findDownloadAddressLink(page)
   assert.ok(downloadLink)
   assert.match(downloadLink.source, /下载地址/)
+  assert.equal(downloadLink.element.tag, 'SPAN')
+  assert.match(downloadLink.element.class_name, /devui-link/)
   assert.deepEqual(
     navigation.filter(item => item.stage === 'folder').map(item => item.outcome),
     ['opened', 'opened'],

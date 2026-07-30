@@ -421,12 +421,63 @@ async function selectRepositoryFile(page, target, navigation) {
   });
 }
 
-async function findDownloadAddressLink(page) {
+async function visibleDownloadUrlCandidate(locator, labelBox = null) {
+  const count = Math.min(await locator.count().catch(() => 0), 400);
+  let selected = null;
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    if (!await candidate.isVisible({ timeout: 200 }).catch(() => false)) continue;
+    const href = String(await candidate.getAttribute('href').catch(() => '') || '');
+    const dataHref = String(
+      await candidate.getAttribute('data-href').catch(() => '') ||
+      await candidate.getAttribute('data-url').catch(() => '') ||
+      '',
+    );
+    const title = String(await candidate.getAttribute('title').catch(() => '') || '');
+    const value = String(await candidate.getAttribute('value').catch(() => '') || '');
+    const text = String(await candidate.textContent().catch(() => '') || '').trim();
+    const displayedUrl = [href, dataHref, title, value, text]
+      .find(item => /^https?:\/\//i.test(String(item || '').trim())) || '';
+    if (!displayedUrl) continue;
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) continue;
+    const centerY = box.y + (box.height / 2);
+    const labelCenterY = labelBox ? labelBox.y + (labelBox.height / 2) : centerY;
+    const rowDistance = Math.abs(centerY - labelCenterY);
+    const leftPenalty = labelBox && box.x <= labelBox.x ? 100000 : 0;
+    const score = leftPenalty + (rowDistance * 100) + Math.min(displayedUrl.length, 1000);
+    if (!selected || score < selected.score) {
+      selected = { locator: candidate, box, score, displayedUrl, href, text };
+    }
+  }
+  return selected;
+}
+
+async function clickableDownloadUrlLocator(candidate) {
+  const clickableAncestor = candidate.locator.locator(
+    'xpath=ancestor-or-self::*[self::a or self::button or @role="link" or @onclick or ' +
+    'contains(translate(@class,"LINK","link"),"link") or ' +
+    'contains(translate(@class,"URL","url"),"url")][1]',
+  );
+  if (
+    await clickableAncestor.count().catch(() => 0) > 0 &&
+    await clickableAncestor.first().isVisible({ timeout: 200 }).catch(() => false)
+  ) {
+    return clickableAncestor.first();
+  }
+  // React/Vue often attaches the handler through runtime properties, so the
+  // DOM has no onclick attribute. Clicking the visible URL leaf still bubbles
+  // to the component handler.
+  return candidate.locator;
+}
+
+async function findDownloadAddressLinkOnce(page) {
   const labels = page.getByText('下载地址', { exact: true });
   const labelCount = Math.min(await labels.count().catch(() => 0), 20);
   for (let labelIndex = 0; labelIndex < labelCount; labelIndex += 1) {
     const label = labels.nth(labelIndex);
     if (!await label.isVisible({ timeout: 250 }).catch(() => false)) continue;
+    const labelBox = await label.boundingBox().catch(() => null);
     let container = label;
     for (let depth = 1; depth <= 6; depth += 1) {
       container = container.locator('xpath=..');
@@ -445,6 +496,25 @@ async function findDownloadAddressLink(page) {
           };
         }
       }
+
+      // Huawei Cloud currently renders the blue address as a custom clickable
+      // span/div on some deployments instead of a semantic <a href="...">.
+      const textUrls = container.locator(
+        'span, div, p, td, dd, code, input, [title^="http"], [data-href^="http"], [data-url^="http"]',
+      );
+      const urlCandidate = await visibleDownloadUrlCandidate(textUrls, labelBox);
+      if (urlCandidate) {
+        return {
+          locator: await clickableDownloadUrlLocator(urlCandidate),
+          source: `visible URL beside 下载地址 (ancestor depth ${depth})`,
+          href: safeUrlForLog(urlCandidate.displayedUrl),
+          element: {
+            tag: await urlCandidate.locator.evaluate(element => element.tagName).catch(() => ''),
+            class_name: String(await urlCandidate.locator.getAttribute('class').catch(() => '') || ''),
+            role: String(await urlCandidate.locator.getAttribute('role').catch(() => '') || ''),
+          },
+        };
+      }
     }
   }
 
@@ -452,12 +522,83 @@ async function findDownloadAddressLink(page) {
     'a[href*="/files/download"], a[href*="download?"], [role="link"][data-href*="/files/download"]',
   );
   const selected = await visibleLocatorByHorizontalPosition(downloadLinks, true);
-  if (!selected) return null;
-  const href = String(await selected.locator.getAttribute('href').catch(() => '') || '');
+  if (selected) {
+    const href = String(await selected.locator.getAttribute('href').catch(() => '') || '');
+    return {
+      locator: selected.locator,
+      source: 'rightmost visible file download link',
+      href: safeUrlForLog(href),
+    };
+  }
+
+  const globalTextUrls = page.locator(
+    'span, div, p, td, dd, code, input, [title^="http"], [data-href^="http"], [data-url^="http"]',
+  );
+  const globalUrlCandidate = await visibleDownloadUrlCandidate(globalTextUrls);
+  if (!globalUrlCandidate) return null;
   return {
-    locator: selected.locator,
-    source: 'rightmost visible file download link',
-    href: safeUrlForLog(href),
+    locator: await clickableDownloadUrlLocator(globalUrlCandidate),
+    source: 'visible HTTP URL text in file detail',
+    href: safeUrlForLog(globalUrlCandidate.displayedUrl),
+    element: {
+      tag: await globalUrlCandidate.locator.evaluate(element => element.tagName).catch(() => ''),
+      class_name: String(await globalUrlCandidate.locator.getAttribute('class').catch(() => '') || ''),
+      role: String(await globalUrlCandidate.locator.getAttribute('role').catch(() => '') || ''),
+    },
+  };
+}
+
+async function findDownloadAddressLink(page, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const found = await findDownloadAddressLinkOnce(page);
+    if (found) return found;
+    await page.waitForTimeout(300);
+  } while (Date.now() < deadline);
+  return null;
+}
+
+async function collectDownloadAddressDiagnostics(page) {
+  const labels = page.getByText('下载地址', { exact: true });
+  const labelCount = Math.min(await labels.count().catch(() => 0), 20);
+  let visibleLabelCount = 0;
+  for (let index = 0; index < labelCount; index += 1) {
+    if (await labels.nth(index).isVisible({ timeout: 100 }).catch(() => false)) visibleLabelCount += 1;
+  }
+  const candidates = page.locator(
+    'a, [role="link"], span, div, p, td, dd, code, input, [title], [data-href], [data-url]',
+  );
+  const count = Math.min(await candidates.count().catch(() => 0), 1200);
+  const visibleUrlElements = [];
+  for (let index = 0; index < count && visibleUrlElements.length < 20; index += 1) {
+    const candidate = candidates.nth(index);
+    if (!await candidate.isVisible({ timeout: 80 }).catch(() => false)) continue;
+    const values = [
+      await candidate.getAttribute('href').catch(() => ''),
+      await candidate.getAttribute('data-href').catch(() => ''),
+      await candidate.getAttribute('data-url').catch(() => ''),
+      await candidate.getAttribute('title').catch(() => ''),
+      await candidate.getAttribute('value').catch(() => ''),
+      await candidate.textContent().catch(() => ''),
+    ].map(value => String(value || '').trim());
+    const urlValue = values.find(value => /^https?:\/\//i.test(value));
+    if (!urlValue) continue;
+    const box = await candidate.boundingBox().catch(() => null);
+    visibleUrlElements.push({
+      tag: await candidate.evaluate(element => element.tagName).catch(() => ''),
+      class_name: String(await candidate.getAttribute('class').catch(() => '') || '').slice(0, 300),
+      role: String(await candidate.getAttribute('role').catch(() => '') || ''),
+      safe_url: safeUrlForLog(urlValue),
+      x: box ? Math.round(box.x) : null,
+      y: box ? Math.round(box.y) : null,
+      width: box ? Math.round(box.width) : null,
+      height: box ? Math.round(box.height) : null,
+    });
+  }
+  return {
+    download_address_label_count: labelCount,
+    download_address_visible_label_count: visibleLabelCount,
+    visible_url_elements: visibleUrlElements,
   };
 }
 
@@ -934,10 +1075,12 @@ async function main() {
       const linkStartedAt = Date.now();
       const downloadLink = await findDownloadAddressLink(page);
       if (!downloadLink) {
+        const domDiagnostics = await collectDownloadAddressDiagnostics(page);
         navigation.push({
           stage: 'download_address',
           label: '下载地址',
           outcome: 'not_found',
+          dom_diagnostics: domDiagnostics,
           elapsed_ms: Date.now() - linkStartedAt,
         });
         throw new Error('下载地址定位失败：文件详情已打开，但未找到右侧“下载地址”链接');
@@ -949,6 +1092,7 @@ async function main() {
         outcome: 'clicking',
         source: downloadLink.source,
         href: downloadLink.href,
+        element: downloadLink.element || null,
         elapsed_ms: Date.now() - linkStartedAt,
       });
       await downloadLink.locator.scrollIntoViewIfNeeded().catch(() => {});
