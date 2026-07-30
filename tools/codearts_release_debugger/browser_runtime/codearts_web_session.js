@@ -111,6 +111,356 @@ function bodyDiagnostics(text, contentType) {
   };
 }
 
+function firstText(source, keys) {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function projectMetadataFromResponse(body, payload, projectId) {
+  const result = body && body.result;
+  const data = result && Array.isArray(result.data) ? result.data : [];
+  const projectItems = data.filter(item =>
+    item && typeof item === 'object' &&
+    String(item.type || item.nodeType || item.resourceType || '').toLowerCase() === 'project'
+  );
+  const matchesProject = item => {
+    const ids = [
+      item.projectId, item.project_id, item.id, item.uuid, item.key,
+      item.project && (item.project.id || item.project.projectId),
+    ].filter(value => value !== undefined && value !== null).map(String);
+    return ids.includes(String(projectId || ''));
+  };
+  const selected = projectItems.find(matchesProject) || (projectItems.length === 1 ? projectItems[0] : null);
+  if (selected) {
+    const nestedProject = selected.project && typeof selected.project === 'object' ? selected.project : {};
+    const name = firstText(selected, ['projectName', 'project_name', 'displayName', 'display_name', 'name', 'title']) ||
+      firstText(nestedProject, ['projectName', 'project_name', 'displayName', 'display_name', 'name', 'title']);
+    if (name) {
+      return { id: String(projectId || selected.projectId || selected.id || ''), name, source: 'files_list_project' };
+    }
+  }
+  const payloadName = firstText(payload, ['projectName', 'project_name']);
+  if (payloadName) {
+    return { id: String(projectId || ''), name: payloadName, source: 'files_list_payload' };
+  }
+  const resultName = firstText(result, ['projectName', 'project_name']);
+  if (resultName) {
+    return { id: String(projectId || ''), name: resultName, source: 'files_list_result' };
+  }
+  return null;
+}
+
+async function projectMetadataFromPage(page, projectId) {
+  const encodedProjectId = encodeURIComponent(String(projectId || ''));
+  // The Software Release Repository page shown by Huawei Cloud exposes the
+  // authoritative project name in the breadcrumb:
+  // 首页 / {项目名称} / 制品仓库 / 软件发布库.
+  const breadcrumbSelectors = [
+    'nav[aria-label*="breadcrumb" i]',
+    '[class*="breadcrumb"]',
+    '[class*="Breadcrumb"]',
+  ];
+  for (const selector of breadcrumbSelectors) {
+    try {
+      const breadcrumbs = page.locator(selector);
+      const count = Math.min(await breadcrumbs.count(), 10);
+      for (let index = 0; index < count; index += 1) {
+        const breadcrumb = breadcrumbs.nth(index);
+        if (!await breadcrumb.isVisible({ timeout: 300 })) continue;
+        const text = String(await breadcrumb.innerText() || '');
+        const parts = text
+          .split(/[/>｜|\n\r]+/)
+          .map(value => value.trim())
+          .filter(Boolean);
+        const repositoryIndex = parts.findIndex(value => value === '制品仓库');
+        const name = repositoryIndex > 0 ? parts[repositoryIndex - 1] : '';
+        if (name && name !== '首页' && name !== String(projectId || '') && name.length <= 200) {
+          return { id: String(projectId || ''), name, source: 'page_breadcrumb' };
+        }
+      }
+    } catch (_) {}
+  }
+
+  const selectors = [
+    `[data-project-id="${String(projectId || '').replace(/"/g, '\\"')}"][data-project-name]`,
+    `[href*="/project/${encodedProjectId}/"][title]`,
+    '[class*="project-name"]',
+    '[class*="projectName"]',
+    '[class*="repository-name"]',
+    '[class*="repositoryName"]',
+  ];
+  for (const selector of selectors) {
+    try {
+      const matches = page.locator(selector);
+      const count = Math.min(await matches.count(), 10);
+      for (let index = 0; index < count; index += 1) {
+        const element = matches.nth(index);
+        if (!await element.isVisible({ timeout: 300 })) continue;
+        const name = String(
+          await element.getAttribute('data-project-name') ||
+          await element.getAttribute('title') ||
+          await element.textContent() ||
+          ''
+        ).trim();
+        if (name && name !== String(projectId || '') && name.length <= 200) {
+          return { id: String(projectId || ''), name, source: 'page_dom' };
+        }
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+function safeUrlForLog(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function cssAttributeValue(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function visibleLocatorByHorizontalPosition(locator, preferRight = false) {
+  const count = Math.min(await locator.count().catch(() => 0), 100);
+  let selected = null;
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    if (!await candidate.isVisible({ timeout: 250 }).catch(() => false)) continue;
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) continue;
+    if (!selected || (preferRight ? box.x > selected.box.x : box.x < selected.box.x)) {
+      selected = { locator: candidate, box };
+    }
+  }
+  return selected;
+}
+
+async function findRepositoryTreeNodeOnce(page, label, artifactId = '') {
+  const selectors = [];
+  if (artifactId) {
+    const escapedId = cssAttributeValue(artifactId);
+    selectors.push(
+      `[role="treeitem"][data-key="${escapedId}"]`,
+      `[role="treeitem"][data-id="${escapedId}"]`,
+      `[data-row-key="${escapedId}"]`,
+      `[data-node-id="${escapedId}"]`,
+      `[data-file-id="${escapedId}"]`,
+    );
+  }
+
+  for (const selector of selectors) {
+    const selected = await visibleLocatorByHorizontalPosition(page.locator(selector));
+    if (selected) {
+      const exactChild = label
+        ? await visibleLocatorByHorizontalPosition(selected.locator.getByText(label, { exact: true }))
+        : null;
+      return {
+        locator: exactChild ? exactChild.locator : selected.locator,
+        row: selected.locator,
+        box: exactChild ? exactChild.box : selected.box,
+        label,
+        source: selector,
+      };
+    }
+  }
+
+  if (!label) return null;
+  const selected = await visibleLocatorByHorizontalPosition(page.getByText(label, { exact: true }));
+  if (!selected) return null;
+  const treeRow = selected.locator.locator(
+    'xpath=ancestor-or-self::*[@role="treeitem" or @role="row" or self::li or ' +
+    'contains(@class,"tree-node") or contains(@class,"treeNode") or ' +
+    'contains(@class,"tree-item") or contains(@class,"treeItem")][1]',
+  );
+  const row = await visibleLocatorByHorizontalPosition(treeRow);
+  return {
+    locator: selected.locator,
+    row: row ? row.locator : selected.locator,
+    box: selected.box,
+    label,
+    source: 'exact visible text in leftmost repository tree',
+  };
+}
+
+async function findRepositoryTreeNode(page, label, artifactId = '', loadMore = true) {
+  let found = await findRepositoryTreeNodeOnce(page, label, artifactId);
+  if (found || !loadMore) return found;
+
+  // The Huawei Cloud tree lazily shows a "加载更多" row.  Keep the search
+  // inside the leftmost visible tree and load additional siblings as needed.
+  for (let attempt = 1; attempt <= 20 && !found; attempt += 1) {
+    const loadMoreNode = await visibleLocatorByHorizontalPosition(
+      page.getByText('加载更多', { exact: true }),
+    );
+    if (!loadMoreNode) break;
+    await loadMoreNode.locator.scrollIntoViewIfNeeded().catch(() => {});
+    await loadMoreNode.locator.click({ timeout: 10000 });
+    await page.waitForTimeout(600);
+    found = await findRepositoryTreeNodeOnce(page, label, artifactId);
+  }
+  return found;
+}
+
+async function waitForRepositoryTreeNode(page, label, artifactId = '', timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = await findRepositoryTreeNode(page, label, artifactId, false);
+    if (found) return found;
+    await page.waitForTimeout(300);
+  }
+  return null;
+}
+
+async function expandRepositoryFolder(page, folderName, nextName, navigation) {
+  const startedAt = Date.now();
+  const node = await findRepositoryTreeNode(page, folderName);
+  if (!node) {
+    navigation.push({
+      stage: 'folder',
+      name: folderName,
+      outcome: 'not_found',
+      elapsed_ms: Date.now() - startedAt,
+    });
+    throw new Error(`下载目录定位失败：页面左侧目录树中未找到“${folderName}”`);
+  }
+
+  const row = node.row || node.locator;
+  await node.locator.scrollIntoViewIfNeeded().catch(() => {});
+  await node.locator.click({ timeout: 15000 });
+  await page.waitForTimeout(500);
+  let nextNode = nextName
+    ? await waitForRepositoryTreeNode(page, nextName, '', 1200)
+    : null;
+  let expansionMethod = 'folder label click';
+
+  if (nextName && !nextNode) {
+    const toggleSelectors = [
+      '[aria-expanded="false"]',
+      '[class*="switcher"]',
+      '[class*="toggle"]',
+      '[class*="expand"]',
+      '[class*="fold"]',
+      '[class*="arrow"]',
+      'button',
+    ];
+    let toggled = false;
+    for (const selector of toggleSelectors) {
+      const toggle = await visibleLocatorByHorizontalPosition(row.locator(selector));
+      if (!toggle) continue;
+      await toggle.locator.click({ timeout: 10000 });
+      toggled = true;
+      expansionMethod = `folder expansion control: ${selector}`;
+      await page.waitForTimeout(700);
+      break;
+    }
+    nextNode = await waitForRepositoryTreeNode(page, nextName, '', 2500);
+    if (!nextNode && !toggled) {
+      await node.locator.dblclick({ timeout: 10000 });
+      expansionMethod = 'folder label double click';
+      await page.waitForTimeout(700);
+      nextNode = await waitForRepositoryTreeNode(page, nextName, '', 2500);
+    }
+  }
+
+  navigation.push({
+    stage: 'folder',
+    name: folderName,
+    next_name: nextName || '',
+    outcome: !nextName || nextNode ? 'opened' : 'child_not_found',
+    method: expansionMethod,
+    source: node.source,
+    elapsed_ms: Date.now() - startedAt,
+  });
+  if (nextName && !nextNode) {
+    throw new Error(`下载目录展开失败：已找到“${folderName}”，但未显示下一级“${nextName}”`);
+  }
+}
+
+async function selectRepositoryFile(page, target, navigation) {
+  const artifactName = String(target.artifactName || '').trim();
+  const artifactId = String(target.artifactId || '').trim();
+  if (!artifactName) throw new Error('下载目标缺少文件名，无法在页面目录树中定位');
+  const startedAt = Date.now();
+  const node = await findRepositoryTreeNode(page, artifactName, artifactId);
+  if (!node) {
+    navigation.push({
+      stage: 'file',
+      name: artifactName,
+      artifact_id: artifactId,
+      outcome: 'not_found',
+      elapsed_ms: Date.now() - startedAt,
+    });
+    throw new Error(`下载文件定位失败：页面左侧目录树中未找到“${artifactName}”`);
+  }
+
+  await node.locator.scrollIntoViewIfNeeded().catch(() => {});
+  const infoResponsePromise = page.waitForResponse(
+    response => /\/cloudartifact\/v1\/files\/[^/?]+\/info(?:[?]|$)/i.test(response.url()),
+    { timeout: 15000 },
+  ).catch(() => null);
+  await node.locator.click({ timeout: 15000 });
+  const infoResponse = await infoResponsePromise;
+  await page.waitForTimeout(700);
+  navigation.push({
+    stage: 'file',
+    name: artifactName,
+    artifact_id: artifactId,
+    outcome: 'selected',
+    source: node.source,
+    info_status: infoResponse ? infoResponse.status() : null,
+    info_url: infoResponse ? safeUrlForLog(infoResponse.url()) : '',
+    elapsed_ms: Date.now() - startedAt,
+  });
+}
+
+async function findDownloadAddressLink(page) {
+  const labels = page.getByText('下载地址', { exact: true });
+  const labelCount = Math.min(await labels.count().catch(() => 0), 20);
+  for (let labelIndex = 0; labelIndex < labelCount; labelIndex += 1) {
+    const label = labels.nth(labelIndex);
+    if (!await label.isVisible({ timeout: 250 }).catch(() => false)) continue;
+    let container = label;
+    for (let depth = 1; depth <= 6; depth += 1) {
+      container = container.locator('xpath=..');
+      const links = container.locator('a[href], [role="link"]');
+      const linkCount = Math.min(await links.count().catch(() => 0), 20);
+      for (let linkIndex = 0; linkIndex < linkCount; linkIndex += 1) {
+        const link = links.nth(linkIndex);
+        if (!await link.isVisible({ timeout: 250 }).catch(() => false)) continue;
+        const href = String(await link.getAttribute('href').catch(() => '') || '');
+        const text = String(await link.textContent().catch(() => '') || '').trim();
+        if (/\/files\/download|download\?/i.test(href) || /\/files\/download|https?:\/\//i.test(text)) {
+          return {
+            locator: link,
+            source: `right detail row labeled 下载地址 (ancestor depth ${depth})`,
+            href: safeUrlForLog(href),
+          };
+        }
+      }
+    }
+  }
+
+  const downloadLinks = page.locator(
+    'a[href*="/files/download"], a[href*="download?"], [role="link"][data-href*="/files/download"]',
+  );
+  const selected = await visibleLocatorByHorizontalPosition(downloadLinks, true);
+  if (!selected) return null;
+  const href = String(await selected.locator.getAttribute('href').catch(() => '') || '');
+  return {
+    locator: selected.locator,
+    source: 'rightmost visible file download link',
+    href: safeUrlForLog(href),
+  };
+}
+
 async function fillFirst(scope, selectors, value) {
   if (!value) return false;
   for (const selector of selectors) {
@@ -345,6 +695,7 @@ async function main() {
   let capturedCftk = '';
   let capturedApiHeaders = {};
   let capturedListTemplate = null;
+  let capturedRemoteProject = null;
   context.on('request', async request => {
     try {
       if (!request.url().includes('/cloudartifact/')) return;
@@ -372,8 +723,10 @@ async function main() {
       const headers = await request.allHeaders();
       let payload = {};
       try { payload = request.postDataJSON() || {}; } catch (_) {}
-      if (String(payload.projectId || '') !== String(config.projectId || '')) return;
+      capturedRemoteProject = capturedRemoteProject ||
+        projectMetadataFromResponse(body, payload, config.projectId);
       if (body.result.data.some(item => String(item && item.type || '').toLowerCase() === 'project')) return;
+      if (String(payload.projectId || '') !== String(config.projectId || '')) return;
       capturedCftk = headers.cftk || headers.Cftk || capturedCftk;
       const allowedHeaders = [
         'accept', 'content-type', 'cftk', 'language', 'x-language', 'x-requested-with',
@@ -440,6 +793,8 @@ async function main() {
 
     await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(2500);
+    capturedRemoteProject = capturedRemoteProject ||
+      await projectMetadataFromPage(page, config.projectId);
     for (let attempt = 0; attempt < 20 && !capturedListTemplate; attempt += 1) {
       writeProgress(config, 'session', '已进入制品仓库，正在捕获页面实际的文件列表请求');
       await page.waitForTimeout(500);
@@ -504,73 +859,146 @@ async function main() {
       };
     };
 
-    // Download mode reuses the authenticated browser request captured above.
-    // Web-only artifact URLs cannot be fetched by the backend with IAM/basic
-    // credentials, so write the raw response to the caller-provided temporary
-    // path and let PCIDS encrypt it through the normal repository pipeline.
-    if (config.downloadUrl && config.downloadOutputPath) {
-      writeProgress(config, 'download', '登录会话已就绪，正在下载制品');
-      const headers = {
-        ...(capturedListTemplate.rawHeaders || capturedListTemplate.headers || capturedApiHeaders),
-        cftk: templateCftk,
-        referer: page.url(),
-        origin: new URL(page.url()).origin,
+    let remoteProjectRequestRecord = null;
+    if (!config.downloadTarget && !capturedRemoteProject) {
+      const projectListPayload = {
+        ...capturedListTemplate.payload,
+        pageNo: 1,
+        pageSize: Math.max(50, Number(capturedListTemplate.payload.pageSize) || 50),
       };
-      delete headers['content-length'];
-      delete headers.host;
-      const startedAt = Date.now();
-      const downloadResponse = await context.request.fetch(config.downloadUrl, {
-        method: 'GET',
-        headers,
-        timeout: 0,
-        failOnStatusCode: false,
-      });
-      const bytes = await downloadResponse.body();
-      const responseHeaders = downloadResponse.headers();
-      const contentType = responseHeaders['content-type'] || '';
-      const textPreview = bytes.subarray(0, 4096).toString('utf8');
-      const debug = {
-        ...buildRequestDebug(headers, 'playwright_api_request_replay', config.downloadUrl, undefined),
-        ...bodyDiagnostics(textPreview, contentType),
-        requested_url: config.downloadUrl,
-        final_url: downloadResponse.url(),
-        redirected: downloadResponse.url() !== config.downloadUrl,
+      delete projectListPayload.projectId;
+      delete projectListPayload.parentId;
+      const projectListUrl = `${capturedListUrl.split('?')[0]}?_=${Date.now()}`;
+      const projectListResponse = await requestJson('POST', projectListUrl, projectListPayload);
+      capturedRemoteProject = projectMetadataFromResponse(
+        projectListResponse.body,
+        projectListPayload,
+        config.projectId,
+      );
+      remoteProjectRequestRecord = {
+        interface: 'POST /cloudartifact/v1/files/list (project metadata)',
+        method: 'POST',
+        url: projectListUrl,
+        payload: {
+          ...projectListPayload,
+          _request_debug: projectListResponse.request_debug || {},
+        },
+        response: projectListResponse,
       };
+    }
+
+    // Download mode deliberately follows the same browser UI workflow that
+    // succeeds in Huawei Cloud: open each folder in the left repository tree,
+    // select the file, then click the blue link in the right-side "下载地址"
+    // row.  The URL is retained only as a local artifact identity; it is never
+    // fetched through request.fetch() and is never passed to page.goto().
+    if (config.downloadTarget && config.downloadOutputPath) {
+      const downloadStartedAt = Date.now();
+      const target = config.downloadTarget || {};
+      const folderSegments = Array.isArray(target.folderSegments)
+        ? target.folderSegments.map(value => String(value || '').trim()).filter(Boolean)
+        : [];
+      const navigation = [];
       lastDownloadDiagnostic = {
-        interface: 'GET webpage download',
-        method: 'GET',
-        url: config.downloadUrl,
-        payload: { _request_debug: debug },
+        interface: 'Browser UI directory tree + 下载地址 click',
+        method: 'CLICK',
+        url: safeUrlForLog(page.url()),
+        payload: {
+          artifact_name: String(target.artifactName || ''),
+          display_path: String(target.displayPath || ''),
+          folder_segments: folderSegments,
+          artifact_id: String(target.artifactId || ''),
+        },
         response: {
-          status: downloadResponse.status(),
-          headers: safeResponseHeaders(responseHeaders),
-          request_debug: debug,
-          elapsed_ms: Date.now() - startedAt,
-          received_bytes: bytes.length,
+          status: 0,
+          elapsed_ms: 0,
+          received_bytes: 0,
+          navigation,
         },
       };
-      const failed = [401, 403].includes(downloadResponse.status()) ||
-        String(contentType).toLowerCase().includes('text/html') ||
-        /<html|<!doctype/i.test(textPreview);
-      if (failed) {
-        throw new Error(`网页下载会话失效或被重定向：HTTP ${downloadResponse.status()} ${debug.html_title || ''}`);
+
+      writeProgress(config, 'download_directory', '正在按目录层级定位制品', {
+        artifactName: String(target.artifactName || ''),
+        displayPath: String(target.displayPath || ''),
+        folderSegments,
+      });
+      for (let index = 0; index < folderSegments.length; index += 1) {
+        const nextName = folderSegments[index + 1] || String(target.artifactName || '');
+        await expandRepositoryFolder(page, folderSegments[index], nextName, navigation);
       }
-      if (!downloadResponse.ok()) {
-        throw new Error(`网页下载失败：HTTP ${downloadResponse.status()}`);
+
+      writeProgress(config, 'download_file', `正在选择文件：${String(target.artifactName || '')}`);
+      await selectRepositoryFile(page, target, navigation);
+
+      writeProgress(config, 'download_link', '已打开文件详情，正在点击右侧“下载地址”链接');
+      const linkStartedAt = Date.now();
+      const downloadLink = await findDownloadAddressLink(page);
+      if (!downloadLink) {
+        navigation.push({
+          stage: 'download_address',
+          label: '下载地址',
+          outcome: 'not_found',
+          elapsed_ms: Date.now() - linkStartedAt,
+        });
+        throw new Error('下载地址定位失败：文件详情已打开，但未找到右侧“下载地址”链接');
       }
-      if (!bytes.length) {
-        throw new Error('网页下载失败：服务器返回了空文件');
-      }
-      fs.writeFileSync(config.downloadOutputPath, bytes);
-      writeProgress(config, 'done', `制品下载完成：${bytes.length} 字节`, {
-        downloadedBytes: bytes.length,
-        httpStatus: downloadResponse.status(),
+
+      navigation.push({
+        stage: 'download_address',
+        label: '下载地址',
+        outcome: 'clicking',
+        source: downloadLink.source,
+        href: downloadLink.href,
+        elapsed_ms: Date.now() - linkStartedAt,
+      });
+      await downloadLink.locator.scrollIntoViewIfNeeded().catch(() => {});
+      const [nativeDownload] = await Promise.all([
+        page.waitForEvent('download', { timeout: 180000 }),
+        downloadLink.locator.click({ timeout: 30000 }),
+      ]);
+      const nativeFailure = await nativeDownload.failure();
+      if (nativeFailure) throw new Error(`浏览器下载失败：${nativeFailure}`);
+      await nativeDownload.saveAs(config.downloadOutputPath);
+
+      const stats = fs.statSync(config.downloadOutputPath);
+      const receivedBytes = Number(stats.size || 0);
+      if (!receivedBytes) throw new Error('浏览器下载失败：下载文件为空');
+      const suggestedFilename = nativeDownload.suggestedFilename();
+      navigation[navigation.length - 1] = {
+        ...navigation[navigation.length - 1],
+        outcome: 'download_received',
+        suggested_filename: suggestedFilename,
+        received_bytes: receivedBytes,
+        elapsed_ms: Date.now() - linkStartedAt,
+      };
+      lastDownloadDiagnostic.response = {
+        status: 200,
+        headers: {
+          'content-disposition': `attachment; filename="${suggestedFilename}"`,
+          'content-length': String(receivedBytes),
+          'content-type': 'application/octet-stream',
+        },
+        request_debug: {
+          transport: 'browser_ui_click',
+          direct_api_fetch_used: false,
+          direct_url_navigation_used: false,
+          download_link_source: downloadLink.source,
+        },
+        elapsed_ms: Date.now() - downloadStartedAt,
+        received_bytes: receivedBytes,
+        navigation,
+      };
+      writeProgress(config, 'done', `制品下载完成：${receivedBytes} 字节`, {
+        downloadedBytes: receivedBytes,
+        httpStatus: 200,
+        browserNativeDownload: true,
+        downloadWorkflow: 'directory_tree_file_download_address_click',
       });
       fs.writeFileSync(resultPath, JSON.stringify({
         response: {
           ok: true,
-          status: downloadResponse.status(),
-          body: { result: { downloaded: true } },
+          status: 200,
+          body: { result: { downloaded: true, receivedBytes, suggestedFilename } },
         },
         requestRecords: [lastDownloadDiagnostic],
         loginDiagnostics: loginDiagnosticHistory,
@@ -580,6 +1008,7 @@ async function main() {
 
     const entries = [];
     const requestRecords = [];
+    if (remoteProjectRequestRecord) requestRecords.push(remoteProjectRequestRecord);
     const directoryErrors = [];
     const detailErrors = [];
     const visitedFolders = new Set();
@@ -610,7 +1039,7 @@ async function main() {
       );
     };
 
-    const fetchDetail = async item => {
+    const fetchDetail = async (item, directoryPath) => {
       const itemId = String(item.id || '').trim();
       if (!itemId) {
         const error = { name: item.name, message: '文件列表项缺少 id，无法调用详情接口' };
@@ -635,7 +1064,14 @@ async function main() {
       const apiSucceeded = response.ok && response.body && response.body.status !== 'error' && bodyResult && typeof bodyResult === 'object';
       if (apiSucceeded) {
         detailSuccessCount += 1;
-        entries.push({ ...item, ...bodyResult, id: item.id, _list: item, _detail: bodyResult });
+        entries.push({
+          ...item,
+          ...bodyResult,
+          id: item.id,
+          _directory_path: directoryPath || '/',
+          _list: { ...item, _directory_path: directoryPath || '/' },
+          _detail: bodyResult,
+        });
       } else {
         const error = { id: itemId, name: item.name, status: response.status, body: response.body };
         detailErrors.push(error);
@@ -691,9 +1127,9 @@ async function main() {
           if (!item || typeof item !== 'object') continue;
           if (isFolder(item)) {
             folderCount += 1;
-            entries.push({ ...item, _list: item });
             const childId = String(item.id || item.fileId || '').trim();
             const childPath = `${String(directoryPath || '').replace(/\/$/, '')}/${item.name || childId}` || '/';
+            entries.push({ ...item, _directory_path: childPath, _list: { ...item, _directory_path: childPath } });
             if (!childId) {
               directoryErrors.push({ name: item.name, path: childPath, message: '文件夹列表项缺少 id' });
             } else {
@@ -701,7 +1137,7 @@ async function main() {
             }
           } else {
             fileCount += 1;
-            await fetchDetail(item);
+            await fetchDetail(item, directoryPath);
           }
         }
         pageNo += 1;
@@ -753,22 +1189,46 @@ async function main() {
         directoryErrors,
         detailErrors,
         loginDiagnostics: loginDiagnosticHistory,
+        remoteProjectName: capturedRemoteProject && capturedRemoteProject.name || '',
+        remoteProjectSource: capturedRemoteProject && capturedRemoteProject.source || '',
       },
       session: sessionMeta,
+      project: capturedRemoteProject || {
+        id: String(config.projectId || ''),
+        name: '',
+        source: 'not_found',
+      },
     }), 'utf8');
   } finally {
     await context.close();
   }
 }
 
-main().catch(error => {
-  const resultPath = process.argv[3];
-  if (resultPath) {
-    fs.writeFileSync(resultPath, JSON.stringify({
-      error: `${error.name}: ${error.message}`,
-      loginDiagnostics: loginDiagnosticHistory,
-      downloadDiagnostic: lastDownloadDiagnostic,
-    }), 'utf8');
-  }
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(error => {
+    const resultPath = process.argv[3];
+    if (lastDownloadDiagnostic) {
+      lastDownloadDiagnostic.response = {
+        ...(lastDownloadDiagnostic.response || {}),
+        status: 500,
+        error: `${error.name}: ${error.message}`,
+      };
+    }
+    if (resultPath) {
+      fs.writeFileSync(resultPath, JSON.stringify({
+        error: `${error.name}: ${error.message}`,
+        loginDiagnostics: loginDiagnosticHistory,
+        downloadDiagnostic: lastDownloadDiagnostic,
+      }), 'utf8');
+    }
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  expandRepositoryFolder,
+  findDownloadAddressLink,
+  findRepositoryTreeNode,
+  projectMetadataFromPage,
+  selectRepositoryFile,
+};

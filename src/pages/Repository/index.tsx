@@ -991,10 +991,10 @@ const Repository: React.FC = () => {
       message.open({
         key: messageKey,
         type: 'error',
-        content: errorText,
-        duration: 6,
+        content: '下载制品失败',
+        duration: 4,
       })
-      setDownloadTaskNotice({ type: 'error', message: errorText })
+      setDownloadTaskNotice({ type: 'error', message: `下载制品失败：${errorText}` })
     } finally {
       setDownloading(false)
     }
@@ -1228,7 +1228,11 @@ const Repository: React.FC = () => {
             password: String(values.password || '').trim() || undefined, // undefined if empty to avoid overriding with empty string
             region: String(values.region || inferredRegion || '').trim(),
             project_id: String(values.project_id || '').trim(),
-            project_name: String(values.project_name || '').trim(),
+            // Web projects get their display name from the authenticated
+            // CodeArts page.  Never let a form value rename synchronized data.
+            ...(configurationMode === 'web'
+              ? {}
+              : { project_name: String(values.project_name || '').trim() }),
             ...(configurationMode === 'web'
               ? { private_source: 'web', devops_url: String(values.devops_url || '').trim() }
               : configurationMode === 'private'
@@ -1252,6 +1256,7 @@ const Repository: React.FC = () => {
           if (payload.project_id) {
             const syncedCount = Number(syncResult?.data?.synced_count || 0)
             const skippedCount = Number(syncResult?.data?.skipped_count || 0)
+            const syncedProjectName = String(syncResult?.data?.project_name || payload.project_name || payload.project_id)
             const newProjectKey = `proj_${payload.project_id}`
             await triggerRepositoryDataSync(newProjectKey)
             if (projectConfigIntent === 'create') clearCodeartsFormDraft()
@@ -1263,7 +1268,7 @@ const Repository: React.FC = () => {
             createProjectForm.resetFields()
             await refreshTree()
             setCurrentProjectKey(newProjectKey)
-            setRepositoryProjectContext({ projectKey: newProjectKey, projectName: payload.project_name || payload.project_id })
+            setRepositoryProjectContext({ projectKey: newProjectKey, projectName: syncedProjectName })
             setSelectedKeys([newProjectKey])
             setSelectedNodeKey(newProjectKey)
             await refreshCodeartsConfig(newProjectKey)
@@ -1347,9 +1352,11 @@ const Repository: React.FC = () => {
       <RepoFormField label="项目ID" name="project_id" form={createProjectForm} rules={[{ required: true, message: '请输入项目ID' }]}>
         <Input name="project_id" autoComplete="off" placeholder="请输入项目ID" disabled={projectConfigIntent === 'edit'} />
       </RepoFormField>
-      <RepoFormField label="项目名称" name="project_name" form={createProjectForm} rules={[{ required: true, message: '请输入项目名称' }]}>
-        <Input name="project_name" autoComplete="off" placeholder="请输入页面中要展示的项目名称" />
-      </RepoFormField>
+      {configurationMode !== 'web' ? (
+        <RepoFormField label="项目名称" name="project_name" form={createProjectForm} rules={[{ required: true, message: '请输入项目名称' }]}>
+          <Input name="project_name" autoComplete="off" placeholder="请输入页面中要展示的项目名称" />
+        </RepoFormField>
+      ) : null}
       {configurationMode === 'private' ? (
         <RepoFormField label="仓库ID" name="repo_id_0" form={createProjectForm} rules={[{ required: true, message: '请输入仓库ID' }]}>
           <Input name="repo_id_0" autoComplete="off" placeholder="请输入仓库ID" />
@@ -1782,9 +1789,45 @@ const Repository: React.FC = () => {
     const aggregatedSize = formatBytes(totalBytes)
     const fileLocation = formatNodeFileLocation(selectedNode)
     const createdBy = firstFilled(fileDetail.created_user_name, fileDetail.createdBy, firstLeafDetail.created_user_name, firstLeafDetail.createdBy, repoDetail.created_user_name, repoDetail.createdUserName, '-')
-    const createdTime = firstFilled(fileDetail.created_time, fileDetail.created, firstLeafDetail.created_time, firstLeafDetail.created, repoDetail.created_time, repoDetail.createdTime, '-')
+    const createdTime = firstFilled(
+      fileDetail.created_time,
+      fileDetail.created,
+      fileDetail.createTime,
+      fileDetail.createdTime,
+      fileDetail.createdAt,
+      firstLeafDetail.created_time,
+      firstLeafDetail.created,
+      firstLeafDetail.createTime,
+      firstLeafDetail.createdTime,
+      firstLeafDetail.createdAt,
+      repoDetail.created_time,
+      repoDetail.createdTime,
+      repoDetail.createdAt,
+      '-',
+    )
     const modifiedBy = firstFilled(fileDetail.modified_user_name, fileDetail.modifiedBy, firstLeafDetail.modified_user_name, firstLeafDetail.modifiedBy, repoDetail.modified_user_name, repoDetail.modifiedUserName, '-')
-    const modifiedTime = firstFilled(fileDetail.modified_time, fileDetail.modified_time_to_string, fileDetail.lastModified, firstLeafDetail.modified_time, firstLeafDetail.modified_time_to_string, firstLeafDetail.lastModified, repoDetail.modified_time, repoDetail.modifiedTime, '-')
+    const modifiedTime = firstFilled(
+      fileDetail.modified_time,
+      fileDetail.modified,
+      fileDetail.modifyTime,
+      fileDetail.modifiedTime,
+      fileDetail.modified_time_to_string,
+      fileDetail.updateTime,
+      fileDetail.updatedAt,
+      fileDetail.lastModified,
+      firstLeafDetail.modified_time,
+      firstLeafDetail.modified,
+      firstLeafDetail.modifyTime,
+      firstLeafDetail.modifiedTime,
+      firstLeafDetail.modified_time_to_string,
+      firstLeafDetail.updateTime,
+      firstLeafDetail.updatedAt,
+      firstLeafDetail.lastModified,
+      repoDetail.modified_time,
+      repoDetail.modifiedTime,
+      repoDetail.updatedAt,
+      '-',
+    )
     const repoDescription = firstFilled(repoDetail.description, repoDetail.project_desc, '-')
 
     if (selectedNode.node_type === 'project') {
@@ -1822,7 +1865,18 @@ const Repository: React.FC = () => {
         { label: '制品类型', value: repoFormat },
         { label: '相对路径', value: relativePath },
         { label: '下载地址', value: downloadUrl },
-        { label: '发布版本', value: fileDetail.version || fileDetail.build_version || '-' },
+        {
+          label: '发布版本',
+          value: firstFilled(
+            fileDetail.version,
+            fileDetail.versionName,
+            fileDetail.version_name,
+            fileDetail.build_version,
+            firstLeafDetail.version,
+            selectedNode.version,
+            '-',
+          ),
+        },
         { label: '创建人', value: createdBy },
         { label: '创建时间', value: formatDateTime(createdTime) },
         { label: '修改人', value: modifiedBy },

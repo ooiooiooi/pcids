@@ -12,12 +12,22 @@ test('Web 页面库保留独立项目模式并支持修改项目', () => {
   assert.match(source, /private_source \|\| n\.repo_detail\?\.private_source/)
   assert.match(source, /key: 'edit-project', label: '修改当前项目'/)
   assert.match(source, /projectConfigIntent === 'edit' \? '修改项目' : '新建项目'/)
-  assert.match(source, /label="项目名称" name="project_name"/)
-  assert.match(source, /project_name: String\(values\.project_name/)
+  assert.match(source, /configurationMode === 'web'\s*\?\s*\{\}\s*:\s*\{ project_name:/)
+  assert.match(source, /configurationMode !== 'web'\s*\?\s*\(/)
+  assert.doesNotMatch(source, /无需填写；保存后会从制品仓库页面同步/)
+  assert.match(source, /syncResult\?\.data\?\.project_name/)
   assert.doesNotMatch(source, /false && configurationMode === 'web'/)
   assert.match(source, /autoComplete="one-time-code"/)
   assert.doesNotMatch(source, /VITE_CODEARTS_PRIVATE_TEST_PASSWORD/)
   assert.doesNotMatch(source, /cwgy-57373/)
+})
+
+test('Web 页面库展示详情版本和时间，并在下载失败时给出轻提示', () => {
+  assert.match(source, /label: '发布版本'/)
+  assert.match(source, /fileDetail\.versionName/)
+  assert.match(source, /fileDetail\.created_time/)
+  assert.match(source, /fileDetail\.modified_time/)
+  assert.match(source, /content: '下载制品失败'/)
 })
 
 test('CodeArts 项目同步完成后触发数据仓库同步', () => {

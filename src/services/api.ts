@@ -318,7 +318,7 @@ export const repositoryApi = {
   importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; repo_id?: string; download_uri?: string; name?: string; version?: string; description?: string }) =>
     request.post('/repositories/codearts/import', data),
   downloadCodeartsArtifactToServer: (data: { project_id: string; download_uri: string; name?: string; id?: number; target?: 'server' | 'local' }) =>
-    request.post('/repositories/codearts/download/server', data),
+    request.post('/repositories/codearts/download/server', data, { skipAutoErrorMessage: true } as any),
   downloadCodeartsArtifactToLocal: (params: { project_id: string; download_uri: string; name?: string; id?: number }) =>
     request.get('/repositories/codearts/download/local', { params, responseType: 'blob' }),
   downloadLocalRepositoryFile: (id: number) =>

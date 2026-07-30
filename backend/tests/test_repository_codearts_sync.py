@@ -388,7 +388,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
                     "repository_mode": "private",
                     "private_source": "web",
                 },
-                "file_detail": {"size": 12},
+                "file_detail": {"size": 12, "metadata": {"versionNo": "2026.07.30"}},
             }
         ]
 
@@ -396,7 +396,19 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
             patch("backend.routers.repositories.ensure_schema"),
             patch(
                 "backend.routers.repositories._list_codearts_web_private_files",
-                return_value=(web_files, {"summary": {}, "request_records": [], "folders": []}),
+                return_value=(
+                    web_files,
+                    {
+                        "summary": {},
+                        "request_records": [],
+                        "folders": [],
+                        "remote_project": {
+                            "id": project_id,
+                            "name": "远端真实项目",
+                            "source": "files_list_project",
+                        },
+                    },
+                ),
             ),
             patch("backend.routers.repositories._list_running_tasks_for_project", return_value=[]),
         ):
@@ -415,6 +427,16 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         self.assertEqual(rows[0].id, original_id)
         self.assertEqual(rows[0].file_url, "D:/pcids/BOOT.bin.pcenc")
         self.assertIn("token=new", rows[0].download_uri)
+        self.assertEqual(rows[0].version, "2026.07.30")
+        self.assertEqual(json.loads(rows[0].repo_detail_json)["project_name"], "远端真实项目")
+        stored_config = json.loads(
+            self.db.query(RepositoryProjectSetting)
+            .filter(RepositoryProjectSetting.project_key == project_key)
+            .one()
+            .codearts_config_json
+        )
+        self.assertEqual(stored_config["project_name"], "远端真实项目")
+        self.assertEqual(result["data"]["project_name"], "远端真实项目")
         changes = self.db.query(RepositorySyncChange).filter(
             RepositorySyncChange.project_key == project_key
         ).all()
@@ -478,6 +500,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
                         "password": "saved-password",
                         "region": "cn-cq-1",
                         "project_id": project_id,
+                        "project_name": "旧项目名称",
                         "devops_url": "https://old.example.com",
                     },
                     ensure_ascii=False,
@@ -531,11 +554,11 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         )
         self.assertEqual(stored["password"], "saved-password")
         self.assertEqual(stored["devops_url"], "https://new.example.com")
-        self.assertEqual(stored["project_name"], "修正后的项目名称")
+        self.assertEqual(stored["project_name"], "旧项目名称")
         self.db.refresh(existing_repo)
         renamed_detail = json.loads(existing_repo.repo_detail_json)
-        self.assertEqual(renamed_detail["name"], "修正后的项目名称")
-        self.assertEqual(renamed_detail["project_name"], "修正后的项目名称")
+        self.assertEqual(renamed_detail["name"], "旧项目名称")
+        self.assertEqual(renamed_detail["project_name"], "旧项目名称")
 
 
 if __name__ == "__main__":

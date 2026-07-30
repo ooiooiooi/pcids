@@ -1241,33 +1241,181 @@ def _guess_name(item: dict) -> str:
 
 
 def _normalize_repository_version(value: object) -> Optional[str]:
+    if isinstance(value, dict):
+        for key in ("name", "value", "label", "version", "versionName", "version_name"):
+            normalized = _normalize_repository_version(value.get(key))
+            if normalized:
+                return normalized
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            normalized = _normalize_repository_version(item)
+            if normalized:
+                return normalized
+        return None
     text = str(value or "").strip()
     if not text:
         return None
-    if text.lower() in {"latest", "null", "none", "-"}:
+    # "latest" is a valid release version shown by the CodeArts Software
+    # Release Repository UI.  Only true empty/sentinel values are discarded.
+    if text.lower() in {"null", "none", "-"}:
         return None
     return text
 
 
 def _extract_repository_version(*sources: object) -> Optional[str]:
-    version_keys = [
+    # CodeArts webpage deployments use several response shapes.  In particular,
+    # the file-info endpoint may return camelCase fields or place them under
+    # metadata/data instead of at the result root.
+    version_keys = {
         "version",
-        "package_version",
-        "release_version",
-        "artifact_version",
-        "version_name",
-        "version_label",
+        "packageversion",
+        "releaseversion",
+        "artifactversion",
+        "versionname",
+        "versionlabel",
+        "fileversion",
+        "buildversion",
+        "versionno",
+        "versionnumber",
+        "versionnum",
+        "revision",
+        "revisionname",
         "tag",
-        "build_version",
-    ]
+    }
+    diagnostic_keys = {
+        "websync",
+        "requestrecords",
+        "diagnostics",
+        "summary",
+        "errors",
+        "logindiagnostics",
+    }
     for source in sources:
-        if not isinstance(source, dict):
-            continue
-        for key in version_keys:
-            normalized = _normalize_repository_version(source.get(key))
-            if normalized:
-                return normalized
+        queue: list[object] = [source]
+        visited = 0
+        while queue and visited < 256:
+            current = queue.pop(0)
+            visited += 1
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                    if normalized_key in version_keys:
+                        normalized = _normalize_repository_version(value)
+                        if normalized:
+                            return normalized
+                queue.extend(
+                    value
+                    for key, value in current.items()
+                    if re.sub(r"[^a-z0-9]", "", str(key).lower()) not in diagnostic_keys
+                )
+            elif isinstance(current, (list, tuple)):
+                queue.extend(current)
     return None
+
+
+def _extract_repository_metadata_value(keys: set[str], *sources: object) -> Optional[object]:
+    diagnostic_keys = {
+        "websync",
+        "requestrecords",
+        "diagnostics",
+        "summary",
+        "errors",
+        "logindiagnostics",
+    }
+    for source in sources:
+        queue: list[object] = [source]
+        visited = 0
+        while queue and visited < 256:
+            current = queue.pop(0)
+            visited += 1
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                    if (
+                        normalized_key in keys
+                        and value is not None
+                        and not isinstance(value, (dict, list, tuple, set))
+                        and str(value).strip()
+                    ):
+                        return value
+                queue.extend(
+                    value
+                    for key, value in current.items()
+                    if re.sub(r"[^a-z0-9]", "", str(key).lower()) not in diagnostic_keys
+                )
+            elif isinstance(current, (list, tuple)):
+                queue.extend(current)
+    return None
+
+
+def _canonicalize_codearts_web_file_metadata(
+    detail: dict,
+    listing: Optional[dict] = None,
+    item: Optional[dict] = None,
+) -> dict:
+    sources = (detail, listing or {}, item or {})
+    resolved_version = _extract_repository_version(*sources)
+    created_time = _extract_repository_metadata_value(
+        {
+            "created",
+            "createdtime",
+            "createtime",
+            "creationtime",
+            "createdat",
+            "createddate",
+            "creationdate",
+            "createtimetostring",
+        },
+        *sources,
+    )
+    modified_time = _extract_repository_metadata_value(
+        {
+            "modified",
+            "modifiedtime",
+            "modifytime",
+            "updatedtime",
+            "updatetime",
+            "updatedat",
+            "lastmodified",
+            "lastmodifiedtime",
+            "modifiedtimetostring",
+            "updatetimetostring",
+        },
+        *sources,
+    )
+    created_by = _extract_repository_metadata_value(
+        {
+            "createdusername",
+            "createdby",
+            "creatorname",
+            "creator",
+            "createusername",
+        },
+        *sources,
+    )
+    modified_by = _extract_repository_metadata_value(
+        {
+            "modifiedusername",
+            "modifiedby",
+            "modifiername",
+            "modifier",
+            "updatedby",
+            "updateusername",
+        },
+        *sources,
+    )
+    if resolved_version:
+        detail["version"] = resolved_version
+    if created_time is not None:
+        detail["created_time"] = created_time
+    if modified_time is not None:
+        detail["modified_time"] = modified_time
+    if created_by is not None:
+        detail["created_user_name"] = created_by
+    if modified_by is not None:
+        detail["modified_user_name"] = modified_by
+    return detail
 
 
 def _normalize_checksum(value: object, length: int) -> Optional[str]:
@@ -1658,6 +1806,70 @@ def _codearts_web_download_candidates(
     return candidates
 
 
+def _codearts_web_click_target(
+    repo: Optional[Repository],
+    file_detail: Optional[dict],
+    preferred_name: Optional[str] = None,
+) -> dict:
+    detail = dict(file_detail or {})
+    listing = detail.get("_list") if isinstance(detail.get("_list"), dict) else {}
+    artifact_name = _normalize_codearts_web_display_text(
+        preferred_name
+        or getattr(repo, "name", None)
+        or detail.get("name")
+        or listing.get("name")
+    )
+    listing_directory = _normalize_codearts_web_display_text(
+        detail.get("_directory_path")
+        or listing.get("_directory_path")
+    )
+    display_path = _normalize_codearts_web_display_text(
+        getattr(repo, "display_path", None)
+        or detail.get("repo_file_path")
+        or detail.get("repoFilePath")
+        or detail.get("path")
+        or listing.get("repoFilePath")
+        or listing.get("path")
+        or (
+            f"{listing_directory.rstrip('/')}/{artifact_name}"
+            if listing_directory and artifact_name
+            else ""
+        )
+        or artifact_name
+    )
+    path_parts = [
+        part
+        for part in display_path.replace("\\", "/").strip("/").split("/")
+        if part
+    ]
+    if path_parts and artifact_name and path_parts[-1] == artifact_name:
+        folder_segments = path_parts[:-1]
+    else:
+        folder_segments = path_parts
+    artifact_id = str(
+        detail.get("id")
+        or detail.get("fileId")
+        or detail.get("file_id")
+        or listing.get("id")
+        or listing.get("fileId")
+        or ""
+    ).strip()
+    parent_id = str(
+        detail.get("parentId")
+        or detail.get("parent_id")
+        or listing.get("parentId")
+        or listing.get("parent_id")
+        or ""
+    ).strip()
+    return {
+        "artifactName": artifact_name,
+        "displayPath": display_path,
+        "folderSegments": folder_segments,
+        "artifactId": artifact_id,
+        "parentId": parent_id,
+    }
+
+
 def _sanitize_codearts_web_diagnostics(value):
     """Persist replay diagnostics without ever retaining browser credential values."""
     forbidden = {"cookie", "set-cookie", "cftk", "authorization", "password", "x-auth-token", "token"}
@@ -1808,6 +2020,12 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
         )
         raise RuntimeError(error_text)
     entries = ((body.get("result") or {}).get("data") or [])
+    remote_project = raw.get("project") if isinstance(raw.get("project"), dict) else {}
+    remote_project_name = _normalize_codearts_web_display_text(
+        remote_project.get("name")
+        or (raw.get("summary") or {}).get("remoteProjectName")
+        or (raw.get("summary") or {}).get("remote_project_name")
+    )
     files, folders = [], []
     for item in entries:
         if not isinstance(item, dict):
@@ -1821,11 +2039,20 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
         name = _normalize_codearts_web_display_text(
             detail.get("name") or listing.get("name") or "artifact.bin"
         ) or "artifact.bin"
+        directory_path = _normalize_codearts_web_display_text(
+            item.get("_directory_path")
+            or listing.get("_directory_path")
+        )
         display_path = _normalize_codearts_web_display_text(
             detail.get("repoFilePath")
             or detail.get("path")
             or listing.get("repoFilePath")
             or listing.get("path")
+            or (
+                f"{directory_path.rstrip('/')}/{name}"
+                if directory_path
+                else ""
+            )
             or name
         )
         if not display_path.startswith("/"):
@@ -1841,8 +2068,15 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
             "download_url_with_id": _normalize_codearts_web_download_url(detail.get("downloadUrlWithId"), devops_url),
             "download_candidates": download_candidates,
             "repo_file_path": display_path,
+            "_list": listing,
         })
-        project_name = _normalize_codearts_web_display_text(cfg.get("project_name") or project_id) or project_id
+        _canonicalize_codearts_web_file_metadata(detail, listing, item)
+        detail["web_click_target"] = _codearts_web_click_target(
+            None,
+            detail,
+            preferred_name=name,
+        )
+        project_name = remote_project_name
         files.append({"project_id": project_id, "project_name": project_name, "remote_repo_id": "web-private",
             "name": name, "display_path": display_path, "display_size": detail.get("size"), "download_uri": download_uri,
             "repo_detail": {"name": project_name, "project_name": project_name, "repository_mode": "private", "private_source": "web", "web_url": repository_url},
@@ -1854,6 +2088,11 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
         "summary": raw.get("summary") or {},
         "request_records": raw.get("requestRecords") or [],
         "folders": folders,
+        "remote_project": {
+            "id": str(remote_project.get("id") or project_id).strip() or project_id,
+            "name": remote_project_name,
+            "source": str(remote_project.get("source") or "").strip() or None,
+        },
     })
     _log_event(
         "repository.codearts_web.list.success",
@@ -1862,6 +2101,19 @@ def _list_codearts_web_private_files(cfg: dict) -> tuple[list[dict], dict]:
         elapsed_ms=round((time.monotonic() - started_at) * 1000),
         file_count=len(files),
         folder_count=len(folders),
+        remote_project_name=remote_project_name or None,
+        files=[
+            {
+                "name": item.get("name"),
+                "display_path": item.get("display_path"),
+                "version": _extract_repository_version(item, item.get("file_detail")),
+                "created_time": (item.get("file_detail") or {}).get("created_time"),
+                "modified_time": (item.get("file_detail") or {}).get("modified_time"),
+                "web_click_target": (item.get("file_detail") or {}).get("web_click_target"),
+                "file_detail_keys": sorted(str(key) for key in (item.get("file_detail") or {}).keys()),
+            }
+            for item in files
+        ],
         request_count=len(diagnostics.get("request_records") or []),
         browser_stdout_tail=getattr(completed, "stdout", "")[-2000:],
         progress=progress,
@@ -1880,6 +2132,7 @@ def _run_codearts_web_download_to_path(
     cfg: dict,
     download_uri: str,
     output_path: str,
+    click_target: Optional[dict] = None,
     trace_id: Optional[str] = None,
 ) -> list[dict]:
     """Download one webpage-only artifact through the authenticated browser session."""
@@ -1889,15 +2142,20 @@ def _run_codearts_web_download_to_path(
     base = str(cfg.get("devops_url") or "https://devops.{region}.cqcloud.cwgy.com").strip().rstrip("/")
     base = base.replace("{region}", str(cfg.get("region") or "cn-cq-1").strip() or "cn-cq-1")
     normalized_download_uri = _normalize_codearts_web_download_url(download_uri, base)
-    if not normalized_download_uri:
-        raise RuntimeError("网页制品下载地址为空或格式无效")
+    normalized_click_target = dict(click_target or {})
+    artifact_name = _normalize_codearts_web_display_text(
+        normalized_click_target.get("artifactName")
+    )
+    if not artifact_name:
+        raise RuntimeError("网页制品缺少文件名称，无法在页面中定位下载行")
     raw_path = Path(output_path)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     _log_event(
         "repository.codearts_web.download.begin",
         trace_id=trace_id,
         project_id=project_id,
-        download_uri=normalized_download_uri,
+        download_uri=normalized_download_uri or None,
+        click_target=normalized_click_target,
         output_path=str(raw_path),
     )
     with tempfile.TemporaryDirectory(prefix="pcids_codearts_web_download_") as temp_dir:
@@ -1913,7 +2171,8 @@ def _run_codearts_web_download_to_path(
             "repositoryUrl": f"{base}/cloudartifact/project/{quoted_project_id}/private/repoView/detail",
             "repositoryPrefix": f"{base}/cloudartifact/project/{quoted_project_id}/",
             "payload": {"pageNo": 1, "pageSize": 50},
-            "downloadUrl": normalized_download_uri,
+            "downloadUrl": normalized_download_uri or "",
+            "downloadTarget": normalized_click_target,
             "downloadOutputPath": str(raw_path),
             "progressPath": str(progress_path),
         }, ensure_ascii=False), encoding="utf-8")
@@ -2001,6 +2260,7 @@ def _encrypt_codearts_web_download(
     download_uri: str,
     destination_path: str,
     original_name: str,
+    click_target: Optional[dict] = None,
     trace_id: Optional[str] = None,
 ):
     """Use the browser session for authenticated webpage downloads, then reuse storage encryption."""
@@ -2013,6 +2273,7 @@ def _encrypt_codearts_web_download(
             cfg=cfg,
             download_uri=download_uri,
             output_path=str(raw_path),
+            click_target=click_target,
             trace_id=trace_id,
         )
         with raw_path.open("rb") as source:
@@ -4118,31 +4379,15 @@ async def set_codearts_config(
         if address_repo_id and address_repo_id != private_repo_id:
             raise HTTPException(status_code=400, detail=f"私有库仓库地址中的仓库 ID 与新增项目配置的仓库 ID 不一致：{address_repo_id}")
     if is_web_private:
-        authoritative_project_name = (
-            _normalize_codearts_web_display_text(effective.get("project_name") or project_id)
+        # The page is authoritative for Web projects.  A value submitted by an
+        # old client must never rename synchronized rows before the remote page
+        # has been read.  Keep the last synchronized name while editing, and use
+        # project_id only as the pre-first-sync placeholder for a new project.
+        merged["project_name"] = (
+            _normalize_codearts_web_display_text(existing.get("project_name"))
             or project_id
         )
-        merged["project_name"] = authoritative_project_name
-        # Existing synchronized rows used to retain their old repo_detail.name,
-        # which then overrode the edited project name in the tree.  Apply the
-        # project configuration immediately; the following full sync will keep
-        # using the same authoritative value.
         renamed_rows = 0
-        for repo in (
-            db.query(Repository)
-            .filter(Repository.project_key == project_key, Repository.source_type == "codearts_sync")
-            .all()
-        ):
-            repo_detail = _safe_json_loads(getattr(repo, "repo_detail_json", None))
-            if str(repo_detail.get("private_source") or "").strip().lower() not in {"", "web"}:
-                continue
-            repo_detail["name"] = authoritative_project_name
-            repo_detail["project_name"] = authoritative_project_name
-            repo_detail["repository_mode"] = _CODEARTS_REPOSITORY_MODE_PRIVATE
-            repo_detail["private_source"] = _CODEARTS_PRIVATE_SOURCE_WEB
-            repo.repo_detail_json = json.dumps(repo_detail, ensure_ascii=False)
-            db.add(repo)
-            renamed_rows += 1
     else:
         renamed_rows = 0
     _save_project_codearts_config(db, project_key, merged, current_user)
@@ -4280,6 +4525,30 @@ async def sync_codearts_project(
                 _list_codearts_web_private_files,
                 merged,
             )
+            remote_project_meta = (
+                web_sync_meta.get("remote_project")
+                if isinstance(web_sync_meta.get("remote_project"), dict)
+                else {}
+            )
+            remote_project_name = _normalize_codearts_web_display_text(
+                remote_project_meta.get("name")
+                or next(
+                    (
+                        item.get("project_name")
+                        or (item.get("repo_detail") or {}).get("project_name")
+                        or (item.get("repo_detail") or {}).get("name")
+                        for item in codearts_files
+                        if isinstance(item, dict)
+                    ),
+                    "",
+                )
+            )
+            authoritative_project_name = (
+                remote_project_name
+                or _normalize_codearts_web_display_text(merged.get("project_name"))
+                or project_id
+            )
+            merged["project_name"] = authoritative_project_name
             web_folder_paths: list[str] = []
             for folder in web_sync_meta.get("folders") or []:
                 if not isinstance(folder, dict):
@@ -4316,10 +4585,6 @@ async def sync_codearts_project(
             )
             for web_file in codearts_files:
                 web_file.setdefault("repo_detail", {})["web_sync"] = web_sync_meta
-            authoritative_project_name = (
-                _normalize_codearts_web_display_text(merged.get("project_name") or project_id)
-                or project_id
-            )
             project_info = {
                 "project_id": project_id,
                 "repo_name": "web-private",
@@ -4329,6 +4594,39 @@ async def sync_codearts_project(
                 "private_source": "web",
                 "web_sync": web_sync_meta,
             }
+            renamed_by_remote_rows = 0
+            for existing_repo in (
+                db.query(Repository)
+                .filter(
+                    Repository.project_key == f"proj_{project_id}",
+                    Repository.source_type == "codearts_sync",
+                )
+                .all()
+            ):
+                existing_repo_detail = _safe_json_loads(
+                    getattr(existing_repo, "repo_detail_json", None)
+                )
+                if str(existing_repo_detail.get("private_source") or "").strip().lower() not in {"", "web"}:
+                    continue
+                existing_repo_detail["name"] = authoritative_project_name
+                existing_repo_detail["project_name"] = authoritative_project_name
+                existing_repo_detail["repository_mode"] = _CODEARTS_REPOSITORY_MODE_PRIVATE
+                existing_repo_detail["private_source"] = _CODEARTS_PRIVATE_SOURCE_WEB
+                existing_repo.repo_detail_json = json.dumps(
+                    existing_repo_detail,
+                    ensure_ascii=False,
+                )
+                db.add(existing_repo)
+                renamed_by_remote_rows += 1
+            _log_event(
+                "repository.codearts_web_sync.project_name_applied",
+                **_current_user_log_context(current_user),
+                project_key=f"proj_{project_id}",
+                remote_project_name=remote_project_name or None,
+                applied_project_name=authoritative_project_name,
+                metadata_source=remote_project_meta.get("source"),
+                renamed_repository_rows=renamed_by_remote_rows,
+            )
         elif repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
             repo_id = private_repo_id
             codearts_files = _list_codearts_private_repository_files(
@@ -4374,6 +4672,11 @@ async def sync_codearts_project(
                     "display_path": str(item.get("display_path") or "").strip(),
                     "download_uri": str(item.get("download_uri") or "").strip(),
                     "remote_repo_id": str(item.get("remote_repo_id") or "").strip(),
+                    "version": _extract_repository_version(
+                        item,
+                        item.get("file_detail"),
+                        item.get("repo_detail"),
+                    ),
                 }
                 for item in codearts_files
             ],
@@ -4473,6 +4776,7 @@ async def sync_codearts_project(
             {
                 "repo_db_id": getattr(row, "id", None),
                 "name": str(getattr(row, "name", "") or ""),
+                "version": str(getattr(row, "version", "") or "") or None,
                 "display_path": str(getattr(row, "display_path", "") or ""),
                 "download_uri": str(getattr(row, "download_uri", "") or ""),
                 "file_url": str(getattr(row, "file_url", "") or ""),
@@ -4579,7 +4883,12 @@ async def sync_codearts_project(
         resolved_version = _extract_repository_version(item, file_detail, repo_detail)
         if is_web_private:
             authoritative_project_name = (
-                _normalize_codearts_web_display_text(merged.get("project_name") or project_id)
+                _normalize_codearts_web_display_text(
+                    project_info.get("name")
+                    or item.get("project_name")
+                    or merged.get("project_name")
+                    or project_id
+                )
                 or project_id
             )
             repo_detail["name"] = authoritative_project_name
@@ -4736,6 +5045,7 @@ async def sync_codearts_project(
             {
                 "repo_db_id": getattr(row, "id", None),
                 "name": str(getattr(row, "name", "") or ""),
+                "version": str(getattr(row, "version", "") or "") or None,
                 "display_path": str(getattr(row, "display_path", "") or ""),
                 "download_uri": str(getattr(row, "download_uri", "") or ""),
                 "file_url": str(getattr(row, "file_url", "") or ""),
@@ -4758,6 +5068,7 @@ async def sync_codearts_project(
         {
             "trace_id": trace_id,
             "project_key": project_key,
+            "project_name": str(project_info.get("name") or merged.get("project_name") or project_id),
             "synced_count": synced_count,
             "skipped_count": skipped_count,
             "repo_count": len(active_repo_ids),
@@ -4770,6 +5081,11 @@ async def sync_codearts_project(
         "message": "同步成功",
         "data": {
             "project_key": project_key,
+            "project_name": str(
+                project_info.get("name")
+                or merged.get("project_name")
+                or project_id
+            ),
             "synced_count": synced_count,
             "skipped_count": skipped_count,
             "repo_count": len(active_repo_ids),
@@ -5062,18 +5378,26 @@ async def download_codearts_artifact_to_server(
     )
     codearts_region = str(codearts_cfg.get("region") or "").strip()
     codearts_base_url = _safe_format_path(str(codearts_cfg.get("base_url") or "").rstrip("/"), region=codearts_region)
-    download_auth = _resolve_codearts_download_auth(codearts_cfg, codearts_base_url, token)
-    if _is_codearts_web_private_config(codearts_cfg):
-        web_base_url = str(codearts_cfg.get("devops_url") or "").strip()
-        web_base_url = web_base_url.replace(
-            "{region}",
-            str(codearts_cfg.get("region") or "cn-cq-1").strip() or "cn-cq-1",
-        )
-        download_candidates = _codearts_web_download_candidates(
-            download_uri,
+    is_web_download = _is_codearts_web_private_config(codearts_cfg)
+    download_auth = (
+        {"token": None, "username": None, "password": None, "mode": "web_session"}
+        if is_web_download
+        else _resolve_codearts_download_auth(codearts_cfg, codearts_base_url, token)
+    )
+    web_click_target: dict = {}
+    if is_web_download:
+        web_click_target = _codearts_web_click_target(
+            repo_record,
             repo_file_detail,
-            base_url=web_base_url,
+            preferred_name=preferred_name,
         )
+        click_identity = (
+            download_uri
+            or str(repo_file_detail.get("download_url_with_id") or "").strip()
+            or str(repo_file_detail.get("download_url") or "").strip()
+            or f"web-page-click://{web_click_target.get('artifactId') or web_click_target.get('artifactName')}"
+        )
+        download_candidates = [click_identity]
     else:
         download_candidates = []
         for candidate in [
@@ -5097,9 +5421,10 @@ async def download_codearts_artifact_to_server(
         project_key=project_key,
         repo_db_id=repo_db_id,
         requested_target=target,
-        source_mode="web_session" if _is_codearts_web_private_config(codearts_cfg) else download_auth["mode"],
+        source_mode=download_auth["mode"],
         candidate_count=len(download_candidates),
         download_candidates=download_candidates,
+        web_click_target=web_click_target or None,
     )
     download_root = _get_repository_download_root()
     filename = _guess_download_filename(download_candidates[0], preferred_name)
@@ -5110,13 +5435,14 @@ async def download_codearts_artifact_to_server(
         stored_artifact = None
         for candidate_index, candidate_uri in enumerate(download_candidates, start=1):
             try:
-                if _is_codearts_web_private_config(codearts_cfg):
+                if is_web_download:
                     stored_artifact, _ = await asyncio.to_thread(
                         _encrypt_codearts_web_download,
                         cfg=codearts_cfg,
                         download_uri=candidate_uri,
                         destination_path=file_path,
                         original_name=filename,
+                        click_target=web_click_target,
                         trace_id=f"{trace_id}-source-{candidate_index}",
                     )
                 else:
@@ -5134,7 +5460,7 @@ async def download_codearts_artifact_to_server(
                     repo_db_id=repo_db_id,
                     candidate_index=candidate_index,
                     candidate_uri=candidate_uri,
-                    source_mode="web_session" if _is_codearts_web_private_config(codearts_cfg) else download_auth["mode"],
+                    source_mode=download_auth["mode"],
                     error=str(candidate_error),
                 )
         if stored_artifact is None:
@@ -5201,7 +5527,7 @@ async def download_codearts_artifact_to_server(
         trace_id=trace_id,
         project_key=project_key,
         repo_db_id=repo_db_id,
-        source_mode="web_session" if _is_codearts_web_private_config(codearts_cfg) else download_auth["mode"],
+        source_mode=download_auth["mode"],
         plaintext_size=size,
         md5=md5v,
         sha256=sha256v,
@@ -5354,7 +5680,7 @@ async def download_codearts_artifact_to_server(
         project_key=project_key,
         repo_db_id=repo_db_id,
         final_target=target,
-        source_mode="web_session" if _is_codearts_web_private_config(codearts_cfg) else download_auth["mode"],
+        source_mode=download_auth["mode"],
         plaintext_size=size,
         md5=md5v,
         sha256=sha256v,
@@ -5423,19 +5749,27 @@ async def download_codearts_artifact_to_local(
     )
     codearts_region = str(codearts_cfg.get("region") or "").strip()
     codearts_base_url = _safe_format_path(str(codearts_cfg.get("base_url") or "").rstrip("/"), region=codearts_region)
-    download_auth = _resolve_codearts_download_auth(codearts_cfg, codearts_base_url, token)
+    is_web_download = _is_codearts_web_private_config(codearts_cfg)
+    download_auth = (
+        {"token": None, "username": None, "password": None, "mode": "web_session"}
+        if is_web_download
+        else _resolve_codearts_download_auth(codearts_cfg, codearts_base_url, token)
+    )
     repo_file_detail = _safe_json_loads(getattr(repo_record, "file_detail_json", None)) if repo_record else {}
-    if _is_codearts_web_private_config(codearts_cfg):
-        web_base_url = str(codearts_cfg.get("devops_url") or "").strip()
-        web_base_url = web_base_url.replace(
-            "{region}",
-            str(codearts_cfg.get("region") or "cn-cq-1").strip() or "cn-cq-1",
-        )
-        download_candidates = _codearts_web_download_candidates(
-            download_uri,
+    web_click_target: dict = {}
+    if is_web_download:
+        web_click_target = _codearts_web_click_target(
+            repo_record,
             repo_file_detail,
-            base_url=web_base_url,
+            preferred_name=name,
         )
+        click_identity = (
+            download_uri
+            or str(repo_file_detail.get("download_url_with_id") or "").strip()
+            or str(repo_file_detail.get("download_url") or "").strip()
+            or f"web-page-click://{web_click_target.get('artifactId') or web_click_target.get('artifactName')}"
+        )
+        download_candidates = [click_identity]
     else:
         download_candidates = []
         for candidate in [
@@ -5462,12 +5796,13 @@ async def download_codearts_artifact_to_local(
         project_key=project_key,
         repo_db_id=id,
         filename=filename,
-        source_mode="web_session" if _is_codearts_web_private_config(codearts_cfg) else download_auth["mode"],
+        source_mode=download_auth["mode"],
         candidate_count=len(download_candidates),
         download_candidates=download_candidates,
+        web_click_target=web_click_target or None,
     )
 
-    if _is_codearts_web_private_config(codearts_cfg):
+    if is_web_download:
         temporary = tempfile.NamedTemporaryFile(
             prefix="pcids-web-local-",
             suffix=Path(filename).suffix or ".bin",
@@ -5486,6 +5821,7 @@ async def download_codearts_artifact_to_local(
                         cfg=codearts_cfg,
                         download_uri=candidate_uri,
                         output_path=temporary_path,
+                        click_target=web_click_target,
                         trace_id=f"{trace_id}-source-{candidate_index}",
                     )
                     selected_uri = candidate_uri

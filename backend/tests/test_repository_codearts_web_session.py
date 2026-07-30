@@ -9,6 +9,7 @@ from starlette.responses import FileResponse
 
 from backend.routers.repositories import (
     _build_local_tree,
+    _codearts_web_click_target,
     _codearts_web_download_candidates,
     _codearts_web_child_env,
     _codearts_web_runtime_script,
@@ -17,6 +18,7 @@ from backend.routers.repositories import (
     _normalize_codearts_web_display_text,
     _sanitize_codearts_web_diagnostics,
     download_codearts_artifact_to_local,
+    download_codearts_artifact_to_server,
 )
 
 
@@ -76,9 +78,19 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
             source.index("{ name: 'bundled Playwright Chromium'"),
         )
         self.assertNotIn("未找到 Google Chrome，请先安装 Chrome", source)
-        self.assertIn("config.downloadUrl && config.downloadOutputPath", source)
-        self.assertIn("fs.writeFileSync(config.downloadOutputPath, bytes)", source)
-        self.assertIn("GET webpage download", source)
+        self.assertIn("config.downloadTarget && config.downloadOutputPath", source)
+        self.assertIn("folderSegments", source)
+        self.assertIn("下载地址", source)
+        self.assertIn("expandRepositoryFolder", source)
+        self.assertIn("selectRepositoryFile", source)
+        self.assertIn("findDownloadAddressLink", source)
+        self.assertNotIn("context.request.fetch(config.downloadUrl", source)
+        self.assertNotIn("page.goto(config.downloadUrl", source)
+        self.assertIn("projectMetadataFromResponse", source)
+        self.assertIn("page_breadcrumb", source)
+        self.assertIn("files_list_project", source)
+        self.assertIn("page.waitForEvent('download'", source)
+        self.assertIn("nativeDownload.saveAs(config.downloadOutputPath)", source)
 
     def test_normalizes_web_details_and_retains_directory_metadata(self):
         response = {
@@ -87,9 +99,15 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
                 {"id": "file", "name": "boot.bin", "type": "file", "_detail": {
                     "name": "boot.bin", "repoFilePath": "firmware/boot.bin", "size": 12,
                     "md5": "a" * 32, "sha256": "b" * 64,
+                    "metadata": {
+                        "versionName": "latest",
+                        "created": "2026/07/28 16:45:04 GMT+08:00",
+                        "modified": "2026/07/28 16:48:06 GMT+08:00",
+                    },
                     "downloadUrl": "https://example/download", "downloadUrlWithId": "https://example/download?id=file",
                 }},
             ]}}},
+            "project": {"id": "p", "name": "远端项目名称", "source": "files_list_project"},
             "summary": {"folderCount": 1, "fileCount": 1}, "requestRecords": [{"url": "https://example/list"}],
         }
         with TemporaryDirectory() as temp:
@@ -104,6 +122,15 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
         self.assertEqual(files[0]["display_path"], "/firmware/boot.bin")
         self.assertEqual(files[0]["download_uri"], "https://example/download?id=file")
         self.assertEqual(files[0]["file_detail"]["md5"], "a" * 32)
+        self.assertEqual(files[0]["project_name"], "远端项目名称")
+        self.assertEqual(files[0]["file_detail"]["version"], "latest")
+        self.assertEqual(files[0]["file_detail"]["created_time"], "2026/07/28 16:45:04 GMT+08:00")
+        self.assertEqual(files[0]["file_detail"]["modified_time"], "2026/07/28 16:48:06 GMT+08:00")
+        self.assertEqual(
+            files[0]["file_detail"]["web_click_target"]["folderSegments"],
+            ["firmware"],
+        )
+        self.assertEqual(meta["remote_project"]["name"], "远端项目名称")
         self.assertEqual(meta["folders"][0]["name"], "empty")
 
     def test_repairs_percent_encoded_and_latin1_mojibake_web_names(self):
@@ -130,6 +157,24 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
                 "https://devops.example.com/requested?id=3",
             ],
         )
+
+    def test_click_target_uses_synced_directory_hierarchy_and_file_identity(self):
+        repo = type(
+            "Repository",
+            (),
+            {
+                "name": "BOOT_with_bit.bin",
+                "display_path": "/鸿蒙/AL321/BOOT_with_bit.bin",
+            },
+        )()
+        target = _codearts_web_click_target(
+            repo,
+            {"id": "file-123", "parentId": "folder-321"},
+        )
+        self.assertEqual(target["artifactName"], "BOOT_with_bit.bin")
+        self.assertEqual(target["folderSegments"], ["鸿蒙", "AL321"])
+        self.assertEqual(target["artifactId"], "file-123")
+        self.assertEqual(target["parentId"], "folder-321")
 
     def test_diagnostic_persistence_redacts_credential_values(self):
         safe = _sanitize_codearts_web_diagnostics({
@@ -176,6 +221,8 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             def fake_run(args, **kwargs):
                 config = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+                self.assertEqual(config["downloadTarget"]["artifactName"], "firmware.bin")
+                self.assertEqual(config["downloadTarget"]["folderSegments"], ["firmware"])
                 Path(config["downloadOutputPath"]).write_bytes(b"firmware")
                 Path(args[3]).write_text(
                     json.dumps({
@@ -205,6 +252,12 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
                     download_uri="https://devops.example.com/download?id=file",
                     destination_path=str(Path(temp) / "artifact.pcenc"),
                     original_name="firmware.bin",
+                    click_target={
+                        "artifactName": "firmware.bin",
+                        "displayPath": "/firmware/firmware.bin",
+                        "folderSegments": ["firmware"],
+                        "artifactId": "file",
+                    },
                 )
 
         self.assertIs(stored, stored_result)
@@ -238,8 +291,8 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
             patch("backend.routers.repositories._build_codearts_download_context", return_value=(cfg, "")),
             patch(
                 "backend.routers.repositories._resolve_codearts_download_auth",
-                return_value={"token": "", "username": "", "password": "", "mode": "web_session"},
-            ),
+                side_effect=AssertionError("Web 下载不应调用 API 下载鉴权"),
+            ) as resolve_auth,
             patch(
                 "backend.routers.repositories._run_codearts_web_download_to_path",
                 side_effect=fake_web_download,
@@ -258,5 +311,81 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
         self.assertIsInstance(response, FileResponse)
         self.assertEqual(Path(response.path).read_bytes(), b"firmware")
         self.assertEqual(web_download.call_count, 1)
+        resolve_auth.assert_not_called()
         asyncio.run(response.background())
         self.assertFalse(Path(response.path).exists())
+
+    def test_server_download_endpoint_uses_web_session_before_any_api_auth(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        user = type("User", (), {"id": 1, "username": "tester"})()
+        cfg = {
+            "enabled": True,
+            "repository_mode": "private",
+            "private_source": "web",
+            "project_id": "p",
+            "domain_name": "tenant",
+            "username": "iam-user",
+            "password": "secret",
+            "devops_url": "https://devops.example.com",
+        }
+        stored = type(
+            "StoredArtifact",
+            (),
+            {
+                "plaintext_size": 8,
+                "md5": "m",
+                "sha256": "s",
+                "to_storage_metadata": lambda self: {"encrypted": True},
+            },
+        )()
+
+        with TemporaryDirectory() as temp:
+            encrypted_path = str(Path(temp) / "firmware.bin.pcenc")
+            with (
+                patch("backend.routers.repositories._ensure_project_member_seed"),
+                patch("backend.routers.repositories._require_project_permission"),
+                patch("backend.routers.repositories._build_codearts_download_context", return_value=(cfg, "")),
+                patch(
+                    "backend.routers.repositories._resolve_codearts_download_auth",
+                    side_effect=AssertionError("Web 下载不应调用 API 下载鉴权"),
+                ) as resolve_auth,
+                patch(
+                    "backend.routers.repositories._encrypt_codearts_web_download",
+                    return_value=(stored, []),
+                ) as web_download,
+                patch("backend.routers.repositories._get_repository_download_root", return_value=temp),
+                patch("backend.routers.repositories.build_encrypted_artifact_path", return_value=encrypted_path),
+                patch(
+                    "backend.routers.repositories._get_repository_server_transport_config",
+                    return_value={
+                        "transport": "local",
+                        "host": "",
+                        "port": 0,
+                        "username": "",
+                        "password": "",
+                        "auth_type": "password",
+                        "private_key_path": "",
+                        "storage_root": temp,
+                        "server_os": "windows",
+                    },
+                ),
+                patch("backend.routers.repositories._get_repository_download_config", return_value={}),
+                patch("backend.routers.repositories._get_repository_server_storage_root", return_value=temp),
+            ):
+                result = asyncio.run(download_codearts_artifact_to_server(
+                    {
+                        "project_id": "p",
+                        "download_uri": "https://devops.example.com/download?id=file",
+                        "name": "固件.bin",
+                        "target": "local",
+                    },
+                    db,
+                    user,
+                    None,
+                ))
+
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(result["data"]["location_state"]["storage_location"], "local")
+        self.assertEqual(web_download.call_count, 1)
+        resolve_auth.assert_not_called()

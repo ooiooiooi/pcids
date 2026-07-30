@@ -178,6 +178,10 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
         self.assertEqual(repo.sha256, "web-sha256")
         api_auth.assert_not_called()
         self.assertEqual(web_download.call_args.kwargs["download_uri"], repo.download_uri)
+        self.assertEqual(
+            web_download.call_args.kwargs["click_target"]["artifactName"],
+            "firmware.bin",
+        )
         self.assertTrue(str(web_download.call_args.kwargs["trace_id"]).startswith("task-artifact-server-"))
 
     def test_server_source_keeps_server_storage(self):

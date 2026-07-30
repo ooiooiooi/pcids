@@ -61,6 +61,7 @@ from backend.routers.repositories import (
     _apply_repository_location_state,
     _build_repository_server_saved_path,
     _build_codearts_download_context,
+    _codearts_web_click_target,
     _compute_hashes as _compute_repository_hashes,
     _encrypt_codearts_web_download,
     _encrypt_remote_artifact_to_storage,
@@ -1492,6 +1493,11 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
                 download_uri=download_uri,
                 destination_path=file_path,
                 original_name=getattr(repo, "name", None) or "artifact.bin",
+                click_target=_codearts_web_click_target(
+                    repo,
+                    file_detail,
+                    preferred_name=getattr(repo, "name", None) or "artifact.bin",
+                ),
                 trace_id=trace_id,
             )
         else:
@@ -1606,6 +1612,11 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
                 download_uri=download_uri,
                 destination_path=file_path,
                 original_name=getattr(repo, "name", None) or filename,
+                click_target=_codearts_web_click_target(
+                    repo,
+                    file_detail,
+                    preferred_name=getattr(repo, "name", None) or filename,
+                ),
                 trace_id=trace_id,
             )
         else:
