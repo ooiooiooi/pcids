@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
@@ -9,6 +9,11 @@ from backend.routers.burners import delete_burner
 
 
 class BurnerDeleteRuleTests(unittest.TestCase):
+    def setUp(self):
+        schema_patcher = patch("backend.routers.burners.ensure_schema")
+        schema_patcher.start()
+        self.addCleanup(schema_patcher.stop)
+
     def test_delete_burner_blocks_when_running_tasks_exist(self):
         db = MagicMock()
 

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from backend import main
 
 
-def test_lifespan_exposes_health_before_slow_hardware_diagnostics_finish():
+def test_lifespan_marks_backend_ready_only_after_hardware_diagnostics_finish():
     diagnostics_started = threading.Event()
     release_diagnostics = threading.Event()
 
@@ -30,8 +30,10 @@ def test_lifespan_exposes_health_before_slow_hardware_diagnostics_finish():
                 started = await asyncio.to_thread(diagnostics_started.wait, 1)
                 assert started is True
                 assert release_diagnostics.is_set() is False
+                assert fake_app.state.startup_diagnostics_complete is False
                 release_diagnostics.set()
                 await asyncio.wait_for(fake_app.state.startup_diagnostics_task, timeout=2)
+                assert fake_app.state.startup_diagnostics_complete is True
 
     asyncio.run(exercise_lifespan())
 
@@ -44,6 +46,16 @@ def test_noncritical_startup_diagnostics_do_not_raise():
         main._run_startup_diagnostics()
 
     exception_log.assert_called_once_with("startup.diagnostics.failed")
+
+
+def test_health_waits_until_startup_diagnostics_are_complete():
+    main.app.state.startup_diagnostics_complete = False
+    starting_response = asyncio.run(main.health_check())
+    assert starting_response.status_code == 503
+
+    main.app.state.startup_diagnostics_complete = True
+    ready_response = asyncio.run(main.health_check())
+    assert ready_response["status"] == "ok"
 
 
 def test_operation_log_sanitizes_nested_injection_config_secrets():

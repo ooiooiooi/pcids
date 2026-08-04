@@ -12,10 +12,83 @@ from backend.routers.tasks import (
     _ensure_repository_local_file_available_for_runtime,
     _refresh_repository_artifact_after_key_failure,
     _resolve_artifact_storage_mode,
+    _resolve_task_artifact_download_source,
 )
 
 
 class TaskArtifactStorageModeTests(unittest.TestCase):
+    def test_task_download_source_reads_nested_web_repository_metadata(self):
+        repo = SimpleNamespace(project_key="proj_web")
+        serialized = {
+            "repo_detail": {
+                "repository_mode": "private",
+                "private_source": "web",
+            }
+        }
+        web_config = {
+            "repository_mode": "private",
+            "private_source": "web",
+        }
+
+        with patch(
+            "backend.routers.tasks._get_project_codearts_config",
+            return_value=web_config,
+        ):
+            source_mode, resolved_config = _resolve_task_artifact_download_source(
+                MagicMock(), repo, SimpleNamespace(id=1), serialized
+            )
+
+        self.assertEqual(source_mode, "web_session")
+        self.assertIs(resolved_config, web_config)
+
+    def test_task_download_source_uses_api_for_explicit_api_repository(self):
+        repo = SimpleNamespace(project_key="proj_private_api")
+        serialized = {
+            "repo_detail": {
+                "repository_mode": "private",
+                "private_source": "api",
+            }
+        }
+
+        with patch(
+            "backend.routers.tasks._get_project_codearts_config",
+            return_value={
+                "repository_mode": "private",
+                "private_source": "api",
+            },
+        ) as config_mock:
+            source_mode, resolved_config = _resolve_task_artifact_download_source(
+                MagicMock(), repo, SimpleNamespace(id=1), serialized
+            )
+
+        self.assertEqual(source_mode, "codearts_api")
+        self.assertIsNone(resolved_config)
+        config_mock.assert_called_once()
+
+    def test_current_web_project_config_overrides_stale_api_artifact_marker(self):
+        repo = SimpleNamespace(project_key="proj_switched_to_web")
+        serialized = {
+            "repo_detail": {
+                "repository_mode": "private",
+                "private_source": "api",
+            }
+        }
+        web_config = {
+            "repository_mode": "private",
+            "private_source": "web",
+        }
+
+        with patch(
+            "backend.routers.tasks._get_project_codearts_config",
+            return_value=web_config,
+        ):
+            source_mode, resolved_config = _resolve_task_artifact_download_source(
+                MagicMock(), repo, SimpleNamespace(id=1), serialized
+            )
+
+        self.assertEqual(source_mode, "web_session")
+        self.assertIs(resolved_config, web_config)
+
     def test_task_download_uses_mode_saved_on_repository(self):
         repo = SimpleNamespace(
             project_key="proj_private",
@@ -130,7 +203,7 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
             "backend.routers.tasks.repository_to_dict",
             return_value={
                 "download_uri": repo.download_uri,
-                "private_source": "web",
+                "repo_detail": {"private_source": "web"},
                 "file_detail": {},
             },
         ), patch(

@@ -74,6 +74,7 @@ db_session = scoped_session(lambda: SessionLocal())
 # cached and will be retried by the next request.
 _schema_ready = False
 _schema_ready_lock = Lock()
+_MESSAGE_TIME_MIGRATION_BATCH_SIZE = 500
 
 
 DEFAULT_BURNER_CATALOG = [
@@ -2271,6 +2272,125 @@ exit 0''',
         db.close()
 
 
+def _migrate_legacy_message_times_to_utc():
+    """Normalize legacy structured-message wall-clock times exactly once.
+
+    Older ``create_structured_message`` releases explicitly wrote local naive
+    ``created_at`` values, while all other message writes used SQLite UTC.
+    Payload shape identifies only those legacy rows. Adding the UTC marker in
+    the same transaction makes this migration idempotent and restores a single
+    sortable storage convention without guessing about task messages.
+    """
+    from datetime import datetime, timezone
+
+    from backend.utils import datetime_utils
+
+    legacy_required_keys = {"category", "status", "primary_text"}
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        migration_key = "message_time_basis_utc_v2"
+        if conn.execute(
+            text("SELECT 1 FROM app_metadata WHERE key = :key"),
+            {"key": migration_key},
+        ).first():
+            return
+
+        select_batch = text(
+            "SELECT id, content, created_at FROM messages "
+            "WHERE id > :last_message_id "
+            "ORDER BY id "
+            "LIMIT :batch_size"
+        )
+        update_message = text(
+            "UPDATE messages "
+            "SET created_at = :created_at, content = :content "
+            "WHERE id = :message_id"
+        )
+        last_message_id = 0
+        while True:
+            rows = conn.execute(
+                select_batch,
+                {
+                    "last_message_id": last_message_id,
+                    "batch_size": _MESSAGE_TIME_MIGRATION_BATCH_SIZE,
+                },
+            ).mappings().fetchall()
+            if not rows:
+                break
+            last_message_id = int(rows[-1]["id"])
+            batch_updates = []
+
+            for row in rows:
+                try:
+                    payload = json.loads(str(row["content"] or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if "_time_basis" in payload:
+                    continue
+                if str(payload.get("task_no") or "").strip():
+                    continue
+                if not legacy_required_keys.issubset(payload.keys()):
+                    continue
+
+                raw_created_at = row["created_at"]
+                if isinstance(raw_created_at, datetime):
+                    local_created_at = raw_created_at
+                else:
+                    try:
+                        local_created_at = datetime.fromisoformat(
+                            str(raw_created_at or "").strip()
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                if local_created_at.tzinfo is None:
+                    local_created_at = local_created_at.replace(
+                        tzinfo=datetime_utils.LOCAL_TIMEZONE
+                    )
+                utc_created_at = (
+                    local_created_at.astimezone(timezone.utc)
+                    .replace(tzinfo=None)
+                )
+
+                payload["_message_time_version"] = 2
+                payload["_time_basis"] = "utc"
+                batch_updates.append(
+                    {
+                        "message_id": int(row["id"]),
+                        "created_at": utc_created_at.isoformat(sep=" "),
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    }
+                )
+
+            if batch_updates:
+                conn.execute(update_message, batch_updates)
+                batch_updates.clear()
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_metadata(key, value, created_at, updated_at)
+                VALUES(:key, '1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE
+                SET value = '1', updated_at = CURRENT_TIMESTAMP
+                """
+            ),
+            {"key": migration_key},
+        )
+
+
 def _ensure_schema_uncached():
     if engine.dialect.name != "sqlite":
         return
@@ -2325,6 +2445,11 @@ def _ensure_schema_uncached():
     ensure_column("tasks", "termination_reason", "TEXT")
     ensure_column("tasks", "termination_requested_at", "DATETIME")
     ensure_column("tasks", "terminated_by_user_id", "INTEGER")
+    ensure_table("CREATE INDEX IF NOT EXISTS ix_tasks_created_at ON tasks (created_at)")
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_messages_user_created_id "
+        "ON messages (user_id, created_at, id)"
+    )
     ensure_column("scripts", "status", "INTEGER")
     ensure_column("scripts", "result", "TEXT")
     ensure_column("scripts", "ide_name", "VARCHAR(100)")
@@ -2398,6 +2523,7 @@ def _ensure_schema_uncached():
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_sync_uuid ON repository_sync_states (sync_uuid)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_revision ON repository_sync_states (revision)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_deleted ON repository_sync_states (deleted)")
+    _migrate_legacy_message_times_to_utc()
 
 
 def ensure_schema():

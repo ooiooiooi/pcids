@@ -1,5 +1,6 @@
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -28,6 +29,7 @@ class StubCurrentUser:
     def __init__(self, user_id: int, username: str, permissions: set[str]):
         self.id = user_id
         self.username = username
+        self.role = SimpleNamespace(data_scope="all")
         self._permissions = permissions
 
     def get_permissions(self):

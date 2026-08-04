@@ -3,7 +3,7 @@
 """
 from enum import IntEnum
 
-from sqlalchemy import String, Text, Integer, ForeignKey, DateTime
+from sqlalchemy import String, Text, Integer, ForeignKey, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from typing import Optional
 from datetime import datetime
@@ -22,6 +22,7 @@ class TaskStatus(IntEnum):
 class BurningTask(Base, TimestampMixin):
     """烧录任务表"""
     __tablename__ = "tasks"
+    __table_args__ = (Index("ix_tasks_created_at", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     task_no: Mapped[Optional[str]] = mapped_column(String(20), index=True)

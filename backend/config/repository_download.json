@@ -15,5 +15,6 @@
   "codearts_iam_token_url": "https://iam.{region}.myhuaweicloud.com/v3/auth/tokens",
   "codearts_base_url": "https://cloudartifacts-ext.{region}.myhuaweicloud.com",
   "codearts_private_iam_token_url": "https://iam-apigateway-proxy.cqcloud.cwgy.com/v3/auth/tokens",
-  "codearts_private_base_url": "https://codeartsartifact.{region}.cqcloud.cwgy.com"
+  "codearts_private_base_url": "https://codeartsartifact.{region}.cqcloud.cwgy.com",
+  "codearts_devops_url": "https://devops.cn-cq-1.cqcloud.cwgy.com"
 }

@@ -52,12 +52,6 @@ _PYOCD_PROBE_CACHE: dict[str, object] = {"expires_at": 0.0, "probes": []}
 _PNP_REFRESH_LOCK = threading.Lock()
 _PNP_REFRESH_CACHE: dict[str, object] = {"refreshed_at": 0.0}
 _RUNTIME_STATUS_REFRESH_LOCK = asyncio.Lock()
-_RUNTIME_STATUS_REFRESH_CACHE: dict[str, object] = {
-    "key": None,
-    "expires_at": 0.0,
-    "values": {},
-    "usb_device_count": 0,
-}
 _LAN_AGENT_CACHE_LOCK = threading.Lock()
 _LAN_AGENT_CACHE: dict[str, object] = {"expires_at": 0.0, "urls": []}
 _AGENT_DISCOVERY_CONFIG_ENV = "PCIDS_AGENT_DISCOVERY_CONFIG"
@@ -249,10 +243,14 @@ def _probe_usb_devices_uncached() -> list[dict]:
     return []
 
 
-def _probe_usb_devices(cache_ttl_seconds: float = 3.0) -> list[dict]:
+def _probe_usb_devices(
+    cache_ttl_seconds: float = 3.0,
+    *,
+    force_refresh: bool = False,
+) -> list[dict]:
     now = time.monotonic()
     with _USB_PROBE_CACHE_LOCK:
-        if now < float(_USB_PROBE_CACHE.get("expires_at") or 0):
+        if not force_refresh and now < float(_USB_PROBE_CACHE.get("expires_at") or 0):
             return list(_USB_PROBE_CACHE.get("devices") or [])
         devices = _probe_usb_devices_uncached()
         _USB_PROBE_CACHE["devices"] = list(devices)
@@ -1096,6 +1094,45 @@ def _build_usb_binding(item: dict) -> dict:
     return _normalize_usb_binding({field: item.get(field) for field in USB_BINDING_FIELDS})
 
 
+def _usb_bindings_match_device_identity(expected: object, current: object) -> bool:
+    """Match the exact USB identity captured by a user-triggered scan.
+
+    A physical port alone is not a device identity because another probe can
+    later be inserted into the same port.  The full Windows PnP instance id is
+    strong enough to confirm the device that was just scanned.  Container id
+    is accepted only together with the same VID/PID and only when it is not the
+    all-zero placeholder emitted by some drivers.
+    """
+    expected_binding = _normalize_usb_binding(expected)
+    current_binding = _normalize_usb_binding(current)
+
+    expected_pnp = str(expected_binding.get("pnp_device_id") or "").strip().casefold()
+    current_pnp = str(current_binding.get("pnp_device_id") or "").strip().casefold()
+    if expected_pnp and current_pnp and expected_pnp == current_pnp:
+        return True
+
+    expected_container = str(expected_binding.get("container_id") or "").strip().casefold()
+    current_container = str(current_binding.get("container_id") or "").strip().casefold()
+    container_token = re.sub(r"[{}\-]", "", expected_container)
+    if (
+        expected_container
+        and current_container
+        and expected_container == current_container
+        and container_token
+        and any(char != "0" for char in container_token)
+    ):
+        expected_product = (
+            str(expected_binding.get("vendor_id") or "").strip().casefold(),
+            str(expected_binding.get("product_id") or "").strip().casefold(),
+        )
+        current_product = (
+            str(current_binding.get("vendor_id") or "").strip().casefold(),
+            str(current_binding.get("product_id") or "").strip().casefold(),
+        )
+        return bool(all(expected_product) and expected_product == current_product)
+    return False
+
+
 def _burner_usb_binding(burner: Optional[Burner]) -> dict:
     if burner is None:
         return {}
@@ -1433,6 +1470,10 @@ def _candidate_matches_registered_identity(
     burner_sn = _normalize_binding_sn(getattr(burner, "sn", None))
     candidate_sn = _normalize_binding_sn(candidate.get("sn"))
     same_known_type = _candidate_has_same_known_type(burner_type, candidate)
+    exact_scanned_identity = _usb_bindings_match_device_identity(
+        _burner_usb_binding(burner),
+        candidate.get("usb_binding"),
+    )
     try:
         strategy = int(getattr(burner, "strategy", 1) or 1)
     except Exception:
@@ -1447,7 +1488,7 @@ def _candidate_matches_registered_identity(
             return False
         return not require_same_node or _is_same_burner_candidate_node(burner, candidate)
 
-    if not same_known_type:
+    if not same_known_type and not (candidate.get("probe_only") and exact_scanned_identity):
         return False
     burner_ports = _port_match_values(getattr(burner, "port", None)) | _usb_binding_direct_port_values(_burner_usb_binding(burner))
     if not (burner_ports and _candidate_direct_port_values(candidate) & burner_ports):
@@ -1576,7 +1617,7 @@ def _discover_local_candidates(refresh_hardware: bool = False) -> list[dict]:
         _refresh_windows_pnp_state()
     by_id: dict[str, dict] = {}
     host_address = _get_service_node_address()
-    usb_devices = _probe_usb_devices()
+    usb_devices = _probe_usb_devices(force_refresh=refresh_hardware)
     has_generic_dap = any(
         "dap" in " ".join(
             str(item.get(field) or "")
@@ -1674,6 +1715,10 @@ def _match_usb_device(
         if location_hint and not any(location_hint in value for value in item_port_values):
             continue
         classified_types = _classified_usb_device_types(item, usb_devices, pyocd_probes)
+        exact_scanned_identity = _usb_bindings_match_device_identity(
+            expected_usb_binding,
+            _build_usb_binding(item),
+        )
         if not type_hint and not classified_types:
             continue
         serial = _get_real_usb_serial(item, usb_devices, device_type)
@@ -1700,8 +1745,13 @@ def _match_usb_device(
         if expected_port_values and item_direct_port_values & expected_port_values:
             # A port (and its parent/container metadata) is not a device
             # identity.  It may only confirm a serial-less device that the
-            # scanner independently classified as the expected burner type.
-            if expected_sn_value or (type_hint and type_hint not in classified_types):
+            # scanner independently classified as the expected burner type,
+            # or the exact PnP identity explicitly captured during binding.
+            if expected_sn_value or (
+                type_hint
+                and type_hint not in classified_types
+                and not (not classified_types and exact_scanned_identity)
+            ):
                 continue
             matched = {"sn": serial or None, "port": port or None, "usb_binding": _build_usb_binding(item), "source": "usb_probe", "name": item.get("_name")}
             score = _candidate_display_score(
@@ -1752,6 +1802,7 @@ def _build_scan_result(
     usb_devices: Optional[list[dict]] = None,
     expected_sn: Optional[str] = None,
     expected_port: Optional[str] = None,
+    expected_usb_binding: Optional[dict] = None,
 ) -> Optional[dict]:
     try:
         runtime_strategy = int(strategy or getattr(existing, "strategy", 1) if existing else strategy or 1)
@@ -1774,7 +1825,7 @@ def _build_scan_result(
         usb_devices=usb_devices,
         expected_sn=expected_sn if runtime_strategy == 1 else None,
         expected_port=expected_port,
-        expected_usb_binding=_burner_usb_binding(existing),
+        expected_usb_binding=expected_usb_binding or _burner_usb_binding(existing),
     )
     if matched:
         return {
@@ -1833,6 +1884,7 @@ def _remote_scan_burner(
     strategy: Optional[int],
     sn: Optional[str] = None,
     port: Optional[str] = None,
+    usb_binding: Optional[dict] = None,
     timeout_seconds: Optional[float] = None,
 ) -> dict:
     import urllib.request
@@ -1855,6 +1907,7 @@ def _remote_scan_burner(
         "strategy": strategy,
         "sn": sn,
         "port": port,
+        "usb_binding": _normalize_usb_binding(usb_binding),
         "allow_fallback": False,
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -2202,6 +2255,10 @@ def _find_discovery_binding_candidate(burner: Burner, candidates: list[dict]) ->
         candidate_sn = _normalize_binding_sn(candidate.get("sn"))
         candidate_port_values = _candidate_direct_port_values(candidate)
         same_known_type = _candidate_has_same_known_type(burner_type, candidate)
+        exact_scanned_identity = _usb_bindings_match_device_identity(
+            _burner_usb_binding(burner),
+            candidate.get("usb_binding"),
+        )
         score = 0
         if burner_sn:
             if not candidate_sn or candidate_sn != burner_sn:
@@ -2218,7 +2275,7 @@ def _find_discovery_binding_candidate(burner: Burner, candidates: list[dict]) ->
             # Without an immutable serial there is no safe way to infer that a
             # device moved. Same-type/same-port may only confirm the existing
             # binding; an explicit user rebind is required for a new port.
-            if not same_known_type:
+            if not same_known_type and not (candidate.get("probe_only") and exact_scanned_identity):
                 continue
             if not (burner_port_values and candidate_port_values & burner_port_values):
                 continue
@@ -2386,6 +2443,7 @@ def _build_discovery_payload(
         candidate
         for candidate in candidates
         if candidate.get("probe_only")
+        if candidate["candidate_id"] not in matched_candidate_ids
     ]
     # #region debug-point SM:build-discovery-done
     _debug_report_burner_scan_crash(
@@ -2544,6 +2602,7 @@ def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int]
                 burner.strategy,
                 sn=burner.sn,
                 port=burner.port,
+                usb_binding=_burner_usb_binding(burner),
             )
             return 0 if bool(res.get("data", {}).get("online")) else 1
         except Exception as exc:
@@ -2614,50 +2673,17 @@ def _safe_compute_burner_runtime_status(
         return 1
 
 
-def _runtime_status_refresh_key(
-    burners: list[Burner],
-    occupied_burner_ids: set[int],
-) -> tuple:
-    return tuple(
-        sorted(
-            (
-                int(getattr(burner, "id", 0) or 0),
-                str(getattr(burner, "type", None) or ""),
-                str(getattr(burner, "sn", None) or ""),
-                str(getattr(burner, "port", None) or ""),
-                str(getattr(burner, "location", None) or ""),
-                int(getattr(burner, "strategy", 1) or 1),
-                bool(_is_burner_enabled(burner)),
-                str(getattr(burner, "agent_url", None) or "").strip().rstrip("/").lower(),
-                int(getattr(burner, "id", 0) or 0) in occupied_burner_ids,
-            )
-            for burner in burners
-        )
-    )
-
-
 async def _compute_burner_runtime_statuses(
     burners: list[Burner],
     occupied_burner_ids: set[int],
 ) -> tuple[dict[int, int], int]:
-    """Compute one coalesced runtime snapshot without monopolizing the API.
+    """Read a fresh runtime snapshot while serializing expensive PnP probes.
 
-    The task wizard may render more than once while its dependent options are
-    settling.  Coalescing identical requests prevents duplicate PnP scans and
-    keeps those requests from exhausting the SQLite connection pool.
+    Device presence is mutable system state.  The lock prevents overlapping
+    hardware enumeration, but completed results must never be reused by a
+    later request.
     """
-    cache_key = _runtime_status_refresh_key(burners, occupied_burner_ids)
     async with _RUNTIME_STATUS_REFRESH_LOCK:
-        now = time.monotonic()
-        if (
-            _RUNTIME_STATUS_REFRESH_CACHE.get("key") == cache_key
-            and now < float(_RUNTIME_STATUS_REFRESH_CACHE.get("expires_at") or 0)
-        ):
-            return (
-                dict(_RUNTIME_STATUS_REFRESH_CACHE.get("values") or {}),
-                int(_RUNTIME_STATUS_REFRESH_CACHE.get("usb_device_count") or 0),
-            )
-
         needs_local_probe = any(
             _is_burner_enabled(burner)
             and burner.id not in occupied_burner_ids
@@ -2673,7 +2699,7 @@ async def _compute_burner_runtime_statuses(
         usb_devices: Optional[list[dict]] = None
         if needs_local_probe:
             await asyncio.to_thread(_refresh_windows_pnp_state)
-            usb_devices = await asyncio.to_thread(_probe_usb_devices)
+            usb_devices = await asyncio.to_thread(_probe_usb_devices, force_refresh=True)
 
         runtime_values = await asyncio.gather(
             *(
@@ -2691,14 +2717,6 @@ async def _compute_burner_runtime_statuses(
             for burner, runtime_status in zip(burners, runtime_values)
         }
         usb_device_count = len(usb_devices or [])
-        _RUNTIME_STATUS_REFRESH_CACHE.update(
-            {
-                "key": cache_key,
-                "expires_at": time.monotonic() + 2.0,
-                "values": dict(values),
-                "usb_device_count": usb_device_count,
-            }
-        )
         return values, usb_device_count
 
 
@@ -2740,7 +2758,8 @@ async def _refresh_and_persist_single_burner_status(db: Session, burner: Burner)
     usb_devices: Optional[list[dict]] = None
     agent_url = str(getattr(burner, "agent_url", None) or "").strip()
     if not agent_url or _is_agent_url_for_service_node(agent_url):
-        usb_devices = await asyncio.to_thread(_probe_usb_devices)
+        await asyncio.to_thread(_refresh_windows_pnp_state)
+        usb_devices = await asyncio.to_thread(_probe_usb_devices, force_refresh=True)
     try:
         runtime_status = await asyncio.to_thread(
             _safe_compute_burner_runtime_status,
@@ -2875,7 +2894,7 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
         if (
             usb_binding
             and explicit_port_values
-            and not (explicit_port_values & _usb_binding_direct_port_values(usb_binding))
+            and not (explicit_port_values & _usb_binding_port_values(usb_binding))
         ):
             # A manually changed primary port must not keep identifying a
             # different USB device through stale form/config metadata.
@@ -3578,6 +3597,7 @@ async def scan_burners(
                 strategy,
                 sn=getattr(existing, "sn", None) if existing else None,
                 port=getattr(existing, "port", None) if existing else None,
+                usb_binding=_burner_usb_binding(existing),
             )
             remote_data = remote_res.get("data") or {}
             logger.info(
@@ -3632,7 +3652,7 @@ async def scan_burners(
             }
 
     await asyncio.to_thread(_refresh_windows_pnp_state)
-    usb_devices = await asyncio.to_thread(_probe_usb_devices)
+    usb_devices = await asyncio.to_thread(_probe_usb_devices, force_refresh=True)
     scanned = _build_scan_result(
         device_type,
         location,
@@ -3692,6 +3712,7 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
     location = payload.get("location")
     expected_sn = payload.get("sn")
     expected_port = payload.get("port")
+    expected_usb_binding = _normalize_usb_binding(payload.get("usb_binding"))
     logger.info(
         "burner.agent_scan.request | %s",
         json.dumps(
@@ -3700,7 +3721,7 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
         ),
     )
     await asyncio.to_thread(_refresh_windows_pnp_state)
-    usb_devices = await asyncio.to_thread(_probe_usb_devices)
+    usb_devices = await asyncio.to_thread(_probe_usb_devices, force_refresh=True)
     scanned = _build_scan_result(
         device_type,
         location,
@@ -3710,6 +3731,7 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
         usb_devices=usb_devices,
         expected_sn=expected_sn,
         expected_port=expected_port,
+        expected_usb_binding=expected_usb_binding,
     )
     if not scanned:
         logger.warning(

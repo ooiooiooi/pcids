@@ -8,19 +8,33 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 
-def _get_agent_config_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "agent.json"
+def _get_agent_config_paths() -> list[Path]:
+    paths: list[Path] = []
+    configured = str(os.environ.get("PCIDS_AGENT_CONFIG") or "").strip()
+    if configured:
+        paths.append(Path(configured))
+
+    program_data = str(os.environ.get("PROGRAMDATA") or "").strip()
+    if program_data:
+        paths.append(Path(program_data) / "PCIDS" / "agent.json")
+
+    paths.append(Path(__file__).resolve().parents[1] / "config" / "agent.json")
+    return paths
 
 
 def get_agent_shared_token() -> str:
     env_token = str(os.environ.get("PCIDS_AGENT_TOKEN") or "").strip()
     if env_token:
         return env_token
-    try:
-        payload = json.loads(_get_agent_config_path().read_text(encoding="utf-8"))
-        return str(payload.get("shared_token") or "").strip()
-    except Exception:
-        return ""
+    for config_path in _get_agent_config_paths():
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            token = str(payload.get("shared_token") or "").strip()
+            if token:
+                return token
+        except Exception:
+            continue
+    return ""
 
 
 def build_agent_headers() -> dict[str, str]:

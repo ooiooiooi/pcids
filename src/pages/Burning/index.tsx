@@ -15,6 +15,7 @@ import { buildScriptSelectParameterDescriptors, getCompatibleBoardScripts, getSu
 import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm, { ActionConfirmDialog } from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
+import { resolveArtifactSelectionAfterRefresh } from './artifactSelectionState'
 import KylinIcon from '../../assets/images/os-kylin-logo.svg'
 import HarmonyIcon from '../../assets/images/os-harmony.svg'
 import SylixIcon from '../../assets/images/os-sylixos.png'
@@ -370,7 +371,7 @@ const getArtifactCurrentPath = (item: any) => {
 
 const createInitialWizardData = (initialState?: any) => ({
   software: initialState?.softwareId || null,
-  installSource: initialState?.installSource || 'local',
+  installSource: 'codearts',
   boardId: null,
   osId: initialState?.osId || (initialState?.taskType === 'os' ? DEFAULT_OS_ID : null),
   burnerId: null,
@@ -435,7 +436,6 @@ const createInitialWizardData = (initialState?: any) => ({
 })
 
 const SCRIPT_INPUT_DRAFT_STORAGE_KEY = 'pcids-burning-script-input-drafts-v1'
-const WIZARD_LAST_SELECTION_STORAGE_KEY = 'pcids-burning-wizard-last-selection-v1'
 const REMEMBERED_SCRIPT_PARAM_FIELDS = new Set([
   'interfaceType',
   'eraseMode',
@@ -460,25 +460,6 @@ const REMEMBERED_SCRIPT_PARAM_FIELDS = new Set([
   'formatSdCard',
   'completionAction',
 ])
-
-const readWizardLastSelection = () => {
-  try {
-    const raw = window.localStorage.getItem(WIZARD_LAST_SELECTION_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : null
-  } catch {
-    return null
-  }
-}
-
-const persistWizardLastSelection = (payload: any) => {
-  try {
-    window.localStorage.setItem(WIZARD_LAST_SELECTION_STORAGE_KEY, JSON.stringify(payload || {}))
-  } catch {
-    /* ignore */
-  }
-}
 
 const readScriptInputDrafts = (): Record<string, Record<string, string>> => {
   if (typeof window === 'undefined') return {}
@@ -554,6 +535,8 @@ const Burning: React.FC = () => {
   const [artifactLocationFilter, setArtifactLocationFilter] = useState('全部')
   const [artifactPage, setArtifactPage] = useState(1)
   const [artifactPageSize, setArtifactPageSize] = useState(5)
+  const artifactPageUserControlledRef = useRef(false)
+  const artifactSelectionUserTouchedRef = useRef(false)
   const [wizardLocalIps, setWizardLocalIps] = useState<string[]>([])
   const [wizardSerialPorts, setWizardSerialPorts] = useState<string[]>([])
   const [wizardHarmonyDevices, setWizardHarmonyDevices] = useState<Array<{ id: string; name: string }>>([])
@@ -642,11 +625,17 @@ const Burning: React.FC = () => {
   }
 
   const fetchTasks = async (silent = false) => {
+    if (!currentProject.projectKey) {
+      setDataSource([])
+      setTotal(0)
+      setLoading(false)
+      return
+    }
     if (!silent) setLoading(true)
     try {
       const res: any = await taskApi.getList({
         ...params,
-        project_key: currentProject.projectKey || undefined,
+        project_key: currentProject.projectKey,
       }, silent)
       if (res.code === 0) { setDataSource(res.data || []); setTotal(res.total || 0) }
     } catch { /* interceptor handles it */ }
@@ -656,8 +645,12 @@ const Burning: React.FC = () => {
   }
 
   const fetchRepositories = async () => {
+    if (!currentProject.projectKey) {
+      setRepositories([])
+      return
+    }
     try {
-      const res: any = await repositoryApi.getList({ page: 1, page_size: 500 })
+      const res: any = await repositoryApi.getList({ page: 1, page_size: 500, _ts: Date.now() })
       if (res?.code === 0) setRepositories(Array.isArray(res.data) ? res.data : [])
     } catch {
       /* ignore */
@@ -686,7 +679,7 @@ const Burning: React.FC = () => {
         productApi.getList({ page: 1, page_size: 100 }),
         burnerApi.getList({ page: 1, page_size: 100, include_runtime_status: false }),
         scriptApi.getList({ page: 1, page_size: 100 }),
-        repositoryApi.getList({ page: 1, page_size: 500 })
+        repositoryApi.getList({ page: 1, page_size: 500, _ts: Date.now() })
       ])
       const nextBoards = (prodRes?.data || []).map((item: any) => ({
         ...item,
@@ -836,32 +829,12 @@ const Burning: React.FC = () => {
   }
 
   const handleOpenWizard = async (initialState?: any) => {
-    const rememberedSelection = initialState?.taskType ? null : readWizardLastSelection()
-    const rememberedPlatform = ['board', 'os', 'hybrid'].includes(String(rememberedSelection?.platform || ''))
-      ? rememberedSelection.platform
-      : null
     setCurrentStep(0)
-    setPlatform(initialState?.taskType || rememberedPlatform || 'board')
+    setPlatform(initialState?.taskType || 'board')
+    artifactSelectionUserTouchedRef.current = false
     const nextWizardData = {
-      ...createInitialWizardData({
-        ...initialState,
-        softwareId: initialState?.softwareId || rememberedSelection?.softwareId,
-        installSource: initialState?.installSource || rememberedSelection?.installSource,
-      }),
-      boardId: rememberedSelection?.boardId || null,
-      scriptId: rememberedSelection?.scriptId || null,
-      burnMode: rememberedSelection?.burnMode || SYLIXOS_HYBRID_DEFAULTS.burnMode,
-      transferProtocol: rememberedSelection?.burnMode || SYLIXOS_HYBRID_DEFAULTS.transferProtocol,
-      serverPort: rememberedSelection?.serverPort || SYLIXOS_HYBRID_DEFAULTS.serverPort,
-      serialPort: rememberedSelection?.serialPort || '',
-      baudRate: rememberedSelection?.baudRate || SYLIXOS_HYBRID_DEFAULTS.baudRate,
-      serialLoginUser: rememberedSelection?.serialLoginUser || SYLIXOS_HYBRID_DEFAULTS.serialLoginUser,
-      serialPasswordless: rememberedSelection?.serialPasswordless ?? SYLIXOS_HYBRID_DEFAULTS.serialPasswordless,
-      ftpLoginUser: rememberedSelection?.ftpLoginUser || SYLIXOS_HYBRID_DEFAULTS.ftpLoginUser,
-      ftpPasswordless: rememberedSelection?.ftpPasswordless ?? SYLIXOS_HYBRID_DEFAULTS.ftpPasswordless,
-      boardTargetAddress: rememberedSelection?.boardTargetAddress || SYLIXOS_HYBRID_DEFAULTS.boardTargetAddress,
-      localIp: rememberedSelection?.localIp || SYLIXOS_HYBRID_DEFAULTS.localIp,
-      targetPath: rememberedSelection?.targetPath || SYLIXOS_HYBRID_DEFAULTS.targetPath,
+      ...createInitialWizardData(initialState),
+      installSource: 'codearts',
     }
     setWizardData(nextWizardData)
     setBurnerOnlineMap({})
@@ -869,23 +842,28 @@ const Burning: React.FC = () => {
     setBurnerScanError('')
     setArtifactKeyword('')
     setArtifactLocationFilter('全部')
+    artifactPageUserControlledRef.current = false
     setArtifactPage(1)
     setWizardBoardPage(1)
     setHybridConnectionPassed(false)
     setOsConnectionResult(null)
     setIsWizardOpen(true)
     const wizardDeps = await fetchWizardData()
-    const rememberedSoftwareExists = wizardDeps.repositories.some((repo: any) => Number(repo?.id) === Number(nextWizardData.software))
-    const rememberedBoardExists = wizardDeps.boards.some((board: any) => Number(board?.id) === Number(nextWizardData.boardId))
+    const requestedSoftwareId = nextWizardData.software || initialState?.softwareId || null
     const defaultSoftwareId =
-      (rememberedSoftwareExists ? nextWizardData.software : null) ||
-      initialState?.softwareId ||
+      wizardDeps.repositories.find((repo: any) => Number(repo?.id) === Number(requestedSoftwareId))?.id ||
       wizardDeps.repositories.find((repo: any) => hasRepositoryVersion(repo))?.id ||
       null
     setWizardData((prev: any) => ({
       ...prev,
-      software: rememberedSoftwareExists ? prev.software : defaultSoftwareId,
-      boardId: rememberedBoardExists ? prev.boardId : wizardDeps.boards[0]?.id || null,
+      software: resolveArtifactSelectionAfterRefresh({
+        currentSoftware: prev.software,
+        requestedSoftware: requestedSoftwareId,
+        defaultSoftware: defaultSoftwareId,
+        availableSoftwareIds: wizardDeps.repositories.map((repo: any) => repo?.id),
+        userTouched: artifactSelectionUserTouchedRef.current,
+      }),
+      boardId: wizardDeps.boards[0]?.id || null,
     }))
     fetchTaskWizardContext().then((wizardContext) => {
       setWizardData((prev: any) => ({
@@ -1113,6 +1091,9 @@ const Burning: React.FC = () => {
   }
 
   const selectedRepository = repositories.find((repo) => repo.id === wizardData.software)
+  const effectiveInstallSource = selectedRepository
+    ? getArtifactLocationInfo(selectedRepository).installSource
+    : 'codearts'
   const selectedOsType = wizardData.osId ? osTypeMap[Number(wizardData.osId)] : ''
   const isHarmonyOs = selectedOsType === 'harmony'
   const isSylixOs = selectedOsType === 'yinghui'
@@ -1299,7 +1280,7 @@ const Burning: React.FC = () => {
     return 120
   }
   const versionCheckDisabled = !versionBaselineReady
-  const keepLocalDisabled = String(wizardData.installSource || '').trim().toLowerCase() === 'local'
+  const keepLocalDisabled = effectiveInstallSource === 'local'
   const keepLocalTip = '在线安装时会按本次烧录器部署位置自动保留到本地或服务器; 不勾选则任务完成后自动清理临时下载包'
   const versionCheckTip = versionCheckDisabled ? '该软件版本为首次烧录，版本校验不可选' : '按历史标准版本校验当前可执行文件的一致性'
   const renderOptionWithTip = (label: string, tip: string) => (
@@ -2401,7 +2382,7 @@ const Burning: React.FC = () => {
       const configPayload = {
         task_type: platform,
         platform,
-        install_source: wizardData.installSource,
+        install_source: effectiveInstallSource,
         retries: Number(wizardData.retryCount || 0),
         keep_local: wizardData.options?.includes('local'),
         integrity: wizardData.options?.includes('integrity'),
@@ -2500,24 +2481,6 @@ const Burning: React.FC = () => {
       const isAutoExecuted = createRes?.data?.auto_executed === true || createRes?.data?.auto_executed === 1
       const createdTaskId = Number(createRes?.data?.id || 0)
       const createdTaskNo = String(createRes?.data?.task_no || createRes?.data?.id || '-')
-      persistWizardLastSelection({
-        platform,
-        softwareId: selectedRepository.id,
-        installSource: wizardData.installSource || 'local',
-        boardId: wizardData.boardId || null,
-        scriptId: wizardData.scriptId || null,
-        burnMode: platform === 'hybrid' ? String(wizardData.burnMode || '').trim() : undefined,
-        serverPort: platform === 'hybrid' ? String(wizardData.serverPort || '') : undefined,
-        serialPort: platform === 'hybrid' ? String(wizardData.serialPort || '') : undefined,
-        baudRate: platform === 'hybrid' ? String(wizardData.baudRate || '') : undefined,
-        serialLoginUser: platform === 'hybrid' ? String(wizardData.serialLoginUser || '') : undefined,
-        serialPasswordless: platform === 'hybrid' ? Boolean(wizardData.serialPasswordless) : undefined,
-        ftpLoginUser: platform === 'hybrid' ? String(wizardData.ftpLoginUser || '') : undefined,
-        ftpPasswordless: platform === 'hybrid' ? Boolean(wizardData.ftpPasswordless) : undefined,
-        boardTargetAddress: platform === 'hybrid' ? String(wizardData.boardTargetAddress || '') : undefined,
-        localIp: platform === 'hybrid' ? String(wizardData.localIp || '') : undefined,
-        targetPath: platform === 'hybrid' ? String(wizardData.targetPath || '') : undefined,
-      })
       // 改用受控轻提示（参考登录成功的轻提示风格），避免大弹窗遮挡列表。
       // 用稳定 key：重复提交时只更新内容，不叠加多个 message。
       const tipText = isAutoExecuted
@@ -2845,9 +2808,9 @@ const Burning: React.FC = () => {
     },
   ]
 
-  const artifactRows = repositories
+  const artifactRows = currentProject.projectKey ? repositories
     .filter((item) => {
-      if (currentProject.projectKey && item?.project_key !== currentProject.projectKey) return false
+      if (item?.project_key !== currentProject.projectKey) return false
       const locationInfo = getArtifactLocationInfo(item)
       const matchLocation = artifactLocationFilter === '全部' || locationInfo.filters?.includes(artifactLocationFilter)
       if (!matchLocation) return false
@@ -2885,16 +2848,17 @@ const Burning: React.FC = () => {
         locationColor: locationInfo.color,
         locationDetail: locationInfo.detail,
       }
-    })
+    }) : []
 
   const selectedInstallSourceLabel =
-    (wizardData.installSource === 'server'
+    (effectiveInstallSource === 'server'
       ? '服务器'
-      : wizardData.installSource === 'codearts'
+      : effectiveInstallSource === 'codearts'
         ? 'CodeArts'
         : '本地')
 
   useEffect(() => {
+    artifactPageUserControlledRef.current = false
     setArtifactPage(1)
   }, [artifactKeyword, artifactLocationFilter, currentProject.projectKey])
 
@@ -2907,20 +2871,16 @@ const Burning: React.FC = () => {
     if (!isWizardOpen || currentStep !== 0 || artifactRows.length === 0) return
     const selectedIndex = artifactRows.findIndex((item) => Number(item.value) === Number(wizardData.software))
     const currentRecord = selectedIndex >= 0 ? artifactRows[selectedIndex] : null
-    const currentIsValid = Boolean(currentRecord?.selectable)
-    if (selectedIndex < 0 || !currentIsValid) {
-      const firstSelectable = artifactRows.find((item) => item.selectable)
-      if (firstSelectable) {
-        setWizardData((prev: any) => ({
-          ...prev,
-          software: firstSelectable.value,
-          installSource: firstSelectable.installSource || prev.installSource || 'local',
-        }))
-        return
-      }
+    if (currentRecord?.installSource && currentRecord.installSource !== wizardData.installSource) {
+      setWizardData((prev: any) => ({
+        ...prev,
+        installSource: currentRecord.installSource,
+      }))
     }
-    setArtifactPage(Math.floor(selectedIndex / artifactPageSize) + 1)
-  }, [isWizardOpen, currentStep, wizardData.software, artifactRows.length, artifactPageSize])
+    if (!artifactPageUserControlledRef.current && selectedIndex >= 0) {
+      setArtifactPage(Math.floor(selectedIndex / artifactPageSize) + 1)
+    }
+  }, [isWizardOpen, currentStep, wizardData.software, wizardData.installSource, artifactRows.length, artifactPageSize])
 
   const consistencyConclusion = consistencyTask?.consistency_passed === 1
     ? { color: 'success', text: '通过' }
@@ -3163,6 +3123,7 @@ const Burning: React.FC = () => {
                   total: artifactRows.length,
                   showSizeChanger: false,
                   onChange: (page, pageSize) => {
+                    artifactPageUserControlledRef.current = true
                     if (pageSize && pageSize !== artifactPageSize) {
                       setArtifactPageSize(pageSize)
                     }
@@ -3170,6 +3131,7 @@ const Burning: React.FC = () => {
                   },
                   showTotal: (t) =>
                     renderListPaginationTotal(t, artifactPageSize, (size) => {
+                      artifactPageUserControlledRef.current = true
                       setArtifactPage(1)
                       setArtifactPageSize(size)
                     }, {
@@ -3191,6 +3153,7 @@ const Burning: React.FC = () => {
                       message.warning('该制品仓库记录未维护版本号，暂不能用于创建烧录任务')
                       return
                     }
+                    artifactSelectionUserTouchedRef.current = true
                     setWizardData((prev: any) => ({
                       ...prev,
                       software: selectedRowKeys[0],
@@ -3204,6 +3167,7 @@ const Burning: React.FC = () => {
                       message.warning('该制品仓库记录未维护版本号，暂不能用于创建烧录任务')
                       return
                     }
+                    artifactSelectionUserTouchedRef.current = true
                     setWizardData((prev: any) => ({
                       ...prev,
                       software: record.value,

@@ -1,4 +1,4 @@
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, Boolean
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, Boolean, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from typing import Optional
 from datetime import datetime
@@ -7,6 +7,9 @@ from .base import Base, TimestampMixin
 class Message(Base, TimestampMixin):
     """消息通知表"""
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_user_created_id", "user_id", "created_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)

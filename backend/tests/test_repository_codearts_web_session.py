@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from starlette.responses import FileResponse
 
+from backend.models.repository import Repository
 from backend.routers.repositories import (
     _build_local_tree,
     _codearts_web_click_target,
@@ -110,6 +111,31 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
         self.assertFalse(complete)
         self.assertIn("browser_runtime_marked_snapshot_incomplete", reasons)
         self.assertIn("directory_errors=1", reasons)
+
+    def test_missing_snapshot_confirmation_is_not_safe_for_full_refresh(self):
+        complete, reasons = _codearts_web_snapshot_status(
+            {"summary": {"directoryErrors": [], "detailErrors": []}}
+        )
+
+        self.assertFalse(complete)
+        self.assertIn("browser_runtime_did_not_confirm_snapshot_complete", reasons)
+
+    def test_legacy_runtime_complete_counters_are_safe_for_full_refresh(self):
+        complete, reasons = _codearts_web_snapshot_status(
+            {
+                "summary": {
+                    "visitedDirectoryCount": 3,
+                    "folderCount": 2,
+                    "fileCount": 3,
+                    "detailSuccessCount": 3,
+                    "directoryErrors": [],
+                    "detailErrors": [],
+                }
+            }
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(reasons, [])
 
     def test_normalizes_web_details_and_retains_directory_metadata(self):
         response = {
@@ -231,6 +257,45 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
         self.assertEqual(tree[0]["children"][0]["title"], "empty")
         self.assertEqual(tree[0]["children"][0]["children"][0]["title"], "nested")
 
+    def test_project_tree_keeps_stored_name_when_config_name_is_only_project_id(self):
+        repository = Repository(
+            id=1,
+            project_key="proj-project-id",
+            name="firmware.bin",
+            source_type="codearts_sync",
+            remote_repo_id="web-private",
+            repo_id="web-private",
+            display_path="/firmware.bin",
+            description="/firmware.bin",
+            download_uri="https://example.invalid/download",
+            size=1,
+            repo_detail_json=json.dumps(
+                {
+                    "project_name": "Stored Project Name",
+                    "name": "Stored Project Name",
+                    "repository_mode": "private",
+                    "private_source": "web",
+                }
+            ),
+            file_detail_json="{}",
+        )
+
+        tree = _build_local_tree(
+            [repository],
+            project_configs=[
+                {
+                    "enabled": True,
+                    "repository_mode": "private",
+                    "private_source": "web",
+                    "project_id": "project-id",
+                    "project_name": "project-id",
+                }
+            ],
+        )
+
+        self.assertEqual(tree[0]["title"], "Stored Project Name")
+        self.assertEqual(tree[0]["repo_detail"]["project_name"], "Stored Project Name")
+
     def test_web_download_runtime_output_enters_encrypted_storage_pipeline(self):
         stored_result = type(
             "StoredArtifact",
@@ -307,7 +372,7 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
 
         with (
             patch("backend.routers.repositories._require_project_permission"),
-            patch("backend.routers.repositories._build_codearts_download_context", return_value=(cfg, "")),
+            patch("backend.routers.repositories._build_codearts_download_context_async", return_value=(cfg, "")),
             patch(
                 "backend.routers.repositories._resolve_codearts_download_auth",
                 side_effect=AssertionError("Web 下载不应调用 API 下载鉴权"),
@@ -364,7 +429,7 @@ class CodeartsWebSessionAdapterTests(unittest.TestCase):
             with (
                 patch("backend.routers.repositories._ensure_project_member_seed"),
                 patch("backend.routers.repositories._require_project_permission"),
-                patch("backend.routers.repositories._build_codearts_download_context", return_value=(cfg, "")),
+                patch("backend.routers.repositories._build_codearts_download_context_async", return_value=(cfg, "")),
                 patch(
                     "backend.routers.repositories._resolve_codearts_download_auth",
                     side_effect=AssertionError("Web 下载不应调用 API 下载鉴权"),

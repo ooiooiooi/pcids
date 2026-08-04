@@ -1,10 +1,10 @@
-import { Card, Row, Col, Typography, Badge, List, Segmented } from 'antd'
+import { Alert, Badge, Button, Card, Col, Empty, List, Row, Segmented, Skeleton, Space, Typography } from 'antd'
 import {
   CaretUpOutlined,
   CaretDownOutlined
 } from '@ant-design/icons'
-import { useEffect, useRef, useState } from 'react'
-import { dashboardApi } from '../../services/api'
+import { useEffect, useReducer, useRef, useState } from 'react'
+import apiRequest, { dashboardApi } from '../../services/api'
 import {
   AreaChart,
   Area,
@@ -18,11 +18,25 @@ import {
 } from 'recharts'
 import { useNavigate } from 'react-router-dom'
 import { ActionLinkButton } from '../../components/ActionButton'
-import { getDateTimeSortValue } from '../../utils/dateTime'
 import DashboardIllustration from '../../assets/images/workbench-hero-illustration.svg'
 import InstallIcon from '../../assets/images/workbench-install-count.svg'
 import SuccessRateIcon from '../../assets/images/workbench-success-rate.svg'
 import BurnerStatusIcon from '../../assets/images/workbench-burner-status.svg'
+import {
+  DASHBOARD_TARGET_TITLE,
+  DASHBOARD_TREND_TITLE,
+  buildDashboardRefreshRequest,
+  createDashboardRefreshController,
+  dashboardLoadReducer,
+  formatDashboardRefreshTime,
+  getDashboardGrowthPresentation,
+  getDashboardTaskGrowthPresentation,
+  initialDashboardLoadState,
+  normalizeDashboardData,
+  type DashboardData,
+  type DashboardRefreshParams,
+  type DashboardRefreshRequest,
+} from './dashboardState'
 
 const { Title, Text } = Typography
 
@@ -30,146 +44,160 @@ export interface WorkbenchProps {
   onOpenMessage?: () => void;
 }
 
-type ShortcutItem = {
-  id: number
-  name: string
-  path: string
-  permissionCode?: string
-  iconKey?: string
+const getDashboardErrorMessage = (error: any) => {
+  const detail = typeof error?.response?.data?.detail === 'string'
+    ? error.response.data.detail.trim()
+    : ''
+  const responseMessage = typeof error?.response?.data?.message === 'string'
+    ? error.response.data.message.trim()
+    : ''
+  const errorMessage = typeof error?.message === 'string' ? error.message.trim() : ''
+  if (detail || responseMessage) return detail || responseMessage
+  if (errorMessage && errorMessage !== 'Network Error') return errorMessage
+  return '无法获取工作台数据，请检查服务连接后重试'
 }
 
-const parseNotificationPayload = (value: any): Record<string, any> => {
-  const text = String(value || '').trim()
-  if (!text) return {}
-  const candidates = [text]
-  const objectStart = text.indexOf('{')
-  const objectEnd = text.lastIndexOf('}')
-  if (objectStart >= 0 && objectEnd > objectStart) {
-    candidates.push(text.slice(objectStart, objectEnd + 1))
-  }
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
-    } catch {
-      // try next candidate
-    }
-  }
-  return {}
-}
-
-const getNotificationField = (...values: any[]) => {
-  for (const value of values) {
-    const text = String(value || '').trim()
-    if (text) return text
-  }
-  return ''
-}
-
-const extractNotificationDurationText = (value: any) => {
-  const text = String(value || '').trim()
-  if (!text) return ''
-  const match = text.match(/(?:总耗时|已用时间)\s*[:：]?\s*\d+(?:\.\d+)?\s*(?:秒|s|ms|毫秒|分钟|分)?/i)
-  return match?.[0]?.trim() || ''
-}
-
-const normalizeNotification = (item: any) => {
-  const payload = parseNotificationPayload(item?.text)
-  const text = String(item?.text || '').trim()
-  const textIsPayload = Object.keys(payload).length > 0
-  const detailText = getNotificationField(item?.detail_text, payload.detail_text, payload.detail_content)
-  return {
-    ...item,
-    status: getNotificationField(item?.status, payload.status) || 'info',
-    primaryText: getNotificationField(item?.primary_text, payload.primary_text, textIsPayload ? '' : text, '系统动态更新'),
-    metaText: getNotificationField(item?.meta_text, payload.meta_text),
-    durationText: extractNotificationDurationText(detailText),
+const redirectExpiredSession = () => {
+  localStorage.removeItem('token')
+  localStorage.removeItem('user')
+  localStorage.removeItem('username')
+  if (!window.location.hash.startsWith('#/login')) {
+    window.location.replace('#/login')
   }
 }
 
 const Workbench: React.FC<WorkbenchProps> = ({ onOpenMessage }) => {
   const navigate = useNavigate()
-  const latestFetchIdRef = useRef(0)
-  const [welcome, setWelcome] = useState({
-    displayName: '用户',
-    dateLabel: '',
-  })
-  const [stats, setStats] = useState({
+  const [loadState, dispatchLoadState] = useReducer(dashboardLoadReducer, initialDashboardLoadState)
+  const [trendMonths, setTrendMonths] = useState<6 | 12>(6)
+  const [targetMonths, setTargetMonths] = useState<6 | 12>(6)
+  const paramsRef = useRef<DashboardRefreshParams>({ trendMonths: 6, targetMonths: 6 })
+  const didObserveInitialParamsRef = useRef(false)
+  const hasAttemptedRef = useRef(false)
+  const refreshControllerRef = useRef<ReturnType<typeof createDashboardRefreshController<DashboardData>> | null>(null)
+  const middlePanelMinHeight = 224
+
+  const ensureRefreshController = () => {
+    if (refreshControllerRef.current) return refreshControllerRef.current
+
+    refreshControllerRef.current = createDashboardRefreshController<DashboardData>({
+      execute: async (refreshRequest) => {
+        const requestParams = {
+          trend_months: refreshRequest.params.trendMonths,
+          target_months: refreshRequest.params.targetMonths,
+        }
+
+        try {
+          const res: any = refreshRequest.silent
+            ? await apiRequest.get('/dashboard/stats', {
+                params: requestParams,
+                skipAutoErrorMessage: true,
+                suppressBackendServiceError: true,
+              } as any)
+            : await dashboardApi.getStats(requestParams)
+
+          if (Number(res?.code) !== 0) {
+            throw new Error(String(res?.message || '工作台数据加载失败'))
+          }
+          const normalized = normalizeDashboardData(res?.data)
+          if (!normalized) {
+            throw new Error('工作台数据格式不正确')
+          }
+          return normalized
+        } catch (error: any) {
+          // Silent background polling bypasses the shared interceptor's
+          // automatic message path, so retain the critical 401 behavior here.
+          if (refreshRequest.silent && Number(error?.response?.status) === 401) {
+            redirectExpiredSession()
+          }
+          throw error
+        }
+      },
+      onStart: (request) => {
+        hasAttemptedRef.current = true
+        dispatchLoadState({ type: 'start', silent: request.silent })
+      },
+      onSuccess: (data) => {
+        dispatchLoadState({ type: 'success', data, receivedAt: Date.now() })
+      },
+      onError: (error) => {
+        dispatchLoadState({ type: 'failure', message: getDashboardErrorMessage(error) })
+      },
+    })
+    return refreshControllerRef.current
+  }
+
+  const triggerRefresh = (
+    reason: DashboardRefreshRequest['reason'],
+    forceSilent?: boolean,
+  ) => {
+    const silent = forceSilent ?? hasAttemptedRef.current
+    return ensureRefreshController().trigger(
+      buildDashboardRefreshRequest(paramsRef.current, reason, silent),
+    )
+  }
+
+  useEffect(() => {
+    triggerRefresh('initial', false)
+
+    const refreshTimer = window.setInterval(() => {
+      triggerRefresh('interval', true)
+    }, 15_000)
+    const handleFocus = () => {
+      triggerRefresh('focus', true)
+    }
+    window.addEventListener('focus', handleFocus)
+    return () => {
+      window.clearInterval(refreshTimer)
+      window.removeEventListener('focus', handleFocus)
+      refreshControllerRef.current?.dispose()
+      // React StrictMode intentionally runs setup -> cleanup -> setup in
+      // development. Clearing the disposed instance lets the second setup
+      // create a fresh active controller without allowing the old request to
+      // publish after its cleanup.
+      refreshControllerRef.current = null
+      didObserveInitialParamsRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const nextParams: DashboardRefreshParams = { trendMonths, targetMonths }
+    paramsRef.current = nextParams
+    if (!didObserveInitialParamsRef.current) {
+      didObserveInitialParamsRef.current = true
+      return
+    }
+    triggerRefresh('parameters', true)
+  }, [trendMonths, targetMonths])
+
+  const dashboardData = loadState.data
+  const welcome = dashboardData?.welcome || { displayName: '', dateLabel: '' }
+  const stats = dashboardData?.stats || {
     todayTasks: 0,
-    taskGrowth: 0,
+    yesterdayTasks: null,
+    taskGrowth: null,
     successRate: 0,
-    rateGrowth: 0,
+    successRateAvailable: false,
+    rateGrowth: null,
     burnerIdle: 0,
     burnerInUse: 0,
     burnerOffline: 0,
-  })
-  const [trendData, setTrendData] = useState<any[]>([])
-  const [targetData, setTargetData] = useState<any[]>([])
-  const [notifications, setNotifications] = useState<any[]>([])
-  const [shortcuts, setShortcuts] = useState<ShortcutItem[]>([])
-  const [trendMonths, setTrendMonths] = useState<6 | 12>(6)
-  const [targetMonths, setTargetMonths] = useState<6 | 12>(6)
-  const middlePanelMinHeight = 224
-
-  useEffect(() => {
-    fetchData()
-    const refreshTimer = window.setInterval(fetchData, 15_000)
-    window.addEventListener('focus', fetchData)
-    return () => {
-      window.clearInterval(refreshTimer)
-      window.removeEventListener('focus', fetchData)
-    }
-  }, [trendMonths, targetMonths])
-
-  const fetchData = async () => {
-    const fetchId = ++latestFetchIdRef.current
-    try {
-      const res: any = await dashboardApi.getStats({
-        trend_months: trendMonths,
-        target_months: targetMonths,
-      })
-      if (fetchId !== latestFetchIdRef.current) {
-        return
-      }
-      if (res?.code === 0 && res.data) {
-        const {
-          welcome: newWelcome,
-          shortcuts: newShortcuts,
-          stats: newStats,
-          trendData: newTrendData,
-          targetData: newTargetData,
-          notifications: newNotifications,
-        } = res.data
-
-        setWelcome({
-          displayName: newWelcome?.displayName || '用户',
-          dateLabel: newWelcome?.dateLabel || '',
-        })
-        setShortcuts(Array.isArray(newShortcuts) ? newShortcuts : [])
-        setStats({
-          todayTasks: newStats.todayTasks || 0,
-          taskGrowth: newStats.taskGrowth || 0,
-          successRate: newStats.successRate || 0,
-          rateGrowth: newStats.rateGrowth || 0,
-          burnerIdle: newStats.burnerIdle || 0,
-          burnerInUse: newStats.burnerInUse || 0,
-          burnerOffline: newStats.burnerOffline || 0,
-        })
-        setTrendData(Array.isArray(newTrendData) ? newTrendData : [])
-        setTargetData(Array.isArray(newTargetData) ? newTargetData : [])
-        const sortedNotifications = Array.isArray(newNotifications)
-          ? [...newNotifications].map(normalizeNotification).sort((left, right) => {
-              const leftTime = getDateTimeSortValue(left?.time)
-              const rightTime = getDateTimeSortValue(right?.time)
-              return rightTime - leftTime
-            })
-          : []
-        setNotifications(sortedNotifications)
-      }
-    } catch {
-      // ignore
-    }
   }
+  const trendData = dashboardData?.trendData || []
+  const targetData = dashboardData?.targetData || []
+  const notifications = dashboardData?.notifications || []
+  const shortcuts = dashboardData?.shortcuts || []
+  const taskGrowthPresentation = getDashboardTaskGrowthPresentation(
+    stats?.taskGrowth,
+    stats?.todayTasks ?? 0,
+    stats?.yesterdayTasks ?? null,
+  )
+  const rateGrowthPresentation = getDashboardGrowthPresentation(stats?.rateGrowth, 'percentage-point')
+  const isInitialLoading = loadState.phase === 'idle' || loadState.phase === 'loading'
+  const showInitialLoading = !dashboardData && isInitialLoading
+  const isRefreshing = loadState.phase === 'refreshing'
+  const isStale = loadState.phase === 'stale'
+  const lastUpdatedText = formatDashboardRefreshTime(loadState.lastUpdatedAt)
 
   const shortcutCardStyle = {
     border: '1px solid #d9dde7',
@@ -238,83 +266,131 @@ const Workbench: React.FC<WorkbenchProps> = ({ onOpenMessage }) => {
 
   return (
     <div>
-      <div className="client-page-title" style={{ marginBottom: 24 }}>
-        <Title level={4}>工作台</Title>
-        <p className="client-page-subtitle">汇总今日任务、成功率、设备状态与快捷入口</p>
+      <div
+        className="client-page-title"
+        style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}
+      >
+        <div>
+          <Title level={4}>工作台</Title>
+          <p className="client-page-subtitle">汇总今日任务、成功率、设备状态与快捷入口</p>
+        </div>
+        <Space size={10} wrap style={{ justifyContent: 'flex-end' }}>
+          {isRefreshing ? (
+            <Badge status="processing" text="正在刷新" data-dashboard-state="refreshing" />
+          ) : null}
+          {isStale ? (
+            <Badge status="warning" text="数据可能已过期" data-dashboard-state="stale" />
+          ) : null}
+          {lastUpdatedText ? (
+            <Text type="secondary" style={{ fontSize: 12 }} data-dashboard-state="last-updated">
+              更新于 {lastUpdatedText}
+            </Text>
+          ) : null}
+        </Space>
       </div>
 
+      {loadState.errorMessage ? (
+        <Alert
+          showIcon
+          type={dashboardData ? 'warning' : 'error'}
+          message={dashboardData ? '工作台数据刷新失败，当前展示上次成功数据' : '工作台数据加载失败'}
+          description={loadState.errorMessage}
+          action={(
+            <Button
+              size="small"
+              onClick={() => triggerRefresh('manual', false)}
+              loading={isInitialLoading || isRefreshing}
+            >
+              重新加载
+            </Button>
+          )}
+          style={{ marginBottom: 16 }}
+          data-dashboard-state={dashboardData ? 'stale-error' : 'error'}
+        />
+      ) : null}
+
       {/* Top Stats Row */}
-      <Row gutter={[16, 16]}>
+      <Row gutter={[16, 16]} data-dashboard-state={showInitialLoading ? 'loading' : undefined}>
         {/* Greeting Card */}
         <Col xs={24} sm={12} lg={6}>
           <Card styles={{ body: { padding: 20, height: 120, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#F8F9FE', position: 'relative', overflow: 'hidden' } }} variant="borderless">
-            <div style={{ zIndex: 1 }}>
-              <Title level={5} style={{ margin: '0 0 12px 0' }}>Hi，{welcome.displayName}~</Title>
-              <div>
-                <span style={{ background: '#4361ee', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>
-                  {welcome.dateLabel || '--'}
-                </span>
+            <Skeleton loading={showInitialLoading} active title={false} paragraph={{ rows: 2 }}>
+              <div style={{ zIndex: 1 }}>
+                <Title level={5} style={{ margin: '0 0 12px 0' }}>Hi，{welcome.displayName || '用户'}~</Title>
+                <div>
+                  <span style={{ background: '#4361ee', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>
+                    {welcome.dateLabel || '--'}
+                  </span>
+                </div>
               </div>
-            </div>
-            <img src={DashboardIllustration} alt="Welcome" style={{ position: 'absolute', right: -20, bottom: -20, height: 140, zIndex: 0 }} />
+              <img src={DashboardIllustration} alt="Welcome" style={{ position: 'absolute', right: -20, bottom: -20, height: 140, zIndex: 0 }} />
+            </Skeleton>
           </Card>
         </Col>
 
         {/* Today's Burn/Install Count */}
         <Col xs={24} sm={12} lg={6}>
           <Card styles={{ body: { padding: 20, height: 120, position: 'relative' } }} variant="borderless">
-            <Text type="secondary" style={{ fontSize: 12 }}>今日烧录/安装量</Text>
-            <div style={{ fontSize: 32, fontWeight: 'bold', margin: '4px 0', color: '#1d2129' }}>
-              {stats.todayTasks}
-            </div>
-            <div style={{ fontSize: 12, color: stats.taskGrowth >= 0 ? '#F53F3F' : '#3DD07B', display: 'flex', alignItems: 'center' }}>
-              {stats.taskGrowth >= 0 ? <CaretUpOutlined style={{ marginRight: 4 }} /> : <CaretDownOutlined style={{ marginRight: 4 }} />}
-              {Math.abs(stats.taskGrowth)}% 环比
-            </div>
-            <div style={{ position: 'absolute', right: 24, top: '50%', transform: 'translateY(-50%)', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img src={InstallIcon} alt="Install Count" style={{ width: 48, height: 48 }} />
-            </div>
+            <Skeleton loading={showInitialLoading} active title={false} paragraph={{ rows: 2 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>今日烧录/安装量</Text>
+              <div style={{ fontSize: 32, fontWeight: 'bold', margin: '4px 0', color: '#1d2129' }}>
+                {dashboardData ? stats.todayTasks : '--'}
+              </div>
+              <div style={{ fontSize: 12, color: taskGrowthPresentation.color, display: 'flex', alignItems: 'center' }}>
+                {taskGrowthPresentation.direction === 'up' ? <CaretUpOutlined style={{ marginRight: 4 }} /> : null}
+                {taskGrowthPresentation.direction === 'down' ? <CaretDownOutlined style={{ marginRight: 4 }} /> : null}
+                {dashboardData ? taskGrowthPresentation.text : '暂无数据'}
+              </div>
+              <div style={{ position: 'absolute', right: 24, top: '50%', transform: 'translateY(-50%)', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <img src={InstallIcon} alt="Install Count" style={{ width: 48, height: 48 }} />
+              </div>
+            </Skeleton>
           </Card>
         </Col>
 
         {/* Success Rate */}
         <Col xs={24} sm={12} lg={6}>
           <Card styles={{ body: { padding: 20, height: 120, position: 'relative' } }} variant="borderless">
-            <Text type="secondary" style={{ fontSize: 12 }}>今日成功率</Text>
-            <div style={{ fontSize: 32, fontWeight: 'bold', margin: '4px 0', color: '#1d2129' }}>
-              {stats.successRate}%
-            </div>
-            <div style={{ fontSize: 12, color: stats.rateGrowth >= 0 ? '#F53F3F' : '#3DD07B', display: 'flex', alignItems: 'center' }}>
-              {stats.rateGrowth >= 0 ? <CaretUpOutlined style={{ marginRight: 4 }} /> : <CaretDownOutlined style={{ marginRight: 4 }} />}
-              {Math.abs(stats.rateGrowth)}% 环比
-            </div>
-            <div style={{ position: 'absolute', right: 24, top: '50%', transform: 'translateY(-50%)', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img src={SuccessRateIcon} alt="Success Rate" style={{ width: 48, height: 48 }} />
-            </div>
+            <Skeleton loading={showInitialLoading} active title={false} paragraph={{ rows: 2 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>今日成功率</Text>
+              <div style={{ fontSize: 32, fontWeight: 'bold', margin: '4px 0', color: '#1d2129' }}>
+                {dashboardData && stats.successRateAvailable ? `${stats.successRate}%` : '--'}
+              </div>
+              <div style={{ fontSize: 12, color: rateGrowthPresentation.color, display: 'flex', alignItems: 'center' }}>
+                {rateGrowthPresentation.direction === 'up' ? <CaretUpOutlined style={{ marginRight: 4 }} /> : null}
+                {rateGrowthPresentation.direction === 'down' ? <CaretDownOutlined style={{ marginRight: 4 }} /> : null}
+                {dashboardData ? rateGrowthPresentation.text : '暂无数据'}
+              </div>
+              <div style={{ position: 'absolute', right: 24, top: '50%', transform: 'translateY(-50%)', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <img src={SuccessRateIcon} alt="Success Rate" style={{ width: 48, height: 48 }} />
+              </div>
+            </Skeleton>
           </Card>
         </Col>
 
         {/* Burner Status */}
         <Col xs={24} sm={12} lg={6}>
           <Card styles={{ body: { padding: 20, height: 120, position: 'relative' } }} variant="borderless">
-            <Text type="secondary" style={{ fontSize: 12 }}>烧录器状态</Text>
-            <div style={{ display: 'flex', alignItems: 'center', marginTop: 16, gap: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'baseline' }}>
-                <Badge color="green" />
-                <span style={{ fontSize: 24, fontWeight: 'bold', marginLeft: 4 }}>{stats.burnerIdle}</span>
+            <Skeleton loading={showInitialLoading} active title={false} paragraph={{ rows: 2 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>烧录器状态</Text>
+              <div style={{ display: 'flex', alignItems: 'center', marginTop: 16, gap: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline' }}>
+                  <Badge color="green" />
+                  <span style={{ fontSize: 24, fontWeight: 'bold', marginLeft: 4 }}>{dashboardData ? stats.burnerIdle : '--'}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'baseline' }}>
+                  <Badge color="yellow" />
+                  <span style={{ fontSize: 24, fontWeight: 'bold', marginLeft: 4 }}>{dashboardData ? stats.burnerInUse : '--'}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'baseline' }}>
+                  <Badge color="red" />
+                  <span style={{ fontSize: 24, fontWeight: 'bold', marginLeft: 4 }}>{dashboardData ? stats.burnerOffline : '--'}</span>
+                </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'baseline' }}>
-                <Badge color="yellow" />
-                <span style={{ fontSize: 24, fontWeight: 'bold', marginLeft: 4 }}>{stats.burnerInUse}</span>
+              <div style={{ position: 'absolute', right: 24, top: '50%', transform: 'translateY(-50%)', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <img src={BurnerStatusIcon} alt="Burner Status" style={{ width: 48, height: 48 }} />
               </div>
-              <div style={{ display: 'flex', alignItems: 'baseline' }}>
-                <Badge color="red" />
-                <span style={{ fontSize: 24, fontWeight: 'bold', marginLeft: 4 }}>{stats.burnerOffline}</span>
-              </div>
-            </div>
-            <div style={{ position: 'absolute', right: 24, top: '50%', transform: 'translateY(-50%)', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img src={BurnerStatusIcon} alt="Burner Status" style={{ width: 48, height: 48 }} />
-            </div>
+            </Skeleton>
           </Card>
         </Col>
       </Row>
@@ -328,29 +404,35 @@ const Workbench: React.FC<WorkbenchProps> = ({ onOpenMessage }) => {
             styles={{ body: { padding: '14px 18px', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' } }}
             style={{ width: '100%', display: 'flex', flexDirection: 'column', minHeight: middlePanelMinHeight }}
           >
-            <Row gutter={[12, 12]} style={{ width: '100%', margin: 0, alignContent: 'center' }}>
-              {shortcuts.map((item) => (
-                <Col span={8} key={item.id} style={{ display: 'flex' }}>
-                  <div 
-                    onClick={() => navigate(item.path)}
-                    style={{ ...shortcutCardStyle, width: '100%' }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.borderColor = '#4361ee'
-                      e.currentTarget.style.transform = 'translateY(-2px)'
-                      e.currentTarget.style.boxShadow = '0 12px 24px rgba(67, 97, 238, 0.12)'
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.borderColor = '#d9dde7'
-                      e.currentTarget.style.transform = 'translateY(0)'
-                      e.currentTarget.style.boxShadow = '0 6px 14px rgba(15, 23, 42, 0.04)'
-                    }}
-                  >
-                    {renderShortcutIcon(item.iconKey)}
-                    <div style={shortcutLabelStyle}>{item.name}</div>
-                  </div>
-                </Col>
-              ))}
-            </Row>
+            {showInitialLoading ? (
+              <Skeleton active title={false} paragraph={{ rows: 3 }} />
+            ) : shortcuts.length > 0 ? (
+              <Row gutter={[12, 12]} style={{ width: '100%', margin: 0, alignContent: 'center' }}>
+                {shortcuts.map((item) => (
+                  <Col span={8} key={item.id} style={{ display: 'flex' }}>
+                    <div
+                      onClick={() => navigate(item.path)}
+                      style={{ ...shortcutCardStyle, width: '100%' }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = '#4361ee'
+                        e.currentTarget.style.transform = 'translateY(-2px)'
+                        e.currentTarget.style.boxShadow = '0 12px 24px rgba(67, 97, 238, 0.12)'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = '#d9dde7'
+                        e.currentTarget.style.transform = 'translateY(0)'
+                        e.currentTarget.style.boxShadow = '0 6px 14px rgba(15, 23, 42, 0.04)'
+                      }}
+                    >
+                      {renderShortcutIcon(item.iconKey)}
+                      <div style={shortcutLabelStyle}>{item.name}</div>
+                    </div>
+                  </Col>
+                ))}
+              </Row>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无快捷方式" />
+            )}
           </Card>
         </Col>
         <Col xs={24} lg={12} style={{ display: 'flex' }}>
@@ -365,58 +447,79 @@ const Workbench: React.FC<WorkbenchProps> = ({ onOpenMessage }) => {
             styles={{ body: { padding: '8px 18px', flex: 1 } }}
             style={{ width: '100%', display: 'flex', flexDirection: 'column', minHeight: middlePanelMinHeight }}
           >
-            <List
-              dataSource={notifications.slice(0, 3)}
-              renderItem={(item) => (
-                <List.Item style={{ padding: '10px 0', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'flex-start' }}>
-                  <Badge color={item.status === 'success' ? '#3DD07B' : item.status === 'error' ? '#F53F3F' : '#4361ee'} style={{ marginTop: 6, marginRight: 8 }} />
-                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, width: '100%', minWidth: 0 }}>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <Typography.Paragraph
-                        style={{ margin: 0, fontSize: 13, color: '#4e5969', lineHeight: '20px' }}
-                        ellipsis={{ rows: 2, tooltip: item.primaryText }}
-                      >
-                        {item.primaryText || '系统动态更新'}
-                      </Typography.Paragraph>
+            {showInitialLoading ? (
+              <Skeleton active title={false} paragraph={{ rows: 4 }} />
+            ) : (
+              <List
+                locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无动态通知" /> }}
+                dataSource={notifications.slice(0, 3)}
+                renderItem={(item) => (
+                  <List.Item style={{ padding: '10px 0', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'flex-start' }}>
+                    <Badge color={item.status === 'success' ? '#3DD07B' : item.status === 'error' ? '#F53F3F' : '#4361ee'} style={{ marginTop: 6, marginRight: 8 }} />
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, width: '100%', minWidth: 0 }}>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <Typography.Paragraph
+                          style={{ margin: 0, fontSize: 13, color: '#4e5969', lineHeight: '20px' }}
+                          ellipsis={{ rows: 2, tooltip: item.primaryText }}
+                        >
+                          {item.primaryText || '系统动态更新'}
+                        </Typography.Paragraph>
+                      </div>
+                      <Text style={{ fontSize: 12, color: '#86909c', whiteSpace: 'nowrap', lineHeight: '20px' }}>{item.time || '--'}</Text>
                     </div>
-                    <Text style={{ fontSize: 12, color: '#86909c', whiteSpace: 'nowrap', lineHeight: '20px' }}>{item.time || '--'}</Text>
-                  </div>
-                </List.Item>
-              )}
-            />
+                  </List.Item>
+                )}
+              />
+            )}
           </Card>
         </Col>
       </Row>
 
       {/* Bottom Row: Charts */}
-      <Card title="安装成功率趋势" variant="borderless" style={{ marginTop: 16 }} extra={<Segmented size="small" value={trendMonths} options={[{ label: '近半年', value: 6 }, { label: '近一年', value: 12 }]} onChange={(value) => setTrendMonths(value as 6 | 12)} />}>
-        <ResponsiveContainer width="100%" height={300}>
-          <AreaChart data={trendData} margin={{ top: 20, right: 30, left: -20, bottom: 0 }}>
-            <defs>
-              <linearGradient id="colorRate" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#4361ee" stopOpacity={0.3}/>
-                <stop offset="95%" stopColor="#4361ee" stopOpacity={0}/>
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="month" axisLine={false} tickLine={false} />
-            <YAxis axisLine={false} tickLine={false} domain={[0, 100]} ticks={[0, 20, 40, 60, 80, 100]} />
-            <Tooltip />
-            <Area type="monotone" dataKey="rate" stroke="#4361ee" strokeWidth={3} fillOpacity={1} fill="url(#colorRate)" activeDot={{ r: 6 }} />
-          </AreaChart>
-        </ResponsiveContainer>
+      <Card title={DASHBOARD_TREND_TITLE} variant="borderless" style={{ marginTop: 16 }} extra={<Segmented size="small" value={trendMonths} options={[{ label: '近半年', value: 6 }, { label: '近一年', value: 12 }]} onChange={(value) => setTrendMonths(value as 6 | 12)} />}>
+        {showInitialLoading ? (
+          <div style={{ minHeight: 300, paddingTop: 24 }}><Skeleton active title={false} paragraph={{ rows: 7 }} /></div>
+        ) : trendData.length > 0 ? (
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={trendData} margin={{ top: 20, right: 30, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="colorRate" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#4361ee" stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor="#4361ee" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="month" axisLine={false} tickLine={false} />
+              <YAxis axisLine={false} tickLine={false} domain={[0, 100]} ticks={[0, 20, 40, 60, 80, 100]} />
+              <Tooltip />
+              <Area type="monotone" dataKey="rate" stroke="#4361ee" strokeWidth={3} fillOpacity={1} fill="url(#colorRate)" activeDot={{ r: 6 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{ minHeight: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" />
+          </div>
+        )}
       </Card>
 
-      <Card title="目标安装数量统计TOP5" variant="borderless" style={{ marginTop: 16, marginBottom: 24 }} extra={<Segmented size="small" value={targetMonths} options={[{ label: '近半年', value: 6 }, { label: '近一年', value: 12 }]} onChange={(value) => setTargetMonths(value as 6 | 12)} />}>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={targetData} layout="vertical" margin={{ top: 20, right: 30, left: 20, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-            <XAxis type="number" axisLine={false} tickLine={false} />
-            <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} width={100} />
-            <Tooltip cursor={{ fill: 'transparent' }} />
-            <Bar dataKey="value" fill="#4361ee" barSize={20} radius={[0, 4, 4, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
+      <Card title={DASHBOARD_TARGET_TITLE} variant="borderless" style={{ marginTop: 16, marginBottom: 24 }} extra={<Segmented size="small" value={targetMonths} options={[{ label: '近半年', value: 6 }, { label: '近一年', value: 12 }]} onChange={(value) => setTargetMonths(value as 6 | 12)} />}>
+        {showInitialLoading ? (
+          <div style={{ minHeight: 300, paddingTop: 24 }}><Skeleton active title={false} paragraph={{ rows: 7 }} /></div>
+        ) : targetData.length > 0 ? (
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={targetData} layout="vertical" margin={{ top: 20, right: 30, left: 20, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+              <XAxis type="number" axisLine={false} tickLine={false} />
+              <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} width={100} />
+              <Tooltip cursor={{ fill: 'transparent' }} />
+              <Bar dataKey="value" fill="#4361ee" barSize={20} radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{ minHeight: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无目标任务数据" />
+          </div>
+        )}
       </Card>
     </div>
   )

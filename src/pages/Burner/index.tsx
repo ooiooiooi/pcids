@@ -10,6 +10,7 @@ import { ActionButtonGroup, ActionLinkButton, PagePrimaryButton, PageSecondaryBu
 import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
+import { buildBurnerNodeMetadataReset } from './formState'
 
 const DEVICE_CATEGORY_OPTIONS = [
   { value: 'burner', label: '烧录器' },
@@ -1053,13 +1054,7 @@ const Burner: React.FC = () => {
 
             {deviceCategory === 'burner' ? (
               <Form.Item label="选择烧录器" name="device_model" rules={[{ required: true, message: '请选择烧录器' }]} required>
-                <Select
-                  placeholder="请选择烧录器"
-                  options={BURNER_MODEL_OPTIONS}
-                  onChange={() => {
-                    form.setFieldsValue({ sn: undefined, port: undefined, usb_binding: {} })
-                  }}
-                />
+                <Select placeholder="请选择烧录器" options={BURNER_MODEL_OPTIONS} />
               </Form.Item>
             ) : (
               <div className="device-form-grid__placeholder" />
@@ -1123,13 +1118,7 @@ const Burner: React.FC = () => {
                       onClick={() => {
                         if (disabled) return
                         if (form.getFieldValue('host_type') !== item.value) {
-                          form.setFieldsValue({
-                            sn: undefined,
-                            port: undefined,
-                            usb_binding: {},
-                            host_name: '',
-                            host_address: '',
-                          })
+                          form.setFieldsValue(buildBurnerNodeMetadataReset())
                         }
                         form.setFieldValue('host_type', item.value)
                       }}
@@ -1172,7 +1161,7 @@ const Burner: React.FC = () => {
                   autoComplete="url"
                   placeholder="例如：http://192.168.1.20:8000"
                   onChange={() => {
-                    form.setFieldsValue({ sn: undefined, port: undefined, usb_binding: {}, host_name: '', host_address: '' })
+                    form.setFieldsValue(buildBurnerNodeMetadataReset())
                   }}
                 />
               </Form.Item>

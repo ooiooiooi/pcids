@@ -236,7 +236,12 @@ export const taskApi = {
   getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string; board_name?: string; keyword?: string; project_key?: string }, silent = false) =>
     request.get('/tasks', { params, ...(silent ? { skipAutoErrorMessage: true, suppressBackendServiceError: true } : {}) } as any),
   create: (data: { software_name: string; repository_id?: number; task_type?: 'board' | 'os' | 'hybrid'; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string; auto_execute?: boolean }) =>
-    request.post('/tasks', data),
+    request.post('/tasks', data, {
+      // Web-session artifacts may require the user to finish a browser download first.
+      timeout: 15 * 60 * 1000,
+      skipAutoErrorMessage: true,
+      suppressBackendServiceError: true,
+    } as any),
   getWizardContext: () => request.get('/tasks/wizard/context'),
   getVersionBaselineStatus: (repository_id: number) => request.get('/tasks/version-baseline', { params: { repository_id } }),
   testOsConnection: (data: Record<string, any>) =>
@@ -287,7 +292,7 @@ export const logApi = {
 
 // 制品仓库服务
 export const repositoryApi = {
-  getList: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+  getList: (params?: { page?: number; page_size?: number; keyword?: string; _ts?: number }) =>
     request.get('/repositories', { params }),
   create: (data: { name: string; repo_id?: string; tenant?: string; description?: string; version?: string; file_url?: string; size?: number; md5?: string; sha256?: string; project_key?: string }) =>
     request.post('/repositories', data),
@@ -312,6 +317,10 @@ export const repositoryApi = {
   triggerCodeartsAutoSync: (data: { project_key: string; trigger_source?: string }) =>
     request.post('/repositories/codearts/auto-sync/trigger', data, { skipAutoErrorMessage: true, suppressBackendServiceError: true } as any),
   setCodeartsConfig: (data: Record<string, any>) => request.post('/repositories/codearts/config', data),
+  rollbackNewCodeartsProject: (projectId: string) =>
+    request.delete(`/repositories/codearts/config/${encodeURIComponent(projectId)}/rollback`, {
+      skipAutoErrorMessage: true,
+    } as any),
   syncCodeartsProject: (data: { project_id: string; full_refresh?: boolean }) => request.post('/repositories/codearts/sync', data, {
     skipAutoErrorMessage: true,
   } as any),

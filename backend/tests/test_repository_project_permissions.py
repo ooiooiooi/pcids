@@ -1,10 +1,18 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from backend.routers.repositories import _ensure_project_member_seed, _require_project_permission
+from backend.routers.repositories import (
+    _ensure_project_member_seed,
+    _require_project_permission,
+    get_codearts_auto_sync_status,
+    get_codearts_config,
+    get_codearts_status,
+    trigger_codearts_auto_sync,
+)
 
 
 class RepositoryProjectPermissionTests(unittest.TestCase):
@@ -70,6 +78,47 @@ class RepositoryProjectPermissionTests(unittest.TestCase):
 
         db.add.assert_called_once()
         db.commit.assert_called_once_with()
+
+    def _non_member_context(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        user = SimpleNamespace(
+            id=42,
+            username="project-outsider",
+            role=SimpleNamespace(data_scope="all"),
+        )
+        return db, user
+
+    def test_non_member_cannot_read_codearts_config(self):
+        db, user = self._non_member_context()
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(get_codearts_config("proj_secret", db, user))
+        self.assertEqual(context.exception.status_code, 403)
+
+    def test_non_member_cannot_probe_codearts_status(self):
+        db, user = self._non_member_context()
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(get_codearts_status("proj_secret", db, user))
+        self.assertEqual(context.exception.status_code, 403)
+
+    def test_non_member_cannot_read_codearts_auto_sync_status(self):
+        db, user = self._non_member_context()
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(get_codearts_auto_sync_status("proj_secret", db, user, None))
+        self.assertEqual(context.exception.status_code, 403)
+
+    def test_non_member_cannot_trigger_codearts_auto_sync(self):
+        db, user = self._non_member_context()
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(
+                trigger_codearts_auto_sync(
+                    {"project_key": "proj_secret"},
+                    db,
+                    user,
+                    None,
+                )
+            )
+        self.assertEqual(context.exception.status_code, 403)
 
 
 if __name__ == "__main__":

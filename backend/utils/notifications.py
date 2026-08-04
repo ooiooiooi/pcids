@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -38,6 +38,8 @@ def create_structured_message(
         return
 
     payload = {
+        "_message_time_version": 2,
+        "_time_basis": "utc",
         "category": category,
         "status": status,
         "status_label": status_label,
@@ -51,6 +53,6 @@ def create_structured_message(
             title=title,
             content=json.dumps(payload, ensure_ascii=False),
             is_read=False,
-            created_at=datetime.now(),
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
     )

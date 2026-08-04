@@ -203,7 +203,6 @@ async def delete_role(
     )
 
     # 清理关联表记录
-    db.query(RolePermission).filter(RolePermission.role_id == role_id).delete()
     db.delete(role)
     db.commit()
 

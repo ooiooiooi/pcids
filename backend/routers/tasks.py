@@ -8,6 +8,7 @@ from datetime import datetime
 import ftplib
 import glob
 import hashlib
+import html
 import io
 import json
 import locale
@@ -36,7 +37,7 @@ from backend.utils.db import get_db, ensure_schema, generate_task_no
 from backend.models.user import User
 from backend.models.task import BurningTask, TaskStatus
 from backend.models.burner import Burner
-from backend.models.repository import Repository, RepositoryProjectMember
+from backend.models.repository import Repository
 from backend.models.product import Product
 from backend.models.script import Script
 from backend.models.log import Record, OperationLog
@@ -95,6 +96,7 @@ from backend.utils.artifact_crypto import (
 )
 from backend.utils.datetime_utils import database_time_to_local
 from backend.utils.permission import require_permission
+from backend.utils.task_scope import apply_task_scope as _apply_task_scope
 from backend.utils.ssh_client import SSHClientSession, SSHCommandResult, remote_shell_command
 from backend.utils.task_execution import (
     ExecutionMonitor,
@@ -1454,6 +1456,44 @@ def _build_task_codearts_download_auth(db: Session, repo: Repository, current_us
     return _resolve_codearts_download_auth(cfg, base_url, token)
 
 
+def _resolve_task_artifact_download_source(
+    db: Session,
+    repo: Repository,
+    current_user: User,
+    serialized_repo: dict,
+) -> tuple[str, Optional[dict]]:
+    """Resolve artifact transport from repository metadata, then project config.
+
+    repository_to_dict stores source metadata under repo_detail. Looking for
+    private_source only at the top level makes web artifacts use the API flow.
+    """
+    repo_metadata = (
+        serialized_repo.get("repo_detail")
+        if isinstance(serialized_repo.get("repo_detail"), dict)
+        else {}
+    )
+    private_source = str(
+        repo_metadata.get("private_source")
+        or serialized_repo.get("private_source")
+        or ""
+    ).strip().lower()
+    project_key = str(getattr(repo, "project_key", "") or "")
+    project_cfg = _get_project_codearts_config(db, project_key, current_user)
+
+    # The current project configuration is authoritative. Existing rows can
+    # retain an old private_source after a project switches between API/Web.
+    if _is_codearts_web_private_config(project_cfg):
+        return "web_session", project_cfg
+
+    if private_source == "web":
+        raise HTTPException(
+            status_code=409,
+            detail="当前项目的 Web 页面仓配置与制品来源不一致，请重新同步项目",
+        )
+
+    return "codearts_api", None
+
+
 def _download_repository_artifact_to_local_storage(db: Session, repo: Repository, current_user: User) -> Repository:
     trace_id = f"task-artifact-local-{uuid.uuid4().hex[:12]}"
     repo_detail = repository_to_dict(repo)
@@ -1470,7 +1510,9 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
 
     download_root = _get_repository_download_root()
     file_path = build_encrypted_artifact_path(download_root, _guess_download_filename(download_uri, getattr(repo, "name", None)))
-    source_mode = "web_session" if str(repo_detail.get("private_source") or "").lower() == "web" else "codearts_api"
+    source_mode, web_cfg = _resolve_task_artifact_download_source(
+        db, repo, current_user, repo_detail
+    )
     logger.info(
         "task.artifact.download_local.begin | %s",
         json.dumps(
@@ -1486,10 +1528,9 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
     )
 
     try:
-        if str(repo_detail.get("private_source") or "").lower() == "web":
-            web_cfg = _get_project_codearts_config(db, str(getattr(repo, "project_key", "") or ""), current_user)
+        if source_mode == "web_session":
             stored_artifact, _ = _encrypt_codearts_web_download(
-                cfg=web_cfg,
+                cfg=web_cfg or {},
                 download_uri=download_uri,
                 destination_path=file_path,
                 original_name=getattr(repo, "name", None) or "artifact.bin",
@@ -1583,7 +1624,9 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
     download_root = _get_repository_download_root()
     filename = _guess_download_filename(download_uri, getattr(repo, "name", None))
     file_path = build_encrypted_artifact_path(download_root, filename)
-    source_mode = "web_session" if str(repo_detail.get("private_source") or "").lower() == "web" else "codearts_api"
+    source_mode, web_cfg = _resolve_task_artifact_download_source(
+        db, repo, current_user, repo_detail
+    )
     logger.info(
         "task.artifact.download_server.begin | %s",
         json.dumps(
@@ -1600,15 +1643,10 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
 
     try:
         if source_mode == "web_session":
-            web_cfg = _get_project_codearts_config(
-                db,
-                str(getattr(repo, "project_key", "") or ""),
-                current_user,
-            )
             if not _is_codearts_web_private_config(web_cfg):
                 raise HTTPException(status_code=409, detail="当前项目的 Web 页面库配置与制品来源不一致，请重新同步项目")
             stored_artifact, _ = _encrypt_codearts_web_download(
-                cfg=web_cfg,
+                cfg=web_cfg or {},
                 download_uri=download_uri,
                 destination_path=file_path,
                 original_name=getattr(repo, "name", None) or filename,
@@ -2447,6 +2485,18 @@ def _build_task_notice_payload(
         event_time = finished_at.isoformat(timespec="seconds")
     target = _resolve_task_notice_target(task, record_type, os_name=os_name)
     task_no = str(getattr(task, "task_no", None) or task.id)
+    task_created_at = getattr(task, "created_at", None)
+    task_scope_snapshot = {
+        "version": 1,
+        "task_id": getattr(task, "id", None),
+        "owner_user_id": getattr(task, "created_by_user_id", None),
+        "project_key": str(getattr(repo, "project_key", None) or "").strip(),
+        "tenant": str(getattr(repo, "tenant", None) or "").strip(),
+    }
+    if task_created_at is not None:
+        task_scope_snapshot["task_created_at"] = task_created_at.isoformat(
+            timespec="microseconds"
+        )
     action_name = "烧录" if record_type == "burn" else "安装"
     detail_text = _normalize_task_notice_detail_text(detail_content, record_type) or f"{action_name}任务{execution_result}"
     duration_text = _task_duration_text(task)
@@ -2462,6 +2512,7 @@ def _build_task_notice_payload(
         "software_version": software_version,
         "event_time": event_time,
         "task_no": task_no,
+        "_task_scope": task_scope_snapshot,
         "project_name": project_name_text,
         "execution_result": execution_result,
         "detail_content": detail_text,
@@ -7583,6 +7634,21 @@ def _consistency_conclusion(t: BurningTask) -> str:
     return "未比对"
 
 
+def _escape_consistency_report_html(value: Any, default: str = "-") -> str:
+    """Render a report value as text, never as executable HTML."""
+    resolved = default if value is None or value == "" else value
+    return html.escape(str(resolved), quote=True)
+
+
+def _sanitize_consistency_report_csv_cell(value: Any) -> Any:
+    """Prevent spreadsheet formula execution while preserving ordinary values."""
+    if not isinstance(value, str):
+        return value
+    if re.match(r"^[\s]*[=+\-@]", value):
+        return f"'{value}"
+    return value
+
+
 def _build_consistency_report_html(
     t: BurningTask,
     repo: Optional[Repository],
@@ -7601,6 +7667,27 @@ def _build_consistency_report_html(
     conclusion = _consistency_conclusion(t)
     conclusion_color = "#16a34a" if conclusion == "一致通过" else ("#dc2626" if conclusion == "不一致告警" else "#334155")
 
+    task_number = getattr(t, "task_no", None) or t.id
+    task_title = getattr(t, "task_no", None) or f"任务{t.id}"
+    report_values = {
+        "task_number": _escape_consistency_report_html(task_number),
+        "task_title": _escape_consistency_report_html(task_title),
+        "target": _escape_consistency_report_html(target),
+        "executor": _escape_consistency_report_html(executor_name),
+        "artifact": _escape_consistency_report_html(artifact),
+        "burner": _escape_consistency_report_html(getattr(burner, "name", None)),
+        "script": _escape_consistency_report_html(getattr(script_obj, "name", None)),
+        "history_checksum": _escape_consistency_report_html(t.history_checksum),
+        "current_checksum": _escape_consistency_report_html(t.current_sha256 or t.current_md5),
+        "conclusion": _escape_consistency_report_html(conclusion),
+        "attempts": _escape_consistency_report_html(
+            f"{getattr(t, 'attempt_count', None) or 0} / {getattr(t, 'max_retries', None) or 0}"
+        ),
+        "rollback_count": _escape_consistency_report_html(getattr(t, "rollback_count", None) or 0),
+        "rollback_result": _escape_consistency_report_html(getattr(t, "rollback_result", None)),
+        "exported_at": _escape_consistency_report_html(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    }
+
     script = ""
     if print_mode:
         script = """
@@ -7617,7 +7704,7 @@ def _build_consistency_report_html(
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>一致性报告_{getattr(t, "task_no", None) or f"任务{t.id}"}</title>
+  <title>一致性报告_{report_values["task_title"]}</title>
   <style>
     body {{ font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding: 24px; color: #0f172a; }}
     h1 {{ text-align: center; margin: 0 0 6px; }}
@@ -7636,21 +7723,21 @@ def _build_consistency_report_html(
 </head>
 <body>
   <h1>固件版本一致性分析报告</h1>
-  <p class="sub">目标：{target}</p>
+  <p class="sub">目标：{report_values["target"]}</p>
   <div class="card">
-    <div class="row"><div class="k">任务编号</div><div class="v">{getattr(t, "task_no", None) or t.id}</div></div>
-    <div class="row"><div class="k">执行人</div><div class="v">{executor_name or '-'}</div></div>
-    <div class="row"><div class="k">制品</div><div class="v">{artifact or '-'}</div></div>
-    <div class="row"><div class="k">烧录器</div><div class="v">{getattr(burner, "name", None) or '-'}</div></div>
-    <div class="row"><div class="k">执行脚本</div><div class="v">{getattr(script_obj, "name", None) or '-'}</div></div>
-    <div class="row"><div class="k">历史标准版本校验码</div><div class="v">{t.history_checksum or '-'}</div></div>
-    <div class="row"><div class="k">当前可执行文件校验码</div><div class="v">{t.current_sha256 or t.current_md5 or '-'}</div></div>
-    <div class="row"><div class="k">版本一致性结论</div><div class="v"><span class="tag">{conclusion}</span></div></div>
-    <div class="row"><div class="k">执行次数</div><div class="v">{getattr(t, "attempt_count", None) or 0} / {getattr(t, "max_retries", None) or 0}</div></div>
-    <div class="row"><div class="k">回滚次数</div><div class="v">{getattr(t, "rollback_count", None) or 0}</div></div>
-    <div class="row"><div class="k">回滚结果</div><div class="v">{getattr(t, "rollback_result", None) or '-'}</div></div>
+    <div class="row"><div class="k">任务编号</div><div class="v">{report_values["task_number"]}</div></div>
+    <div class="row"><div class="k">执行人</div><div class="v">{report_values["executor"]}</div></div>
+    <div class="row"><div class="k">制品</div><div class="v">{report_values["artifact"]}</div></div>
+    <div class="row"><div class="k">烧录器</div><div class="v">{report_values["burner"]}</div></div>
+    <div class="row"><div class="k">执行脚本</div><div class="v">{report_values["script"]}</div></div>
+    <div class="row"><div class="k">历史标准版本校验码</div><div class="v">{report_values["history_checksum"]}</div></div>
+    <div class="row"><div class="k">当前可执行文件校验码</div><div class="v">{report_values["current_checksum"]}</div></div>
+    <div class="row"><div class="k">版本一致性结论</div><div class="v"><span class="tag">{report_values["conclusion"]}</span></div></div>
+    <div class="row"><div class="k">执行次数</div><div class="v">{report_values["attempts"]}</div></div>
+    <div class="row"><div class="k">回滚次数</div><div class="v">{report_values["rollback_count"]}</div></div>
+    <div class="row"><div class="k">回滚结果</div><div class="v">{report_values["rollback_result"]}</div></div>
   </div>
-  <div class="footer">导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+  <div class="footer">导出时间：{report_values["exported_at"]}</div>
   {script}
 </body>
 </html>"""
@@ -7677,7 +7764,7 @@ def _build_consistency_report_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["任务编号", "目标", "执行人", "制品", "烧录器", "执行脚本", "历史标准版本校验码", "当前校验码", "一致性结论", "执行次数", "回滚次数", "回滚结果"])
-    writer.writerow([
+    report_row = [
         getattr(t, "task_no", None) or t.id,
         target,
         executor_name or "",
@@ -7690,38 +7777,9 @@ def _build_consistency_report_csv(
         f"{getattr(t, 'attempt_count', None) or 0} / {getattr(t, 'max_retries', None) or 0}",
         getattr(t, "rollback_count", None) or 0,
         getattr(t, "rollback_result", None) or "",
-    ])
+    ]
+    writer.writerow([_sanitize_consistency_report_csv_cell(value) for value in report_row])
     return output.getvalue()
-
-
-def _apply_task_scope(query, db: Session, current_user: User):
-    data_scope = getattr(getattr(current_user, "role", None), "data_scope", None) or "all"
-    if data_scope == "self":
-        return query.filter(BurningTask.created_by_user_id == current_user.id)
-    if data_scope == "project":
-        member_project_keys = [
-            row[0]
-            for row in db.query(RepositoryProjectMember.project_key)
-            .filter(RepositoryProjectMember.user_id == current_user.id)
-            .all()
-        ]
-        return query.outerjoin(Repository, Repository.id == BurningTask.repository_id).filter(
-            or_(
-                BurningTask.created_by_user_id == current_user.id,
-                Repository.project_key.in_(member_project_keys),
-            )
-        )
-    if isinstance(data_scope, str) and data_scope.startswith("tenant:"):
-        tenant = data_scope.split(":", 1)[1].strip()
-        if not tenant:
-            return query
-        return query.join(Repository, Repository.id == BurningTask.repository_id).filter(Repository.tenant == tenant)
-    if isinstance(data_scope, str) and data_scope.startswith("project:"):
-        allowed = {p.strip() for p in data_scope.split(":", 1)[1].split(",") if p.strip()}
-        if not allowed:
-            return query
-        return query.join(Repository, Repository.id == BurningTask.repository_id).filter(Repository.project_key.in_(sorted(allowed)))
-    return query
 
 
 def _get_scoped_task_or_404(db: Session, current_user: User, task_id: int) -> BurningTask:

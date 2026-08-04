@@ -7,6 +7,7 @@ from backend.models.repository import Repository
 from backend.models.task import BurningTask
 from backend.routers.messages import _enrich_task_message_payload, _parse_message_content
 from backend.routers.tasks import _build_task_notice_payload
+from backend.utils.datetime_utils import database_time_to_local
 
 
 class TaskNotificationTests(unittest.TestCase):
@@ -107,7 +108,8 @@ class TaskNotificationTests(unittest.TestCase):
         })
 
         self.assertEqual(payload["software_name"], "legacy.bin")
-        self.assertEqual(payload["event_time"], "2026-06-16T09:30:05")
+        expected_time = database_time_to_local(datetime(2026, 6, 16, 9, 30, 5))
+        self.assertEqual(payload["event_time"], expected_time.isoformat(timespec="seconds"))
         self.assertIn("软件名称：legacy.bin", payload["meta_text"])
 
     def test_enrich_legacy_task_message_overrides_wrong_utc_suffix_event_time(self):
@@ -140,7 +142,8 @@ class TaskNotificationTests(unittest.TestCase):
             "event_time": "2026-06-23T23:14:00Z",
         })
 
-        self.assertEqual(payload["event_time"], "2026-06-23T23:14:00")
+        expected_time = database_time_to_local(datetime(2026, 6, 23, 23, 14, 0))
+        self.assertEqual(payload["event_time"], expected_time.isoformat(timespec="seconds"))
 
 
 if __name__ == "__main__":

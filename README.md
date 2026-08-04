@@ -334,8 +334,11 @@ powershell -ExecutionPolicy Bypass -File .\install-burner-drivers.ps1 -DriverRoo
 
 - [docs/README.md](docs/README.md)
 - [docs/delivery/burner-environment-delivery.md](docs/delivery/burner-environment-delivery.md)
-- [docs/testing/ethernet-protocol-test-framework.md](docs/testing/ethernet-protocol-test-framework.md)
 
 ## 许可证
 
-MIT License
+版权所有 © 2026 PCIDS 项目权利人。保留所有权利。
+
+本软件为内部自主研发软件，未授予公开使用、复制、修改或分发许可。未经权利人书面授权，不得向第三方提供或用于约定范围之外的用途。
+
+项目使用的第三方软件及开源组件分别遵循其各自的许可证，本声明不改变这些第三方组件的许可条件。

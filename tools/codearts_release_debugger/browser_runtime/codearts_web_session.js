@@ -689,7 +689,10 @@ async function fillUsernameFallback(scope, value, domainValue) {
       }
       const currentValue = await target.inputValue().catch(() => '');
       if (currentValue && currentValue === String(domainValue || '')) continue;
-      if (currentValue && currentValue !== String(value)) continue;
+      // Browser/password-manager state can retain a previous IAM username.
+      // This fallback is already restricted to visible non-password fields
+      // that are not tenant/domain/search/captcha inputs, so overwrite stale
+      // values with the username from the current project configuration.
       await target.fill(value);
       return true;
     }

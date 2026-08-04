@@ -207,7 +207,7 @@ class BurnerServerNodeDisplayTests(unittest.TestCase):
         remote_scan.assert_not_called()
         local_scan.assert_called_once()
 
-    def test_identical_runtime_refreshes_share_one_hardware_snapshot(self):
+    def test_consecutive_runtime_refreshes_do_not_reuse_business_state(self):
         burner = SimpleNamespace(
             id=8,
             name="J-LINK",
@@ -221,10 +221,6 @@ class BurnerServerNodeDisplayTests(unittest.TestCase):
             status=1,
             agent_url="http://192.168.137.2:8000",
         )
-        burners._RUNTIME_STATUS_REFRESH_CACHE.update(
-            {"key": None, "expires_at": 0.0, "values": {}, "usb_device_count": 0}
-        )
-
         async def run_refreshes():
             first = await burners._compute_burner_runtime_statuses([burner], set())
             second = await burners._compute_burner_runtime_statuses([burner], set())
@@ -239,9 +235,11 @@ class BurnerServerNodeDisplayTests(unittest.TestCase):
             first, second = asyncio.run(run_refreshes())
 
         self.assertEqual(first, second)
-        refresh.assert_called_once()
-        probe.assert_called_once()
-        compute.assert_called_once()
+        self.assertEqual(refresh.call_count, 2)
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(compute.call_count, 2)
+        for call in probe.call_args_list:
+            self.assertTrue(call.kwargs.get("force_refresh"))
 
 
 if __name__ == "__main__":

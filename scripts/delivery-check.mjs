@@ -32,6 +32,54 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true)
+  }
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer)
+      child.off('exit', finish)
+      resolve(true)
+    }
+    const timer = setTimeout(() => {
+      child.off('exit', finish)
+      resolve(false)
+    }, timeoutMs)
+    child.once('exit', finish)
+  })
+}
+
+async function stopBackendProcessTree(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+
+  if (isWindows) {
+    const result = spawnSync(
+      'taskkill',
+      ['/PID', String(child.pid), '/T', '/F'],
+      { stdio: 'ignore', windowsHide: true },
+    )
+    if (result.error) {
+      throw result.error
+    }
+    if (result.status !== 0 && !(await waitForChildExit(child, 250))) {
+      throw new Error(`failed to stop backend process tree: pid ${child.pid}`)
+    }
+  } else {
+    child.kill('SIGTERM')
+  }
+
+  if (await waitForChildExit(child, 5000)) {
+    return
+  }
+  child.kill('SIGKILL')
+  if (!(await waitForChildExit(child, 5000))) {
+    throw new Error(`backend process did not exit: pid ${child.pid}`)
+  }
+}
+
 function requestHealth(port) {
   return new Promise((resolve, reject) => {
     const req = http.get(`http://127.0.0.1:${port}/health`, { timeout: 2000 }, (res) => {
@@ -62,6 +110,19 @@ function requestHealth(port) {
     })
     req.on('error', reject)
   })
+}
+
+async function waitForBackendShutdown(port) {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    try {
+      await requestHealth(port)
+    } catch {
+      return
+    }
+    await wait(100)
+  }
+  throw new Error(`backend still responds after cleanup on port ${port}`)
 }
 
 async function verifyBackendExecutable() {
@@ -101,9 +162,11 @@ async function verifyBackendExecutable() {
     }
     throw lastError || new Error('backend health check timed out')
   } finally {
-    if (child.exitCode === null) {
-      child.kill()
-    }
+    // PyInstaller one-file executables use a bootloader parent plus a worker
+    // process. On Windows child.kill() only stops the bootloader and leaves the
+    // worker holding pcids_backend.exe open, which breaks the next build.
+    await stopBackendProcessTree(child)
+    await waitForBackendShutdown(port)
   }
 }
 

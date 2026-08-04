@@ -62,12 +62,18 @@ const Record: React.FC = () => {
   }, [])
 
   const fetchRecords = async () => {
+    if (!currentProject.projectKey) {
+      setDataSource([])
+      setTotal(0)
+      setLoading(false)
+      return
+    }
     setLoading(true)
     try {
       const res: any = await recordApi.getList({
         ...params,
         type: activeTab === 'burn' ? 'burn' : 'install',
-        project_key: currentProject.projectKey || undefined,
+        project_key: currentProject.projectKey,
       })
       if (res.code === 0) {
         setDataSource(res.data || [])

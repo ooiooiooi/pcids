@@ -103,6 +103,36 @@ class BurnerUsbBindingTests(unittest.TestCase):
         self.assertIsNotNone(matched)
         self.assertEqual(matched["sn"], "CUSTOM-001")
 
+    def test_exact_scanned_usb_binding_keeps_unclassified_port_device_online(self):
+        usb_binding = {
+            "pnp_device_id": r"USB\VID_1234&PID_5678\6&123ABC&0&3",
+            "container_id": "{B64FBDBE-6EBD-48BA-8BE8-E6957653C04B}",
+            "vendor_id": "1234",
+            "product_id": "5678",
+            "location_info": "Port_#0003.Hub_#0001",
+        }
+        usb_devices = [
+            {
+                "_name": "USB Composite Device",
+                "vendor_id": "1234",
+                "product_id": "5678",
+                "pnp_device_id": usb_binding["pnp_device_id"],
+                "container_id": usb_binding["container_id"],
+                "location_info": usb_binding["location_info"],
+            }
+        ]
+
+        matched = burners_module._match_usb_device(
+            "Gowin USB Cable",
+            None,
+            usb_devices=usb_devices,
+            expected_port=usb_binding["location_info"],
+            expected_usb_binding=usb_binding,
+        )
+
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["usb_binding"]["pnp_device_id"], usb_binding["pnp_device_id"])
+
     def test_changed_port_drops_stale_usb_binding(self):
         payload = _normalize_burner_payload(
             {
@@ -144,6 +174,32 @@ class BurnerUsbBindingTests(unittest.TestCase):
         self.assertEqual(
             json.loads(payload["config_json"])["usb_binding"]["pnp_device_id"],
             r"USB\VID_28E9&PID_0698\3835388D0655",
+        )
+
+    def test_scanned_location_path_keeps_exact_usb_binding(self):
+        location_path = r"PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)"
+        pnp_device_id = r"USB\VID_1234&PID_5678\6&123ABC&0&3"
+        payload = _normalize_burner_payload(
+            {
+                "type": "Gowin USB Cable",
+                "strategy": 2,
+                "port": location_path,
+                "config_json": json.dumps(
+                    {
+                        "device_category": "burner",
+                        "usb_binding": {
+                            "location_path": location_path,
+                            "pnp_device_id": pnp_device_id,
+                            "container_id": "{B64FBDBE-6EBD-48BA-8BE8-E6957653C04B}",
+                        },
+                    }
+                ),
+            }
+        )
+
+        self.assertEqual(
+            json.loads(payload["config_json"])["usb_binding"]["pnp_device_id"],
+            pnp_device_id,
         )
 
     def test_xds510plus_forces_physical_port_and_clears_false_serial(self):

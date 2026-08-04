@@ -51,3 +51,15 @@ test('refuses startup when multiple databases exist', (t) => {
     /检测到多份 PCIDS 数据库/,
   )
 })
+
+test('backend test runner isolates database and app data from the real user profile', () => {
+  const source = fs.readFileSync(
+    path.resolve('scripts', 'run-backend-tests.mjs'),
+    'utf8',
+  )
+
+  assert.match(source, /mkdtempSync\(path\.join\(os\.tmpdir\(\), 'pcids-backend-tests-'\)\)/)
+  assert.match(source, /PCIDS_DATA_DIR:\s*resolvedTestDataRoot/)
+  assert.match(source, /DB_PATH:\s*path\.join\(resolvedTestDataRoot,\s*'app_data\.db'\)/)
+  assert.match(source, /safeTestDataRoot/)
+})

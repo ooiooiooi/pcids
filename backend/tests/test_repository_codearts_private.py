@@ -5,6 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
+from fastapi import HTTPException
+
 from backend.routers.repositories import (
     _build_codearts_private_download_url,
     _build_codearts_download_context,
@@ -15,6 +17,7 @@ from backend.routers.repositories import (
     _merge_codearts_config,
     _open_remote_download_stream,
     _repository_codearts_mode,
+    _resolve_codearts_devops_url,
     _resolve_codearts_download_auth,
     get_codearts_status,
 )
@@ -192,6 +195,45 @@ class RepositoryCodeartsPrivateTests(unittest.TestCase):
         self.assertEqual(merged["repo_ids"], ["release-repo-id"])
         self.assertEqual(merged["private_repo_id"], REPO_ID)
 
+    def test_devops_url_is_only_read_from_trusted_backend_config(self):
+        trusted_url = "https://trusted-devops.example.com"
+        merged = _merge_codearts_config(
+            {"devops_url": "https://legacy-db.example.com"},
+            {"devops_url": "https://payload.example.com"},
+        )
+
+        self.assertNotIn("devops_url", merged)
+        with patch(
+            "backend.routers.repositories._get_repository_codearts_service_config",
+            return_value={
+                "iam_token_url": "https://iam.example.com",
+                "base_url": "https://release.example.com",
+                "private_iam_token_url": "https://private-iam.example.com",
+                "private_base_url": "https://private.example.com",
+                "devops_url": trusted_url,
+            },
+        ):
+            effective = _build_effective_codearts_config(
+                {
+                    "repository_mode": "private",
+                    "private_source": "web",
+                    "devops_url": "https://legacy-db.example.com",
+                }
+            )
+
+        self.assertEqual(effective["devops_url"], trusted_url)
+
+    def test_devops_url_template_rejects_project_controlled_origin_injection(self):
+        with self.assertRaises(HTTPException) as context:
+            _resolve_codearts_devops_url(
+                {
+                    "devops_url": "https://devops.{region}.example.com",
+                    "region": "attacker.example/path",
+                }
+            )
+
+        self.assertEqual(context.exception.status_code, 400)
+
     def test_legacy_private_repo_id_survives_switch_to_release(self):
         merged = _merge_codearts_config(
             {"repository_mode": "private", "repo_ids": [REPO_ID]},
@@ -344,7 +386,7 @@ class RepositoryCodeartsPrivateTests(unittest.TestCase):
             "private_repo_id": REPO_ID,
         }
         with (
-            patch("backend.routers.repositories._build_codearts_download_context", return_value=(config, "token")),
+            patch("backend.routers.repositories._build_codearts_download_context_async", return_value=(config, "token")),
             patch("backend.routers.repositories._get_codearts_private_repository_info", return_value={"name": REPO_ID}) as private_info,
             patch("backend.routers.repositories._get_codearts_project_list") as release_list,
         ):

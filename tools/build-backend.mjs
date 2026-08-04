@@ -11,6 +11,7 @@ const distRoot = process.env.PCIDS_BACKEND_DIST_DIR
   : path.join(backendDir, 'dist')
 const backendSourcePath = path.join(projectRoot, 'backend')
 const backendEntryPath = path.join(backendSourcePath, 'run_backend.py')
+const agentConfigPath = path.join(backendSourcePath, 'config', 'agent.json')
 const isWindows = process.platform === 'win32'
 const execName = isWindows ? 'pcids_backend.exe' : 'pcids_backend'
 const venvPython = isWindows
@@ -57,6 +58,11 @@ function ensurePyInstaller(pythonBin) {
 }
 
 function main() {
+  if (!fs.existsSync(agentConfigPath)) {
+    throw new Error(
+      'backend/config/agent.json is missing. Refusing to build a package with LAN Agent authentication disabled.',
+    )
+  }
   const pythonBin = resolvePython()
   ensurePyInstaller(pythonBin)
 

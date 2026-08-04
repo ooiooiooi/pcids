@@ -120,6 +120,87 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         self.assertEqual(changes[0].change_type, "delete_server")
         self.assertEqual(changes[0].source, "codearts_sync")
 
+    def test_full_refresh_does_not_delete_local_file_when_commit_fails(self):
+        project_id = "project-commit-failure"
+        project_key = f"proj_{project_id}"
+        self.db.add(
+            RepositoryProjectSetting(
+                project_key=project_key,
+                updated_by_user_id=self.user.id,
+                codearts_config_json=json.dumps(
+                    {
+                        "enabled": True,
+                        "domain_name": "tenant",
+                        "username": "demo-user",
+                        "password": "demo-password",
+                        "region": "cn-east-3",
+                        "project_id": project_id,
+                        "repo_ids": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        old_repo = Repository(
+            name="old.bin",
+            project_key=project_key,
+            created_by_user_id=self.user.id,
+            source_type="codearts_sync",
+            file_url="D:/workspace/pcids/uploads/repositories/old.pcenc",
+            download_uri="https://example.com/download/old.bin",
+            display_path="/old.bin",
+        )
+        self.db.add(old_repo)
+        self.db.commit()
+        self.db.refresh(old_repo)
+        old_repo_id = old_repo.id
+
+        real_commit = self.db.commit
+        commit_count = 0
+
+        def fail_final_commit():
+            nonlocal commit_count
+            commit_count += 1
+            if commit_count == 2:
+                raise RuntimeError("simulated final commit failure")
+            return real_commit()
+
+        with (
+            patch("backend.routers.repositories.ensure_schema"),
+            patch("backend.routers.repositories._get_iam_token", return_value="token"),
+            patch(
+                "backend.routers.repositories._get_codearts_project_list",
+                return_value=[
+                    {
+                        "project_id": project_id,
+                        "name": "Demo Project",
+                        "repo_name": "demo-repo",
+                    }
+                ],
+            ),
+            patch("backend.routers.repositories._list_codearts_project_files", return_value=[]),
+            patch("backend.routers.repositories._ensure_project_member_seed"),
+            patch("backend.routers.repositories._list_running_tasks_for_project", return_value=[]),
+            patch("backend.routers.repositories._remove_repository_local_file") as remove_local,
+            patch.object(self.db, "commit", side_effect=fail_final_commit),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated final commit failure"):
+                asyncio.run(
+                    sync_codearts_project(
+                        {"project_id": project_id, "full_refresh": True},
+                        self.db,
+                        self.user,
+                        None,
+                    )
+                )
+
+        remove_local.assert_not_called()
+        self.assertEqual(commit_count, 2)
+        self.db.rollback()
+        self.assertIsNotNone(
+            self.db.query(Repository).filter(Repository.id == old_repo_id).first()
+        )
+
     def test_full_refresh_detaches_historical_foreign_key_references_before_delete(self):
         project_id = "project-2"
         project_key = f"proj_{project_id}"
@@ -399,7 +480,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
                 return_value=(
                     web_files,
                     {
-                        "summary": {},
+                        "summary": {"snapshotComplete": True},
                         "request_records": [],
                         "folders": [],
                         "remote_project": {
@@ -436,6 +517,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
             .codearts_config_json
         )
         self.assertEqual(stored_config["project_name"], "远端真实项目")
+        self.assertNotIn("devops_url", stored_config)
         self.assertEqual(result["data"]["project_name"], "远端真实项目")
         changes = self.db.query(RepositorySyncChange).filter(
             RepositorySyncChange.project_key == project_key
@@ -444,7 +526,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         self.assertEqual(changes[0].change_type, "upsert")
         self.assertEqual(changes[0].source, "codearts_sync")
 
-    def test_web_refresh_preserves_old_rows_when_browser_snapshot_is_partial(self):
+    def test_web_unconfirmed_snapshot_blocks_full_refresh_but_allows_incremental_sync(self):
         project_id = "partial-web-project"
         project_key = f"proj_{project_id}"
         setting = RepositoryProjectSetting(
@@ -507,13 +589,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
                 return_value=(
                     partial_files,
                     {
-                        "summary": {
-                            "snapshotComplete": False,
-                            "directoryErrors": [
-                                {"path": "/", "message": "incomplete root traversal"}
-                            ],
-                            "detailErrors": [],
-                        },
+                        "summary": {"directoryErrors": [], "detailErrors": []},
                         "request_records": [],
                         "folders": [],
                         "remote_project": {
@@ -534,21 +610,43 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
                         None,
                     )
                 )
+            rows_after_rejection = (
+                self.db.query(Repository)
+                .filter(Repository.project_key == project_key)
+                .all()
+            )
+            self.assertEqual([row.id for row in rows_after_rejection], [old_repo_id])
+            self.assertEqual(
+                self.db.query(RepositorySyncChange)
+                .filter(RepositorySyncChange.project_key == project_key)
+                .count(),
+                0,
+            )
+            incremental_result = asyncio.run(
+                sync_codearts_project(
+                    {"project_id": project_id, "full_refresh": False},
+                    self.db,
+                    self.user,
+                    None,
+                )
+            )
 
         self.assertEqual(raised.exception.status_code, 502)
         self.assertIn("已保留原有仓库数据", raised.exception.detail)
+        self.assertEqual(incremental_result["code"], 0)
         rows = (
             self.db.query(Repository)
             .filter(Repository.project_key == project_key)
+            .order_by(Repository.id)
             .all()
         )
-        self.assertEqual([row.id for row in rows], [old_repo_id])
-        self.assertEqual(rows[0].name, "old.bin")
+        self.assertEqual([row.name for row in rows], ["old.bin", "new.bin"])
+        self.assertEqual(rows[0].id, old_repo_id)
         self.assertEqual(
             self.db.query(RepositorySyncChange)
             .filter(RepositorySyncChange.project_key == project_key)
             .count(),
-            0,
+            1,
         )
 
     def test_project_create_cannot_silently_overwrite_existing_config(self):
@@ -660,7 +758,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
             .codearts_config_json
         )
         self.assertEqual(stored["password"], "saved-password")
-        self.assertEqual(stored["devops_url"], "https://new.example.com")
+        self.assertNotIn("devops_url", stored)
         self.assertEqual(stored["project_name"], "旧项目名称")
         self.db.refresh(existing_repo)
         renamed_detail = json.loads(existing_repo.repo_detail_json)

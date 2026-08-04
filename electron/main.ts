@@ -128,6 +128,7 @@ function resolveCodeArtsWebRuntimeDir(): string {
 
   const candidates = app.isPackaged
     ? [
+        path.join(process.resourcesPath, 'runtime', 'codearts_browser_runtime'),
         path.join(process.resourcesPath, 'tools', 'codearts_browser_runtime'),
         configured,
         'D:\\PCIDS-Deploy\\codearts_browser_runtime',
@@ -580,6 +581,12 @@ async function restartBackendAfterUnexpectedExit(port: number): Promise<void> {
   if (backendRestarting || isQuitting) return
   backendRestarting = true
   try {
+    // The frontend must never remain interactive while the backend is being
+    // recovered. Its pages issue business API requests immediately, so keeping
+    // Workbench visible during recovery only produces misleading failures.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.loadURL(getStartupPageUrl())
+    }
     for (let attempt = 1; attempt <= BACKEND_START_ATTEMPTS; attempt += 1) {
       if (isQuitting) return
       await delay(attempt * 1000)
@@ -589,6 +596,9 @@ async function restartBackendAfterUnexpectedExit(port: number): Promise<void> {
         await waitForBackend(getBackendBaseUrl(port), backendProcess)
         recordBackendOutput(`[desktop] backend recovery succeeded on port ${port}`)
         monitorRunningBackend(port, backendProcess)
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          await mainWindow.loadURL(getFrontendUrl(getBackendBaseUrl(port)))
+        }
         return
       } catch (error) {
         recordBackendOutput(`[desktop] backend recovery failed: ${error}`)

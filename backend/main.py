@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import FileResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
@@ -522,8 +522,16 @@ async def lifespan(app: FastAPI):
     # Do not place hardware/tool discovery before ``yield``. Uvicorn does not
     # expose /health until lifespan startup finishes, and legacy vendor probes
     # can take tens of seconds on fully equipped workstations.
+    app.state.startup_diagnostics_complete = False
+
+    async def run_startup_diagnostics() -> None:
+        try:
+            await asyncio.to_thread(_run_startup_diagnostics)
+        finally:
+            app.state.startup_diagnostics_complete = True
+
     diagnostics_task = asyncio.create_task(
-        asyncio.to_thread(_run_startup_diagnostics),
+        run_startup_diagnostics(),
         name="pcids-startup-diagnostics",
     )
     app.state.startup_diagnostics_task = diagnostics_task
@@ -582,6 +590,15 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
 @app.get("/health")
 async def health_check():
     """健康检查接口"""
+    if not getattr(app.state, "startup_diagnostics_complete", False):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "starting",
+                "version": "1.0.0",
+                "service": "pcids-backend",
+            },
+        )
     return {
         "status": "ok",
         "version": "1.0.0",

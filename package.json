@@ -1,6 +1,7 @@
 {
   "name": "pcids",
   "version": "1.0.0",
+  "private": true,
   "description": "程控安装部署系统 - Programmatic Control Installation & Deployment System",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -8,9 +9,7 @@
     "build:backend": "node tools/build-backend.mjs",
     "build": "npm run build:backend && tsc && vite build && npm run build:electron",
     "build:electron": "tsc -p tsconfig.electron.json",
-    "test:business": "node tools/business-flow-test.mjs",
-    "test:ethernet": "python tools/run_ethernet_protocol_suite.py --start-backend --start-simulator",
-    "test:unit": "tsx --test tests/*.test.ts",
+    "test:unit": "tsx --test tests/*.test.ts tests/*.test.cjs",
     "test:backend": "node scripts/run-backend-tests.mjs",
     "check:delivery": "node scripts/delivery-check.mjs",
     "test:e2e:burning": "playwright test e2e/burning-flow.spec.ts",
@@ -28,7 +27,7 @@
     "electron"
   ],
   "author": "Herman_",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@types/node": "^22.10.2",
@@ -43,11 +42,11 @@
   },
   "dependencies": {
     "antd": "^5.23.0",
-    "axios": "^1.7.9",
+    "axios": "^1.18.1",
     "dayjs": "^1.11.13",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.1.1",
+    "react-router-dom": "^7.18.2",
     "recharts": "^2.15.0",
     "zustand": "^5.0.3"
   },
@@ -80,6 +79,33 @@
       {
         "from": "scripts/pcids_flash.py",
         "to": "flash-adapter/pcids_flash.py"
+      },
+      {
+        "from": "scripts/pcids-install.cmd",
+        "to": "install-adapter/pcids-install.cmd"
+      },
+      {
+        "from": "scripts/pcids_install.py",
+        "to": "install-adapter/pcids_install.py"
+      },
+      {
+        "from": "scripts/codearts-install",
+        "to": "install-adapter/examples",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "tools/codearts_release_debugger/browser_runtime",
+        "to": "runtime/codearts_browser_runtime",
+        "filter": [
+          "codearts_web_session.js",
+          "package.json",
+          "node_modules/playwright/**/*",
+          "node_modules/playwright-core/**/*"
+        ]
       }
     ],
     "mac": {

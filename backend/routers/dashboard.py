@@ -3,11 +3,11 @@ from __future__ import annotations
 """
 仪表盘/工作台路由
 """
+from dataclasses import dataclass
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, case, and_, or_
-from datetime import datetime, timedelta
-import calendar
+from sqlalchemy import func, desc, case, and_
+from datetime import datetime, timedelta, timezone
 import json
 import re
 
@@ -20,12 +20,17 @@ from backend.models.burner import Burner
 from backend.models.message import Message
 from backend.models.log import InjectionRun, ProtocolSession
 from backend.routers.auth import get_current_user
-from backend.routers.messages import _enrich_task_message_payload
+from backend.routers.messages import (
+    enrich_task_message_payloads,
+    get_latest_visible_messages,
+    resolve_message_local_datetime,
+)
 from backend.schemas import Response
-from backend.routers.burners import _build_scan_result, _probe_usb_devices
-from backend.utils.datetime_utils import database_time_to_local
+from backend.routers.burners import _compute_burner_runtime_statuses
+from backend.utils.datetime_utils import database_time_to_local, local_time_to_database
 from backend.utils.text_normalization import normalize_text_payload
 from backend.utils.permission import require_permission
+from backend.utils.task_scope import apply_task_scope
 
 router = APIRouter()
 WORKBENCH_SHORTCUT_PATHS = ["/repository", "/burning", "/protocol"]
@@ -34,6 +39,27 @@ WORKBENCH_SHORTCUT_ICON_KEYS = {
     "/burning": "burning",
     "/protocol": "protocol",
 }
+MONTH_LABELS = [
+    "一月",
+    "二月",
+    "三月",
+    "四月",
+    "五月",
+    "六月",
+    "七月",
+    "八月",
+    "九月",
+    "十月",
+    "十一月",
+    "十二月",
+]
+
+
+@dataclass(frozen=True)
+class _TimeWindow:
+    label: str
+    start_time: datetime
+    end_time: datetime
 
 
 def _is_success_text(value: str | None) -> bool:
@@ -52,6 +78,51 @@ def _is_success_text(value: str | None) -> bool:
 def _build_date_label(now: datetime) -> str:
     week_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     return f"{now.strftime('%Y/%m/%d')} {week_names[now.weekday()]}"
+
+
+def _build_local_day_window(local_now: datetime, day_offset: int = 0) -> _TimeWindow:
+    local_timezone = local_now.tzinfo or datetime.now().astimezone().tzinfo or timezone.utc
+    if local_now.tzinfo is None or local_now.utcoffset() is None:
+        local_now = local_now.replace(tzinfo=local_timezone)
+    else:
+        local_now = local_now.astimezone(local_timezone)
+    local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+    local_end = local_start + timedelta(days=1)
+    return _TimeWindow(
+        label=local_start.strftime("%Y-%m-%d"),
+        start_time=local_time_to_database(local_start),
+        end_time=local_time_to_database(local_end),
+    )
+
+
+def _build_month_windows(local_now: datetime, month_count: int) -> list[_TimeWindow]:
+    local_timezone = local_now.tzinfo or datetime.now().astimezone().tzinfo or timezone.utc
+    if local_now.tzinfo is None or local_now.utcoffset() is None:
+        local_now = local_now.replace(tzinfo=local_timezone)
+    else:
+        local_now = local_now.astimezone(local_timezone)
+
+    windows: list[_TimeWindow] = []
+    current_month_index = local_now.year * 12 + local_now.month - 1
+    for offset in range(month_count - 1, -1, -1):
+        month_index = current_month_index - offset
+        year, zero_based_month = divmod(month_index, 12)
+        month = zero_based_month + 1
+        next_year, next_zero_based_month = divmod(month_index + 1, 12)
+        local_start = datetime(year, month, 1, tzinfo=local_timezone)
+        local_end = datetime(next_year, next_zero_based_month + 1, 1, tzinfo=local_timezone)
+        windows.append(
+            _TimeWindow(
+                label=MONTH_LABELS[month - 1],
+                start_time=local_time_to_database(local_start),
+                end_time=local_time_to_database(local_end),
+            )
+        )
+    return windows
+
+
+def _scoped_task_query(db: Session, current_user: User):
+    return apply_task_scope(db.query(BurningTask), db, current_user)
 
 
 def _build_shortcuts(db: Session, current_user: User) -> list[dict]:
@@ -106,13 +177,16 @@ def _parse_message_payload(content: str) -> dict:
         return {}
 
 
-def _build_message_preview(item: Message, db: Session | None = None) -> dict:
-    local_created_at = _database_time_to_local(getattr(item, "created_at", None))
+def _build_message_preview(
+    item: Message,
+    payload: dict | None = None,
+) -> dict:
     title = str(getattr(item, "title", None) or "").strip()
     content = str(getattr(item, "content", None) or "").strip()
-    payload = _parse_message_payload(content)
-    if payload and db is not None:
-        payload = _enrich_task_message_payload(db, payload)
+    if payload is None:
+        payload = _parse_message_payload(content)
+    local_event_at = resolve_message_local_datetime(item, payload)
+    formatted_event_time = _format_event_time(local_event_at)
     if payload:
         raw_status = str(payload.get("status") or "").strip().lower()
         status = raw_status if raw_status in {"success", "error", "info", "warning"} else "info"
@@ -126,8 +200,8 @@ def _build_message_preview(item: Message, db: Session | None = None) -> dict:
             "meta_text": str(payload.get("meta_text") or "").strip(),
             "detail_text": str(payload.get("detail_text") or payload.get("detail_content") or "").strip(),
             "status": status,
-            "time": str(payload.get("event_time") or "").strip() or _format_event_time(local_created_at),
-            "_sort_time": local_created_at,
+            "time": formatted_event_time,
+            "_sort_time": local_event_at,
         }
     text = title or content or "系统消息"
     if title and content and content != title:
@@ -143,8 +217,8 @@ def _build_message_preview(item: Message, db: Session | None = None) -> dict:
         "id": f"message-{item.id}",
         "text": text,
         "status": status,
-        "time": _format_event_time(local_created_at),
-        "_sort_time": local_created_at,
+        "time": formatted_event_time,
+        "_sort_time": local_event_at,
     }
 
 
@@ -152,32 +226,138 @@ def _format_event_time(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S") if value else ""
 
 
-def _burning_task_success_condition():
-    result_text = func.upper(func.coalesce(BurningTask.result, ""))
+def _window_condition(window: _TimeWindow):
     return and_(
-        BurningTask.status == 2,
-        or_(
-            BurningTask.result.contains("成功"),
-            BurningTask.result.contains("完成"),
-            result_text == "SUCCESS",
-            result_text.like("%PASS%"),
-        ),
+        BurningTask.created_at >= window.start_time,
+        BurningTask.created_at < window.end_time,
     )
 
 
-def _query_burning_task_window_stats(db: Session, start_time: datetime, end_time: datetime | None = None) -> tuple[int, int]:
-    filters = [BurningTask.created_at >= start_time]
-    if end_time is not None:
-        filters.append(BurningTask.created_at < end_time)
-    total_count, success_count = (
-        db.query(
+def _query_task_window_metrics(
+    db: Session,
+    current_user: User,
+    window: _TimeWindow,
+) -> dict[str, int]:
+    window_filter = _window_condition(window)
+    completed_filter = BurningTask.status.in_([int(TaskStatus.SUCCESS), int(TaskStatus.FAILED)])
+    success_filter = BurningTask.status == int(TaskStatus.SUCCESS)
+    total_count, completed_count, success_count = (
+        _scoped_task_query(db, current_user)
+        .filter(window_filter)
+        .with_entities(
             func.count(BurningTask.id),
-            func.coalesce(func.sum(case((_burning_task_success_condition(), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((completed_filter, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((success_filter, 1), else_=0)), 0),
         )
-        .filter(*filters)
         .one()
     )
-    return int(total_count or 0), int(success_count or 0)
+    return {
+        "total": int(total_count or 0),
+        "completed": int(completed_count or 0),
+        "success": int(success_count or 0),
+    }
+
+
+def _query_monthly_success_trend(
+    db: Session,
+    current_user: User,
+    windows: list[_TimeWindow],
+    as_of_time: datetime,
+) -> list[dict]:
+    if not windows:
+        return []
+
+    expressions = []
+    for window in windows:
+        window_filter = _window_condition(window)
+        completed_filter = and_(
+            window_filter,
+            BurningTask.status.in_([int(TaskStatus.SUCCESS), int(TaskStatus.FAILED)]),
+        )
+        success_filter = and_(
+            window_filter,
+            BurningTask.status == int(TaskStatus.SUCCESS),
+        )
+        expressions.extend(
+            [
+                func.coalesce(func.sum(case((completed_filter, 1), else_=0)), 0),
+                func.coalesce(func.sum(case((success_filter, 1), else_=0)), 0),
+            ]
+        )
+
+    row = (
+        _scoped_task_query(db, current_user)
+        .filter(
+            BurningTask.created_at >= windows[0].start_time,
+            BurningTask.created_at < windows[-1].end_time,
+            BurningTask.created_at < as_of_time,
+        )
+        .with_entities(*expressions)
+        .one()
+    )
+    values = list(row)
+    trend_data = []
+    for index, window in enumerate(windows):
+        completed_count = int(values[index * 2] or 0)
+        success_count = int(values[index * 2 + 1] or 0)
+        rate = round(success_count / completed_count * 100, 1) if completed_count else None
+        trend_data.append(
+            {
+                "month": window.label,
+                "rate": rate,
+                "rateAvailable": completed_count > 0,
+                "completedCount": completed_count,
+                "successCount": success_count,
+            }
+        )
+    return trend_data
+
+
+def _query_target_counts(
+    db: Session,
+    current_user: User,
+    windows: list[_TimeWindow],
+    as_of_time: datetime,
+) -> list[dict]:
+    if not windows:
+        return []
+
+    normalized_board_name = func.nullif(func.trim(func.coalesce(BurningTask.board_name, "")), "")
+    normalized_serial_number = func.nullif(func.trim(func.coalesce(BurningTask.serial_number, "")), "")
+    normalized_target_ip = func.nullif(func.trim(func.coalesce(BurningTask.target_ip, "")), "")
+    normalized_target = func.coalesce(
+        normalized_board_name,
+        normalized_serial_number,
+        normalized_target_ip,
+    )
+    count_expression = func.count(BurningTask.id)
+    target_counts = (
+        _scoped_task_query(db, current_user)
+        .with_entities(
+            normalized_target.label("target_name"),
+            count_expression.label("task_count"),
+        )
+        .filter(
+            BurningTask.created_at >= windows[0].start_time,
+            BurningTask.created_at < windows[-1].end_time,
+            BurningTask.created_at < as_of_time,
+            normalized_target.isnot(None),
+        )
+        .group_by(normalized_target)
+        .order_by(desc(count_expression), normalized_target.asc())
+        .limit(5)
+        .all()
+    )
+    return [
+        {"name": str(target_name).strip(), "value": int(count or 0)}
+        for target_name, count in target_counts
+    ]
+
+
+def _calculate_task_growth(today_count: int, yesterday_count: int) -> tuple[float | None, bool]:
+    if yesterday_count > 0:
+        return round((today_count - yesterday_count) / yesterday_count * 100, 1), True
+    return None, False
 
 
 def _safe_json_loads(value: str | None) -> dict:
@@ -213,9 +393,29 @@ def _build_task_preview(
     repo: Repository | None = None,
     repository_by_project_key: dict[str, Repository] | None = None,
 ) -> dict:
-    status = "success" if item.status == 2 else "error" if item.status == 3 else "info"
-    status_label = {0: "已终止", 1: "执行中", 2: "安装成功", 3: "安装失败"}.get(item.status, "状态更新")
+    task_status = int(getattr(item, "status", TaskStatus.PENDING) or TaskStatus.PENDING)
     raw_task_type = str(getattr(item, "task_type", None) or "").strip().lower()
+    action_name = {
+        "board": "烧录",
+        "os": "安装",
+        "hybrid": "混合部署",
+    }.get(raw_task_type, "任务")
+    if task_status == int(TaskStatus.SUCCESS):
+        status = "success"
+    elif task_status == int(TaskStatus.FAILED):
+        status = "error"
+    elif task_status in {int(TaskStatus.TERMINATING), int(TaskStatus.TERMINATED)}:
+        status = "warning"
+    else:
+        status = "info"
+    status_label = {
+        int(TaskStatus.PENDING): "待执行",
+        int(TaskStatus.RUNNING): "执行中",
+        int(TaskStatus.SUCCESS): f"{action_name}成功",
+        int(TaskStatus.FAILED): f"{action_name}失败",
+        int(TaskStatus.TERMINATING): "终止中",
+        int(TaskStatus.TERMINATED): "已终止",
+    }.get(task_status, "状态更新")
     category = "烧录安装"
     target = str(item.board_name or item.serial_number or item.target_ip or "未知目标").strip()
     software = str(item.software_name or (getattr(repo, "name", None) if repo else "") or "").strip()
@@ -229,7 +429,7 @@ def _build_task_preview(
         "id": f"task-{item.id}",
         "text": primary_text or f"烧录/安装任务 {task_no} {status_label}",
         "category": category,
-        "status_label": "成功" if status == "success" else "失败" if status == "error" else status_label,
+        "status_label": status_label,
         "primary_text": primary_text,
         "meta_text": f"任务 {task_no} · 项目 {project_name}",
         "detail_text": detail_text,
@@ -263,28 +463,6 @@ def _build_protocol_preview(item: ProtocolSession) -> dict:
         "_sort_time": _database_time_to_local(item.updated_at or item.created_at),
     }
 
-
-def _is_burner_enabled(burner: Burner) -> bool:
-    return bool(getattr(burner, "is_enabled", None)) and int(getattr(burner, "status", 0) or 0) != 3
-
-
-def _compute_burner_runtime_status(burner: Burner, occupied_burner_ids: set[int], usb_devices: list[dict]) -> int:
-    if not _is_burner_enabled(burner):
-        return 3
-    if burner.id in occupied_burner_ids:
-        return 2
-    scanned = _build_scan_result(
-        burner.type,
-        burner.location,
-        burner.strategy,
-        burner,
-        allow_fallback=False,
-        usb_devices=usb_devices,
-    )
-    return 0 if scanned and scanned.get("online") else 1
-
-
-
 @router.get("/stats", response_model=Response)
 async def get_dashboard_stats(
     trend_months: int = Query(6, ge=6, le=12),
@@ -294,26 +472,59 @@ async def get_dashboard_stats(
     _: None = Depends(require_permission("workbench:view")),
 ):
     """获取工作台统计数据"""
-    now = datetime.now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday_start = today_start - timedelta(days=1)
-    
-    # 1. 今日烧录任务数及环比
-    today_count, today_success = _query_burning_task_window_stats(db, today_start)
-    yesterday_count, yesterday_success = _query_burning_task_window_stats(db, yesterday_start, today_start)
-    
-    if yesterday_count > 0:
-        task_growth = round(((today_count - yesterday_count) / yesterday_count) * 100, 1)
-    else:
-        task_growth = 100.0 if today_count > 0 else 0.0
-        
-    # 2. 今日成功率及环比
-    today_rate = round((today_success / today_count * 100), 1) if today_count > 0 else 0.0
-    yesterday_rate = round((yesterday_success / yesterday_count * 100), 1) if yesterday_count > 0 else 0.0
-    
-    rate_growth = round(today_rate - yesterday_rate, 1)
-    
-    # 3. 烧录器状态
+    local_now = datetime.now().astimezone()
+    display_now = local_now.replace(tzinfo=None)
+    today_window = _build_local_day_window(local_now)
+    yesterday_window = _build_local_day_window(local_now, day_offset=-1)
+    trend_windows = _build_month_windows(local_now, trend_months)
+    target_windows = _build_month_windows(local_now, target_months)
+    database_now = local_time_to_database(local_now)
+    today_window = _TimeWindow(
+        label=today_window.label,
+        start_time=today_window.start_time,
+        end_time=min(today_window.end_time, database_now),
+    )
+
+    # 1. 今日任务量统计全部可见任务；成功率仅统计已完成（成功/失败）任务。
+    today_metrics = _query_task_window_metrics(db, current_user, today_window)
+    yesterday_metrics = _query_task_window_metrics(db, current_user, yesterday_window)
+    today_count = today_metrics["total"]
+    yesterday_count = yesterday_metrics["total"]
+    task_growth, task_growth_available = _calculate_task_growth(
+        today_count,
+        yesterday_count,
+    )
+
+    today_rate_available = today_metrics["completed"] > 0
+    yesterday_rate_available = yesterday_metrics["completed"] > 0
+    today_rate = (
+        round(today_metrics["success"] / today_metrics["completed"] * 100, 1)
+        if today_rate_available
+        else 0.0
+    )
+    yesterday_rate = (
+        round(yesterday_metrics["success"] / yesterday_metrics["completed"] * 100, 1)
+        if yesterday_rate_available
+        else 0.0
+    )
+    rate_growth_available = today_rate_available and yesterday_rate_available
+    rate_growth = round(today_rate - yesterday_rate, 1) if rate_growth_available else None
+
+    # 2. 趋势只执行一次带条件聚合的范围查询；TOP5 使用相同的自然月边界。
+    trend_data = _query_monthly_success_trend(
+        db,
+        current_user,
+        trend_windows,
+        database_now,
+    )
+    target_data = _query_target_counts(
+        db,
+        current_user,
+        target_windows,
+        database_now,
+    )
+
+    # 3. 先读取设备及占用快照，硬件/远程探测在结束数据库事务后异步执行。
     burners = db.query(Burner).all()
     occupied_burner_ids = {
         burner_id
@@ -325,68 +536,30 @@ async def get_dashboard_stats(
         .all()
         if burner_id is not None
     }
-    usb_devices = _probe_usb_devices()
-    burner_statuses = [_compute_burner_runtime_status(b, occupied_burner_ids, usb_devices) for b in burners]
-    burner_idle = len([status for status in burner_statuses if status == 0])
-    burner_in_use = len([status for status in burner_statuses if status == 2])
-    burner_offline = len([status for status in burner_statuses if status in (1, 3)])
-    
-    # 4. 趋势数据
-    trend_data = []
-    month_names = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"]
 
-    for offset in range(trend_months - 1, -1, -1):
-        target_month = now.month - offset
-        target_year = now.year
-        while target_month <= 0:
-            target_month += 12
-            target_year -= 1
-
-        _, last_day = calendar.monthrange(target_year, target_month)
-        month_start = datetime(target_year, target_month, 1)
-        month_end = datetime(target_year, target_month, last_day, 23, 59, 59)
-
-        month_count, month_success = _query_burning_task_window_stats(db, month_start, month_end + timedelta(seconds=1))
-
-        rate = round((month_success / month_count * 100), 1) if month_count > 0 else 0.0
-
-        trend_data.append({
-            "month": month_names[target_month - 1],
-            "rate": rate
-        })
-
-    # 5. 目标安装量 (按板卡分组)
-    target_data = []
-    target_since = now - timedelta(days=target_months * 31)
-    board_counts = db.query(
-        BurningTask.board_name, 
-        func.count(BurningTask.id)
-    ).filter(
-        BurningTask.created_at >= target_since,
-        BurningTask.board_name.isnot(None),
-        BurningTask.board_name != ""
-    ).group_by(BurningTask.board_name).order_by(desc(func.count(BurningTask.id))).limit(5).all()
-
-    for board, count in board_counts:
-        target_data.append({"name": str(board).strip(), "value": count})
-
-    # 6. 动态通知（与消息中心同源）
-    latest_messages = (
-        db.query(Message)
-        .filter(Message.user_id == current_user.id)
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(5)
-        .all()
+    # 4. 动态通知（与消息中心同源）
+    latest_messages, parsed_message_payloads = get_latest_visible_messages(
+        db,
+        current_user,
+        limit=5,
     )
-    notification_events = [_build_message_preview(item, db) for item in latest_messages]
+    enriched_message_payloads = enrich_task_message_payloads(
+        db,
+        parsed_message_payloads,
+        messages=latest_messages,
+    )
+    notification_events = [
+        _build_message_preview(item, payload=payload)
+        for item, payload in zip(latest_messages, enriched_message_payloads)
+    ]
     notified_task_nos = {
-        str(_parse_message_payload(str(getattr(item, "content", None) or "")).get("task_no") or "").strip()
-        for item in latest_messages
+        str(payload.get("task_no") or "").strip()
+        for payload in enriched_message_payloads
     }
     notified_task_nos.discard("")
 
     recent_tasks = (
-        db.query(BurningTask)
+        _scoped_task_query(db, current_user)
         .filter(BurningTask.created_by_user_id == current_user.id)
         .order_by(BurningTask.updated_at.desc(), BurningTask.id.desc())
         .limit(8)
@@ -421,23 +594,52 @@ async def get_dashboard_stats(
     )
     notifications = [{key: value for key, value in item.items() if key != "_sort_time"} for item in notification_events[:8]]
 
+    welcome = {
+        "displayName": str(
+            getattr(current_user, "display_name", None)
+            or getattr(current_user, "username", None)
+            or "用户"
+        ),
+        "dateLabel": _build_date_label(display_now),
+    }
+    shortcuts = _build_shortcuts(db, current_user)
+
+    # Do not retain a SQLite transaction or session-bound lazy attributes while
+    # local USB and remote Agent probes are running in worker threads.
+    for burner in burners:
+        db.expunge(burner)
+    db.rollback()
+    runtime_status_by_id, _usb_device_count = await _compute_burner_runtime_statuses(
+        burners,
+        occupied_burner_ids,
+    )
+    burner_statuses = [runtime_status_by_id.get(burner.id, 1) for burner in burners]
+    burner_idle = sum(1 for status in burner_statuses if status == 0)
+    burner_in_use = sum(1 for status in burner_statuses if status == 2)
+    burner_offline = sum(1 for status in burner_statuses if status in (1, 3))
+
     return {
         "code": 0,
         "message": "success",
         "data": {
-            "welcome": {
-                "displayName": str(getattr(current_user, "display_name", None) or getattr(current_user, "username", None) or "用户"),
-                "dateLabel": _build_date_label(now),
-            },
-            "shortcuts": _build_shortcuts(db, current_user),
+            "welcome": welcome,
+            "shortcuts": shortcuts,
             "stats": {
                 "todayTasks": today_count,
                 "taskGrowth": task_growth,
+                "taskGrowthAvailable": task_growth_available,
                 "successRate": today_rate,
+                "successRateAvailable": today_rate_available,
                 "rateGrowth": rate_growth,
+                "rateGrowthAvailable": rate_growth_available,
+                "todayCompletedTasks": today_metrics["completed"],
+                "todaySuccessfulTasks": today_metrics["success"],
+                "yesterdayTasks": yesterday_count,
+                "yesterdayCompletedTasks": yesterday_metrics["completed"],
+                "yesterdaySuccessfulTasks": yesterday_metrics["success"],
                 "burnerIdle": burner_idle,
                 "burnerInUse": burner_in_use,
-                "burnerOffline": burner_offline
+                "burnerOffline": burner_offline,
             },
             "trendData": trend_data,
             "targetData": target_data,

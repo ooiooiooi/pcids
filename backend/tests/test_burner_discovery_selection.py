@@ -142,6 +142,79 @@ class BurnerDiscoverySelectionTests(unittest.TestCase):
 
         self.assertEqual(updates, [{"id": burner.id, "status": 1}])
 
+    def test_strategy_two_probe_only_exact_scanned_identity_is_online(self):
+        burner = self.burners[0]
+        burner.type = "Gowin USB Cable"
+        burner.strategy = 2
+        burner.sn = ""
+        burner.port = r"USB\VID_1234&PID_ABCD\6&123ABC&0&3"
+        burner.host_address = "192.168.0.18"
+        burner.is_enabled = True
+        burner.config_json = json.dumps(
+            {
+                "usb_binding": {
+                    "pnp_device_id": burner.port,
+                    "container_id": "{B64FBDBE-6EBD-48BA-8BE8-E6957653C04B}",
+                    "vendor_id": "1234",
+                    "product_id": "ABCD",
+                }
+            }
+        )
+        candidate = {
+            "candidate_id": "explicitly-bound-generic-device",
+            "type": LOCATION_PROBE_CANDIDATE_TYPE,
+            "device_category": "probe_only",
+            "detected_name": "USB Composite Device",
+            "sn": None,
+            "port": burner.port,
+            "node_key": "192.168.0.18",
+            "node_type": "local",
+            "node_label": "local",
+            "probe_only": True,
+            "usb_binding": json.loads(burner.config_json)["usb_binding"],
+        }
+
+        updates = _resolve_discovery_status_updates([burner], [candidate], "all", set())
+
+        self.assertEqual(updates, [{"id": burner.id, "status": 0}])
+
+    def test_registered_probe_only_exact_identity_is_not_offered_as_new_device(self):
+        burner = self.burners[0]
+        burner.type = "Gowin USB Cable"
+        burner.strategy = 2
+        burner.sn = ""
+        burner.port = r"USB\VID_1234&PID_ABCD\6&123ABC&0&3"
+        burner.host_address = "127.0.0.1"
+        burner.config_json = json.dumps(
+            {
+                "usb_binding": {
+                    "pnp_device_id": burner.port,
+                    "container_id": "{B64FBDBE-6EBD-48BA-8BE8-E6957653C04B}",
+                    "vendor_id": "1234",
+                    "product_id": "ABCD",
+                }
+            }
+        )
+        self.candidates = [
+            {
+                "candidate_id": "already-bound-generic-device",
+                "type": LOCATION_PROBE_CANDIDATE_TYPE,
+                "device_category": "probe_only",
+                "detected_name": "USB Composite Device",
+                "sn": None,
+                "port": burner.port,
+                "node_key": "127.0.0.1",
+                "node_type": "local",
+                "node_label": "local",
+                "probe_only": True,
+                "usb_binding": json.loads(burner.config_json)["usb_binding"],
+            }
+        ]
+
+        payload = self._payload()
+
+        self.assertEqual(payload["probe_only_devices"], [])
+
     def test_unplugged_al321_does_not_inherit_ch340_on_shared_parent_hub(self):
         burner = self.burners[0]
         burner.type = "AL321"

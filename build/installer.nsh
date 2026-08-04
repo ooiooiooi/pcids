@@ -17,6 +17,8 @@
   ; CodeArts Agent commonly runs under a different service account.
   WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_FLASH_ADAPTER" "$INSTDIR\resources\flash-adapter\pcids-flash.cmd"
   DetailPrint "Configured PCIDS_FLASH_ADAPTER for CodeArts Agent."
+  WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_INSTALL_ADAPTER" "$INSTDIR\resources\install-adapter\pcids-install.cmd"
+  DetailPrint "Configured PCIDS_INSTALL_ADAPTER for CodeArts Agent."
 
   ; The LAN Agent discovery configuration is deliberately external to the
   ; application package.  Preserve an operator-edited file on upgrades.
@@ -49,5 +51,6 @@
 
 !macro customUnInstall
   DeleteRegValue HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_FLASH_ADAPTER"
+  DeleteRegValue HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PCIDS_INSTALL_ADAPTER"
   !insertmacro CloseRunningPcidsProcesses
 !macroend
