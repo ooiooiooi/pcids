@@ -7,6 +7,10 @@ const source = fs.readFileSync(
   path.resolve(process.cwd(), 'src/pages/Repository/index.tsx'),
   'utf8',
 )
+const apiSource = fs.readFileSync(
+  path.resolve(process.cwd(), 'src/services/api.ts'),
+  'utf8',
+)
 
 test('Web 页面库保留独立项目模式并支持修改项目', () => {
   assert.match(source, /private_source \|\| n\.repo_detail\?\.private_source/)
@@ -60,4 +64,18 @@ test('failed first sync rolls back the newly-created project', () => {
   assert.match(source, /let createdProjectId = ''/)
   assert.match(source, /configResult\?\.data\?\.created/)
   assert.match(source, /await repositoryApi\.rollbackNewCodeartsProject\(createdProjectId\)/)
+})
+
+test('CodeArts project sync allows the backend Web session to run for 31 minutes', () => {
+  assert.match(
+    apiSource,
+    /syncCodeartsProject:[\s\S]*?\/repositories\/codearts\/sync[\s\S]*?timeout:\s*31 \* 60 \* 1000/,
+  )
+})
+
+test('an unknown initial sync result preserves the newly-created project configuration', () => {
+  assert.match(source, /function isCodeartsSyncOutcomeUnknown\(error: any\)/)
+  assert.match(source, /return timedOut \|\| !error\?\.response/)
+  assert.match(source, /if \(createdProjectId && !syncOutcomeUnknown\)/)
+  assert.match(source, /已保留项目配置，请稍后刷新仓库确认同步结果/)
 })

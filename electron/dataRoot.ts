@@ -5,17 +5,21 @@ export type DataRootResolution = {
   dataRoot: string
   markerPath: string
   databasePath: string
+  migratedFrom?: string
+  migrationBackup?: string
 }
 
 type ResolveDataRootOptions = {
-  machineRoot: string
-  legacyRoot: string
+  targetRoot: string
+  legacyRoots?: string[]
   configuredRoot?: string
 }
 
 type DataRootMarker = {
-  version: 1
+  version: 2
   dataRoot: string
+  migratedFrom?: string
+  migrationBackup?: string
 }
 
 function normalizeRoot(value: string): string {
@@ -30,81 +34,129 @@ function databasePath(root: string): string {
   return path.join(root, 'app_data.db')
 }
 
-function readMarker(markerPath: string): string | null {
-  if (!fs.existsSync(markerPath)) return null
-
-  let parsed: Partial<DataRootMarker>
-  try {
-    parsed = JSON.parse(fs.readFileSync(markerPath, 'utf8')) as Partial<DataRootMarker>
-  } catch (error) {
-    throw new Error(`PCIDS 单一数据库锁定文件损坏：${markerPath}；${String(error)}`)
-  }
-
-  if (parsed.version !== 1 || !String(parsed.dataRoot || '').trim()) {
-    throw new Error(`PCIDS 单一数据库锁定文件内容无效：${markerPath}`)
-  }
-  return normalizeRoot(String(parsed.dataRoot))
+function uniqueRoots(values: Array<string | null | undefined>): string[] {
+  return values
+    .filter((value): value is string => Boolean(String(value || '').trim()))
+    .map(normalizeRoot)
+    .filter((value, index, roots) => roots.findIndex((root) => samePath(root, value)) === index)
 }
 
-function writeMarker(markerPath: string, dataRoot: string): void {
+function timestampSuffix(): string {
+  return new Date().toISOString().replace(/[-:.TZ]/g, '')
+}
+
+function writeMarker(markerPath: string, marker: DataRootMarker): void {
   fs.mkdirSync(path.dirname(markerPath), { recursive: true })
   const temporaryPath = `${markerPath}.${process.pid}.tmp`
-  const payload: DataRootMarker = { version: 1, dataRoot: normalizeRoot(dataRoot) }
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(marker, null, 2)}\n`, 'utf8')
   fs.renameSync(temporaryPath, markerPath)
 }
 
+function copyAndArchiveLegacyRoot(
+  sourceRoot: string,
+  targetRoot: string,
+  supplementalRoots: string[],
+): string {
+  const targetParent = path.dirname(targetRoot)
+  const suffix = `${timestampSuffix()}-${process.pid}`
+  const stagingRoot = path.join(targetParent, `${path.basename(targetRoot)}.migrating-${suffix}`)
+  const sourceBackup = path.join(
+    path.dirname(sourceRoot),
+    `${path.basename(sourceRoot)}.migrated-backup-${suffix}`,
+  )
+
+  fs.mkdirSync(targetParent, { recursive: true })
+  fs.cpSync(sourceRoot, stagingRoot, { recursive: true, errorOnExist: true })
+
+  for (const root of supplementalRoots) {
+    for (const name of ['agent.json', 'agent-discovery.yaml', 'repository_download.yaml']) {
+      const source = path.join(root, name)
+      const destination = path.join(stagingRoot, name)
+      if (fs.existsSync(source) && !fs.existsSync(destination)) {
+        fs.copyFileSync(source, destination)
+      }
+    }
+  }
+
+  const sourceDatabase = databasePath(sourceRoot)
+  const stagedDatabase = databasePath(stagingRoot)
+  const sourceSize = fs.statSync(sourceDatabase).size
+  const stagedSize = fs.statSync(stagedDatabase).size
+  if (sourceSize !== stagedSize) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true })
+    throw new Error(`PCIDS 旧数据库迁移校验失败：${sourceDatabase}`)
+  }
+
+  let sourceArchived = false
+  try {
+    fs.renameSync(sourceRoot, sourceBackup)
+    sourceArchived = true
+    if (fs.existsSync(targetRoot)) {
+      // Keep the directory object created by NSIS so its writable ACL remains
+      // intact even when the application is installed below Program Files.
+      fs.cpSync(stagingRoot, targetRoot, { recursive: true, force: true })
+      fs.rmSync(stagingRoot, { recursive: true, force: true })
+    } else {
+      fs.renameSync(stagingRoot, targetRoot)
+    }
+    return sourceBackup
+  } catch (error) {
+    if (sourceArchived && !fs.existsSync(sourceRoot) && fs.existsSync(sourceBackup)) {
+      fs.renameSync(sourceBackup, sourceRoot)
+    }
+    if (fs.existsSync(stagingRoot)) fs.rmSync(stagingRoot, { recursive: true, force: true })
+    throw error
+  }
+}
+
 /**
- * Select exactly one persistent database root for an installed workstation.
- *
- * The first packaged start pins the selected root in ProgramData. Subsequent
- * starts reuse that path even when Windows user, elevation state, APPDATA, or
- * installation directory changes. If two known roots already contain a
- * database, startup is stopped instead of silently selecting an empty/wrong
- * database.
+ * Store packaged application data below the selected installation directory.
+ * An explicit PCIDS_DATA_DIR remains available for managed deployments/tests.
+ * A single legacy database is migrated with a recoverable archived copy; two
+ * databases stop startup so that neither can be silently overwritten.
  */
 export function resolveSingleDataRoot(options: ResolveDataRootOptions): DataRootResolution {
-  const machineRoot = normalizeRoot(options.machineRoot)
-  const legacyRoot = normalizeRoot(options.legacyRoot)
-  const configuredRoot = String(options.configuredRoot || '').trim()
-    ? normalizeRoot(String(options.configuredRoot))
-    : null
-  const markerPath = path.join(machineRoot, 'data-root.json')
-  const pinnedRoot = readMarker(markerPath)
-
-  const candidateRoots = [machineRoot, legacyRoot, configuredRoot, pinnedRoot]
-    .filter((value): value is string => Boolean(value))
-    .filter((value, index, values) => values.findIndex((item) => samePath(item, value)) === index)
+  const targetRoot = normalizeRoot(
+    String(options.configuredRoot || '').trim() || options.targetRoot,
+  )
+  const legacyRoots = uniqueRoots(options.legacyRoots || []).filter(
+    (root) => !samePath(root, targetRoot),
+  )
+  const candidateRoots = uniqueRoots([targetRoot, ...legacyRoots])
   const rootsWithDatabase = candidateRoots.filter((root) => fs.existsSync(databasePath(root)))
 
   if (rootsWithDatabase.length > 1) {
     throw new Error(
-      '检测到多份 PCIDS 数据库，已停止启动以避免读取错误数据。请保留唯一数据库后重试：\n' +
+      '检测到多份 PCIDS 数据库，已停止启动以避免读取或覆盖错误数据。请只保留一份数据库后重试：\n' +
         rootsWithDatabase.map((root) => databasePath(root)).join('\n'),
     )
   }
 
-  let dataRoot: string
-  if (pinnedRoot) {
-    dataRoot = pinnedRoot
-    if (rootsWithDatabase.length === 1 && !samePath(rootsWithDatabase[0], pinnedRoot)) {
-      throw new Error(
-        `PCIDS 已锁定数据库目录 ${pinnedRoot}，但数据库出现在 ${rootsWithDatabase[0]}。` +
-          '已停止启动，防止自动创建第二份数据库。',
-      )
-    }
-  } else if (rootsWithDatabase.length === 1) {
-    dataRoot = rootsWithDatabase[0]
+  let migratedFrom: string | undefined
+  let migrationBackup: string | undefined
+  if (rootsWithDatabase.length === 1 && !samePath(rootsWithDatabase[0], targetRoot)) {
+    migratedFrom = rootsWithDatabase[0]
+    migrationBackup = copyAndArchiveLegacyRoot(
+      migratedFrom,
+      targetRoot,
+      legacyRoots.filter((root) => !samePath(root, migratedFrom as string)),
+    )
   } else {
-    dataRoot = configuredRoot || machineRoot
+    fs.mkdirSync(targetRoot, { recursive: true })
   }
 
-  fs.mkdirSync(dataRoot, { recursive: true })
-  if (!pinnedRoot) writeMarker(markerPath, dataRoot)
+  const markerPath = path.join(targetRoot, 'data-root.json')
+  writeMarker(markerPath, {
+    version: 2,
+    dataRoot: targetRoot,
+    ...(migratedFrom ? { migratedFrom, migrationBackup } : {}),
+  })
 
   return {
-    dataRoot,
+    dataRoot: targetRoot,
     markerPath,
-    databasePath: databasePath(dataRoot),
+    databasePath: databasePath(targetRoot),
+    migratedFrom,
+    migrationBackup,
   }
 }

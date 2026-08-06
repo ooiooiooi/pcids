@@ -356,13 +356,9 @@ def run_wch_gpio_action(
             func, direction, data = _read_config(dll, handle, prop)
             raw_status = int(status.value)
             
-            # `set_level` reports the configured output level after CH910x_GpioSet.
-            # Explicit read actions follow CH910x_GpioGet, which matches the official demo tool.
-            is_output = bool(direction & mask)
-            if is_output and normalized_action == "set_level":
-                level = "高电平" if (data & mask) else "低电平"
-            else:
-                level = "高电平" if (raw_status & mask) else "低电平"
+            # Always report the sampled pin state. The configured data bit is only
+            # the output latch value and can hide wiring/short-circuit failures.
+            level = "高电平" if (raw_status & mask) else "低电平"
                 
             return WchGpioResult(
                 com_port=str(com_port or "").strip().upper(),

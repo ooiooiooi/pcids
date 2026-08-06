@@ -10,7 +10,19 @@ from .script import Script
 from .task import BurningTask
 from .log import Record, Injection, InjectionRun, ProtocolTest, ProtocolSession, ProtocolLog, LoginLog, OperationLog
 from .permission import Menu, Permission, RolePermission
-from .repository import Repository, RepositoryProjectSetting, RepositoryProjectMember, RepositorySyncJob, RepositorySyncChange, RepositorySyncState
+from .repository import (
+    Repository,
+    RepositoryProjectSetting,
+    RepositoryProjectMember,
+    RepositorySyncJob,
+    RepositorySyncChange,
+    RepositorySyncState,
+    RepositorySyncCursor,
+    RepositorySyncInstance,
+    RepositorySyncReceipt,
+    RepositorySyncPeer,
+    RepositorySyncLease,
+)
 from .message import Message
 
 __all__ = [
@@ -39,5 +51,10 @@ __all__ = [
     "RepositorySyncJob",
     "RepositorySyncChange",
     "RepositorySyncState",
+    "RepositorySyncCursor",
+    "RepositorySyncInstance",
+    "RepositorySyncReceipt",
+    "RepositorySyncPeer",
+    "RepositorySyncLease",
     "Message",
 ]

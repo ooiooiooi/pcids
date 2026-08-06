@@ -8,15 +8,13 @@ const mainSource = fs.readFileSync(
   'utf8',
 )
 
-test('packaged runtime logs follow the executable installation directory', () => {
+test('packaged runtime logs stay below the writable data directory', () => {
   assert.match(
     mainSource,
     /function getRuntimeRoot\(\): string \{\s*return app\.isPackaged \? path\.dirname\(process\.execPath\)/,
   )
-  assert.match(
-    mainSource,
-    /app\.isPackaged\s*\?\s*path\.join\(getRuntimeRoot\(\), 'logs'\)/,
-  )
+  assert.match(mainSource, /const logRoot = path\.join\(dataRoot, 'logs'\)/)
+  assert.match(mainSource, /path\.join\(singleDataRoot, 'logs'\)/)
   assert.match(mainSource, /PCIDS_LOG_DIR: logRoot/)
   assert.doesNotMatch(mainSource, /C:\\\\Program Files\\\\pcids\\\\logs/i)
 })

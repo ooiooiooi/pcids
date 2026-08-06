@@ -534,10 +534,22 @@ async def lifespan(app: FastAPI):
         run_startup_diagnostics(),
         name="pcids-startup-diagnostics",
     )
+    repository_sync_task = asyncio.create_task(
+        repositories.run_repository_data_sync_coordinator(),
+        name="pcids-repository-data-sync-coordinator",
+    )
     app.state.startup_diagnostics_task = diagnostics_task
+    app.state.repository_data_sync_task = repository_sync_task
     try:
         yield
     finally:
+        repository_sync_task.cancel()
+        try:
+            await repository_sync_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("repository.data_sync.coordinator_shutdown_failed")
         await injections.shutdown_active_injections()
         protocol_tests.cleanup_protocol_session_resources()
         if diagnostics_task.done():

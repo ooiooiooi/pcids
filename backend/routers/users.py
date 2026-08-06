@@ -10,7 +10,13 @@ from passlib.context import CryptContext
 from backend.utils.db import get_db
 from backend.models.log import LoginLog, OperationLog, Record, InjectionRun, ProtocolSession
 from backend.models.message import Message
-from backend.models.repository import Repository, RepositoryProjectMember, RepositoryProjectSetting
+from backend.models.repository import (
+    Repository,
+    RepositoryProjectMember,
+    RepositoryProjectSetting,
+    RepositorySyncChange,
+    RepositorySyncJob,
+)
 from backend.models.task import BurningTask
 from backend.models.user import User
 from backend.schemas import (
@@ -415,8 +421,20 @@ async def delete_user(
         {Repository.created_by_user_id: None},
         synchronize_session=False,
     )
+    db.query(RepositorySyncJob).filter(RepositorySyncJob.triggered_by_user_id == user_id).update(
+        {RepositorySyncJob.triggered_by_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(RepositorySyncChange).filter(RepositorySyncChange.created_by_user_id == user_id).update(
+        {RepositorySyncChange.created_by_user_id: None},
+        synchronize_session=False,
+    )
     db.query(BurningTask).filter(BurningTask.created_by_user_id == user_id).update(
         {BurningTask.created_by_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(BurningTask).filter(BurningTask.terminated_by_user_id == user_id).update(
+        {BurningTask.terminated_by_user_id: None},
         synchronize_session=False,
     )
     db.query(Record).filter(Record.created_by_user_id == user_id).update(

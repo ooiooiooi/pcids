@@ -2163,6 +2163,8 @@ def _render_gpio_action_spec(config: dict[str, Any], pin: str, action: str) -> t
             "action": action,
             "mode": merged.get("mode"),
             "target_level": merged.get("target_level"),
+            "trigger_type": merged.get("trigger_type"),
+            "timeout_ms": merged.get("timeout_ms"),
             "reply": {
                 "required": True,
                 "high_pattern": [r"\bHIGH\b", "高电平"],
@@ -2348,23 +2350,71 @@ async def _execute_gpio_transport_action(
         existing_connection = _get_wch_gpio_session_connection(session.id)
         if existing_connection is None:
             raise RuntimeError("GPIO WCH 连接已失效，请重新连接通道")
-        result = await asyncio.to_thread(
-            run_wch_gpio_action,
-            com_port=com_port,
-            pin=pin,
-            action=action,
-            target_level=target_level,
-            base_index=base_index,
-            pin_map=pin_map,
-            read_as_output=read_as_output,
-            existing_connection=existing_connection,
-        )
+        async def sample_gpio() -> Any:
+            return await asyncio.to_thread(
+                run_wch_gpio_action,
+                com_port=com_port,
+                pin=pin,
+                action=action,
+                target_level=target_level,
+                base_index=base_index,
+                pin_map=pin_map,
+                read_as_output=read_as_output,
+                existing_connection=existing_connection,
+            )
+
+        listen_deadline: Optional[float] = None
+        if action == "listen":
+            requested_timeout_ms = _parse_non_negative_int(
+                action_spec.get("timeout_ms")
+                or request_cfg.get("timeout_ms")
+                or transport_config.get("timeout_ms"),
+                5000,
+            ) or 5000
+            listen_deadline = time.monotonic() + requested_timeout_ms / 1000.0
+
+        result = await sample_gpio()
+        if action == "listen":
+            trigger_type = str(
+                action_spec.get("trigger_type")
+                or request_cfg.get("trigger_type")
+                or transport_config.get("trigger_type")
+                or "上升沿"
+            ).strip()
+            timeout_ms = requested_timeout_ms
+            poll_interval_ms = _parse_non_negative_int(transport_config.get("poll_interval_ms"), 20) or 20
+            poll_interval_seconds = min(max(poll_interval_ms, 1), 100) / 1000.0
+            deadline = listen_deadline or time.monotonic()
+            previous_level = result.level
+            while True:
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise TimeoutError(f"GPIO {pin} 等待{trigger_type}超时（{timeout_ms}ms）")
+                await asyncio.sleep(min(poll_interval_seconds, remaining_seconds))
+                next_result = await sample_gpio()
+                if _gpio_edge_matches(previous_level, next_result.level, trigger_type):
+                    result = next_result
+                    break
+                previous_level = next_result.level
         level_text = "HIGH" if result.level == "高电平" else "LOW"
         return (
             f"{result.pin}={level_text} "
             f"(bit={result.gpio_index}, dir=0x{result.raw_dir:X}, status=0x{result.raw_status:X})"
         ), 1
     raise RuntimeError(f"暂不支持的 GPIO 真实业务链路：{transport_kind or '-'}")
+
+
+def _gpio_edge_matches(previous_level: str, current_level: str, trigger_type: str) -> bool:
+    previous = str(previous_level or "").strip()
+    current = str(current_level or "").strip()
+    normalized_trigger = str(trigger_type or "").strip().lower()
+    if normalized_trigger in {"上升沿", "rising", "rise"}:
+        return previous == "低电平" and current == "高电平"
+    if normalized_trigger in {"下降沿", "falling", "fall"}:
+        return previous == "高电平" and current == "低电平"
+    if normalized_trigger in {"双边沿", "双沿", "both", "both_edges"}:
+        return previous in {"高电平", "低电平"} and current in {"高电平", "低电平"} and previous != current
+    raise ValueError(f"不支持的 GPIO 触发类型：{trigger_type}")
 
 
 def _validate_gpio_reply_pattern(reply_config: dict[str, Any], reply_text: str) -> bool:

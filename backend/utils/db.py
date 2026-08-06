@@ -11,8 +11,13 @@ from typing import Optional
 import json
 import os
 import re
+import uuid
 from threading import Lock
 from backend.utils.app_paths import get_app_data_root
+from backend.utils.repository_sync_identity import (
+    generate_codearts_repository_sync_uuid,
+    generate_repository_sync_uuid,
+)
 from backend.utils.text_normalization import normalize_text, normalize_text_payload
 
 
@@ -2391,6 +2396,366 @@ def _migrate_legacy_message_times_to_utc():
         )
 
 
+def _new_unique_sync_identifier(used_values: set[str]) -> str:
+    while True:
+        candidate = uuid.uuid4().hex
+        if candidate not in used_values:
+            used_values.add(candidate)
+            return candidate
+
+
+def _backfill_repository_sync_identifiers() -> None:
+    """Make repository sync identities usable before the unique index is built.
+
+    Older databases can contain empty identifiers or duplicate identifiers in a
+    project.  Existing non-empty identifiers remain stable.  Missing identities
+    use the same deterministic CodeArts path seed as runtime writes, allowing
+    independently upgraded copies of the same repository data to converge.  A
+    random identifier is used only when no stable seed exists or a duplicate
+    row needs disambiguation.
+
+    Any outbox rows tied to a repository database ID move with it, while an
+    existing canonical state remains attached to the first repository carrying
+    that identity.
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id, project_key, sync_uuid, name, description, display_path, download_uri, "
+                "source_type, remote_repo_id, repo_id, repo_detail_json "
+                "FROM repositories ORDER BY id"
+            )
+        ).mappings().fetchall()
+        if not rows:
+            return
+
+        project_repository_modes: dict[str, str] = {}
+        has_setting_table = bool(
+            conn.execute(
+                text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'repository_project_settings'"
+                )
+            ).first()
+        )
+        if has_setting_table:
+            setting_rows = conn.execute(
+                text(
+                    "SELECT project_key, codearts_config_json "
+                    "FROM repository_project_settings"
+                )
+            ).mappings().fetchall()
+            for setting_row in setting_rows:
+                try:
+                    setting_config = json.loads(str(setting_row["codearts_config_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    setting_config = {}
+                if isinstance(setting_config, dict):
+                    project_repository_modes[str(setting_row["project_key"] or "")] = str(
+                        setting_config.get("repository_mode") or ""
+                    ).strip()
+
+        used_values = {
+            str(row["sync_uuid"] or "").strip()
+            for row in rows
+            if str(row["sync_uuid"] or "").strip()
+        }
+        reserved_pairs = {
+            (
+                None if row["project_key"] is None else str(row["project_key"]),
+                str(row["sync_uuid"] or "").strip(),
+            )
+            for row in rows
+            if str(row["sync_uuid"] or "").strip()
+        }
+        seen_pairs: set[tuple[Optional[str], str]] = set()
+        updates: list[tuple[int, str, Optional[str]]] = []
+
+        for row in rows:
+            repository_id = int(row["id"])
+            project_key = None if row["project_key"] is None else str(row["project_key"])
+            raw_sync_uuid = str(row["sync_uuid"] or "")
+            normalized_sync_uuid = raw_sync_uuid.strip()
+            pair = (project_key, normalized_sync_uuid)
+            needs_replacement = not normalized_sync_uuid or pair in seen_pairs
+
+            if needs_replacement:
+                deterministic_uuid = None
+                if not normalized_sync_uuid:
+                    if str(row["source_type"] or "").strip() == "codearts_sync":
+                        repo_detail = {}
+                        try:
+                            repo_detail = json.loads(str(row["repo_detail_json"] or "{}"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            repo_detail = {}
+                        deterministic_uuid = generate_codearts_repository_sync_uuid(
+                            project_key=project_key,
+                            remote_repo_id=row["remote_repo_id"] or row["repo_id"],
+                            display_path=row["display_path"] or row["description"],
+                            name=row["name"],
+                            repository_mode=(
+                                repo_detail.get("repository_mode")
+                                or project_repository_modes.get(str(project_key or ""))
+                                if isinstance(repo_detail, dict)
+                                else project_repository_modes.get(str(project_key or ""))
+                            ),
+                        )
+                    else:
+                        deterministic_uuid = generate_repository_sync_uuid(
+                            project_key=project_key,
+                            display_path=row["display_path"] or row["description"],
+                            download_uri=row["download_uri"],
+                            name=row["name"],
+                        )
+                deterministic_pair = (project_key, str(deterministic_uuid or ""))
+                if (
+                    deterministic_uuid
+                    and deterministic_pair not in reserved_pairs
+                    and deterministic_pair not in seen_pairs
+                ):
+                    normalized_sync_uuid = deterministic_uuid
+                    used_values.add(normalized_sync_uuid)
+                else:
+                    normalized_sync_uuid = _new_unique_sync_identifier(used_values)
+                pair = (project_key, normalized_sync_uuid)
+
+            seen_pairs.add(pair)
+            if normalized_sync_uuid != raw_sync_uuid:
+                updates.append((repository_id, normalized_sync_uuid, project_key))
+
+        has_change_table = bool(
+            conn.execute(
+                text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'repository_sync_changes'"
+                )
+            ).first()
+        )
+        for repository_id, sync_uuid_value, project_key in updates:
+            conn.execute(
+                text("UPDATE repositories SET sync_uuid = :sync_uuid WHERE id = :repository_id"),
+                {"sync_uuid": sync_uuid_value, "repository_id": repository_id},
+            )
+            if not has_change_table:
+                continue
+            change_rows = conn.execute(
+                text(
+                    "SELECT id, payload_json FROM repository_sync_changes "
+                    "WHERE repo_db_id = :repository_id"
+                ),
+                {"repository_id": repository_id},
+            ).mappings().fetchall()
+            for change_row in change_rows:
+                payload_json = change_row["payload_json"]
+                normalized_payload_json = payload_json
+                if payload_json:
+                    try:
+                        payload = json.loads(str(payload_json))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        payload["sync_uuid"] = sync_uuid_value
+                        if project_key is not None:
+                            payload["project_key"] = project_key
+                        normalized_payload_json = json.dumps(payload, ensure_ascii=False)
+                conn.execute(
+                    text(
+                        "UPDATE repository_sync_changes "
+                        "SET repo_sync_uuid = :sync_uuid, payload_json = :payload_json, "
+                        "payload_hash = NULL "
+                        "WHERE id = :change_id"
+                    ),
+                    {
+                        "sync_uuid": sync_uuid_value,
+                        "payload_json": normalized_payload_json,
+                        "change_id": int(change_row["id"]),
+                    },
+                )
+
+
+def _backfill_repository_change_identifiers() -> None:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id, change_uuid FROM repository_sync_changes "
+                "ORDER BY id"
+            )
+        ).mappings().fetchall()
+        used_values = {
+            str(row["change_uuid"] or "").strip()
+            for row in rows
+            if str(row["change_uuid"] or "").strip()
+        }
+        seen_values: set[str] = set()
+        for row in rows:
+            raw_change_uuid = str(row["change_uuid"] or "")
+            normalized_change_uuid = raw_change_uuid.strip()
+            if not normalized_change_uuid or normalized_change_uuid in seen_values:
+                normalized_change_uuid = _new_unique_sync_identifier(used_values)
+            seen_values.add(normalized_change_uuid)
+            if normalized_change_uuid != raw_change_uuid:
+                conn.execute(
+                    text(
+                        "UPDATE repository_sync_changes "
+                        "SET change_uuid = :change_uuid WHERE id = :change_id"
+                    ),
+                    {
+                        "change_uuid": normalized_change_uuid,
+                        "change_id": int(row["id"]),
+                    },
+                )
+        conn.execute(
+            text(
+                "UPDATE repository_sync_changes "
+                "SET base_revision = COALESCE(base_revision, 0), "
+                "attempt_count = COALESCE(attempt_count, 0)"
+            )
+        )
+
+
+def _ensure_repository_sync_instance() -> str:
+    """Create and return the singleton marker owned by this database."""
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT instance_uuid FROM repository_sync_instances "
+                "WHERE id = 1"
+            )
+        ).first()
+        current = str(row[0] or "").strip() if row else ""
+        if current:
+            return current
+
+        instance_uuid = uuid.uuid4().hex
+        if row:
+            conn.execute(
+                text(
+                    "UPDATE repository_sync_instances "
+                    "SET instance_uuid = :instance_uuid, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = 1"
+                ),
+                {"instance_uuid": instance_uuid},
+            )
+        else:
+            conn.execute(
+                text(
+                    "INSERT INTO repository_sync_instances "
+                    "(id, instance_uuid, created_at, updated_at) "
+                    "VALUES (1, :instance_uuid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {"instance_uuid": instance_uuid},
+            )
+        return instance_uuid
+
+
+def _normalize_repository_sync_state_revisions() -> None:
+    """Make every state revision positive and unique within its project.
+
+    Legacy JSON snapshots assigned one revision to every repository in a
+    project.  Pull pagination advances with ``revision > cursor``; splitting
+    such duplicates across pages would permanently skip the tail.  Preserve
+    the first valid occurrence, move invalid/duplicate rows above both the
+    project's maximum state revision and its saved cursor, then advance the
+    cursor to the resulting maximum.
+    """
+
+    with engine.begin() as conn:
+        state_rows = conn.execute(
+            text(
+                "SELECT id, project_key, revision "
+                "FROM repository_sync_states "
+                "ORDER BY project_key, id"
+            )
+        ).mappings().fetchall()
+        if not state_rows:
+            return
+
+        cursor_rows = conn.execute(
+            text(
+                "SELECT project_key, current_revision "
+                "FROM repository_sync_cursors"
+            )
+        ).mappings().fetchall()
+        cursor_by_project: dict[str, int] = {}
+        for row in cursor_rows:
+            project_key = str(row["project_key"] or "")
+            try:
+                cursor_by_project[project_key] = max(int(row["current_revision"] or 0), 0)
+            except (TypeError, ValueError):
+                cursor_by_project[project_key] = 0
+
+        rows_by_project: dict[str, list] = {}
+        for row in state_rows:
+            rows_by_project.setdefault(str(row["project_key"] or ""), []).append(row)
+
+        revision_updates: list[dict[str, int]] = []
+        cursor_updates: list[dict[str, object]] = []
+        for project_key, project_rows in rows_by_project.items():
+            parsed_revisions: list[int] = []
+            for row in project_rows:
+                try:
+                    parsed_revisions.append(int(row["revision"] or 0))
+                except (TypeError, ValueError):
+                    parsed_revisions.append(0)
+
+            next_revision = max(
+                [value for value in parsed_revisions if value > 0]
+                + [cursor_by_project.get(project_key, 0), 0]
+            )
+            seen_revisions: set[int] = set()
+            for row, revision in zip(project_rows, parsed_revisions):
+                normalized_revision = revision
+                if normalized_revision <= 0 or normalized_revision in seen_revisions:
+                    next_revision += 1
+                    normalized_revision = next_revision
+                    revision_updates.append(
+                        {
+                            "state_id": int(row["id"]),
+                            "revision": normalized_revision,
+                        }
+                    )
+                seen_revisions.add(normalized_revision)
+
+            effective_cursor = max(
+                seen_revisions or {0},
+                default=0,
+            )
+            effective_cursor = max(
+                effective_cursor,
+                next_revision,
+                cursor_by_project.get(project_key, 0),
+            )
+            cursor_updates.append(
+                {
+                    "project_key": project_key,
+                    "current_revision": effective_cursor,
+                }
+            )
+
+        if revision_updates:
+            conn.execute(
+                text(
+                    "UPDATE repository_sync_states "
+                    "SET revision = :revision, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = :state_id"
+                ),
+                revision_updates,
+            )
+        if cursor_updates:
+            conn.execute(
+                text(
+                    "INSERT INTO repository_sync_cursors "
+                    "(project_key, current_revision, created_at, updated_at) "
+                    "VALUES (:project_key, :current_revision, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(project_key) DO UPDATE SET "
+                    "current_revision = MAX(repository_sync_cursors.current_revision, excluded.current_revision), "
+                    "updated_at = CURRENT_TIMESTAMP"
+                ),
+                cursor_updates,
+            )
+
+
 def _ensure_schema_uncached():
     if engine.dialect.name != "sqlite":
         return
@@ -2499,6 +2864,44 @@ def _ensure_schema_uncached():
     ensure_column("repository_project_settings", "auto_sync_last_job_id", "INTEGER")
     ensure_column("repository_project_settings", "auto_sync_last_success_at", "DATETIME")
     ensure_column("repository_project_settings", "auto_sync_last_error", "TEXT")
+
+    ensure_column("repository_sync_changes", "change_uuid", "VARCHAR(64)")
+    ensure_column("repository_sync_changes", "parent_change_uuid", "VARCHAR(64)")
+    ensure_column("repository_sync_changes", "base_revision", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column("repository_sync_changes", "payload_hash", "VARCHAR(64)")
+    ensure_column("repository_sync_changes", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column("repository_sync_changes", "next_attempt_at", "DATETIME")
+    ensure_column("repository_sync_changes", "claim_token", "VARCHAR(64)")
+    ensure_column("repository_sync_changes", "claim_expires_at", "DATETIME")
+    ensure_column("repository_sync_changes", "server_revision", "INTEGER")
+    ensure_column("repository_sync_changes", "origin_node_id", "VARCHAR(64)")
+
+    _backfill_repository_sync_identifiers()
+    _backfill_repository_change_identifiers()
+    ensure_table(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_repositories_project_sync_uuid "
+        "ON repositories (project_key, sync_uuid) "
+        "WHERE project_key IS NOT NULL AND project_key <> '' "
+        "AND sync_uuid IS NOT NULL AND sync_uuid <> ''"
+    )
+    ensure_table(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_repository_sync_changes_change_uuid "
+        "ON repository_sync_changes (change_uuid) "
+        "WHERE change_uuid IS NOT NULL AND change_uuid <> ''"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_changes_project_status_next "
+        "ON repository_sync_changes (project_key, status, next_attempt_at, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_changes_project_sync_status "
+        "ON repository_sync_changes (project_key, repo_sync_uuid, status, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_changes_claim_expiry "
+        "ON repository_sync_changes (status, claim_expires_at, id)"
+    )
+
     ensure_table(
         """
         CREATE TABLE IF NOT EXISTS repository_sync_states (
@@ -2519,10 +2922,155 @@ def _ensure_schema_uncached():
         )
         """
     )
+    ensure_column("repository_sync_states", "payload_hash", "VARCHAR(64)")
+    ensure_column("repository_sync_states", "origin_node_id", "VARCHAR(64)")
+    ensure_column("repository_sync_states", "origin_change_uuid", "VARCHAR(64)")
+    ensure_column("repository_sync_states", "server_instance_id", "VARCHAR(64)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_project_key ON repository_sync_states (project_key)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_sync_uuid ON repository_sync_states (sync_uuid)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_revision ON repository_sync_states (revision)")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_deleted ON repository_sync_states (deleted)")
+    ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_origin_node_id ON repository_sync_states (origin_node_id)")
+    ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_origin_change_uuid ON repository_sync_states (origin_change_uuid)")
+    ensure_table("CREATE INDEX IF NOT EXISTS ix_repository_sync_states_server_instance_id ON repository_sync_states (server_instance_id)")
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_states_project_revision "
+        "ON repository_sync_states (project_key, revision, id)"
+    )
+
+    ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS repository_sync_cursors (
+            id INTEGER NOT NULL PRIMARY KEY,
+            project_key VARCHAR(200) NOT NULL UNIQUE,
+            current_revision INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_cursors_project_key "
+        "ON repository_sync_cursors (project_key)"
+    )
+    _normalize_repository_sync_state_revisions()
+    ensure_table(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_repository_sync_state_project_revision "
+        "ON repository_sync_states (project_key, revision)"
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO repository_sync_cursors (
+                    project_key, current_revision, created_at, updated_at
+                )
+                SELECT project_key, COALESCE(MAX(revision), 0),
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                FROM repository_sync_states
+                GROUP BY project_key
+                ON CONFLICT(project_key) DO UPDATE SET
+                    current_revision = MAX(
+                        repository_sync_cursors.current_revision,
+                        excluded.current_revision
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                """
+            )
+        )
+
+    ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS repository_sync_instances (
+            id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            instance_uuid VARCHAR(64) NOT NULL UNIQUE,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    _ensure_repository_sync_instance()
+
+    ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS repository_sync_receipts (
+            id INTEGER NOT NULL PRIMARY KEY,
+            change_uuid VARCHAR(64) NOT NULL UNIQUE,
+            node_id VARCHAR(64) NOT NULL,
+            project_key VARCHAR(200) NOT NULL,
+            sync_uuid VARCHAR(64) NOT NULL,
+            outcome VARCHAR(30) NOT NULL,
+            server_revision INTEGER,
+            request_hash VARCHAR(64),
+            result_json TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    ensure_column("repository_sync_receipts", "request_hash", "VARCHAR(64)")
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_receipts_request_hash "
+        "ON repository_sync_receipts (request_hash)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_receipts_project_revision "
+        "ON repository_sync_receipts (project_key, server_revision, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_receipts_node_project "
+        "ON repository_sync_receipts (node_id, project_key, id)"
+    )
+
+    ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS repository_sync_peers (
+            id INTEGER NOT NULL PRIMARY KEY,
+            project_key VARCHAR(200) NOT NULL,
+            server_base_url VARCHAR(1000) NOT NULL,
+            server_instance_id VARCHAR(64),
+            pulled_revision INTEGER NOT NULL DEFAULT 0,
+            bootstrap_completed_at DATETIME,
+            last_push_at DATETIME,
+            last_pull_at DATETIME,
+            last_success_at DATETIME,
+            last_error TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_key, server_base_url)
+        )
+        """
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_peers_project_key "
+        "ON repository_sync_peers (project_key)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_peers_server_instance "
+        "ON repository_sync_peers (server_instance_id, project_key)"
+    )
+
+    ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS repository_sync_leases (
+            id INTEGER NOT NULL PRIMARY KEY,
+            project_key VARCHAR(200) NOT NULL UNIQUE,
+            owner_id VARCHAR(64) NOT NULL,
+            lease_until DATETIME NOT NULL,
+            heartbeat_at DATETIME,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_leases_owner_id "
+        "ON repository_sync_leases (owner_id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_repository_sync_leases_expiry "
+        "ON repository_sync_leases (lease_until, project_key)"
+    )
     _migrate_legacy_message_times_to_utc()
 
 

@@ -1,13 +1,15 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.models import Base, Repository, RepositorySyncChange, RepositorySyncJob, RepositorySyncState, User
+from backend.models import Base, Repository, RepositorySyncChange, RepositorySyncCursor, RepositorySyncJob, RepositorySyncLease, RepositorySyncPeer, RepositorySyncState, User
 from backend.models.repository import RepositoryProjectSetting
 from backend.routers.repositories import (
     _SYNC_CHANGE_DELETE_SERVER,
@@ -21,17 +23,32 @@ from backend.routers.repositories import (
     _apply_project_auto_sync_state_to_local,
     _apply_repository_location_state,
     create_repository,
+    delete_project,
     delete_repository_artifact,
     recover_repository_auto_sync_jobs,
     trigger_codearts_auto_sync,
     update_repository,
     _run_repository_auto_sync_job,
+    _migrate_legacy_auto_sync_state,
+    _seed_repository_peer_snapshot,
+    rollback_new_codearts_project,
 )
 from backend.schemas import RepositoryCreate, RepositoryUpdate
 
 
 class RepositoryAutoSyncTests(unittest.TestCase):
     def setUp(self):
+        self.sync_config_patcher = patch(
+            "backend.routers.repositories._get_repository_data_sync_config",
+            return_value={
+                "enabled": True,
+                "role": "standalone",
+                "server_base_url": "",
+                "batch_size": 500,
+                "request_timeout_seconds": 30,
+            },
+        )
+        self.sync_config_patcher.start()
         self.engine = create_engine(
             "sqlite://",
             connect_args={"check_same_thread": False},
@@ -51,6 +68,7 @@ class RepositoryAutoSyncTests(unittest.TestCase):
         self.db.refresh(self.user)
 
     def tearDown(self):
+        self.sync_config_patcher.stop()
         self.db.close()
         Base.metadata.drop_all(bind=self.engine)
         self.engine.dispose()
@@ -93,6 +111,186 @@ class RepositoryAutoSyncTests(unittest.TestCase):
         self.assertTrue(file_detail.get("local_exists"))
         self.assertFalse(file_detail.get("server_exists"))
         self.assertTrue(file_detail.get("sync_deleted_on_server"))
+
+    def test_legacy_snapshot_assigns_unique_revisions_and_cursor(self):
+        project_key = "proj_legacy-multi"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            auto_sync_state_json=json.dumps(
+                {
+                    "revision": 3,
+                    "entries": {
+                        "sync-a": {"name": "A.bin"},
+                        "sync-b": {"name": "B.bin"},
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        )
+        self.db.add(setting)
+        self.db.commit()
+
+        migrated = _migrate_legacy_auto_sync_state(self.db, setting, project_key)
+        self.db.commit()
+
+        revisions = [
+            row.revision
+            for row in self.db.query(RepositorySyncState)
+            .filter(RepositorySyncState.project_key == project_key)
+            .order_by(RepositorySyncState.revision.asc())
+            .all()
+        ]
+        cursor = self.db.query(RepositorySyncCursor).filter_by(project_key=project_key).one()
+        self.assertEqual(migrated, 2)
+        self.assertEqual(revisions, [2, 3])
+        self.assertEqual(cursor.current_revision, 3)
+
+    def test_legacy_snapshot_drops_database_local_user_id(self):
+        project_key = "proj_legacy-user"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            auto_sync_state_json=json.dumps(
+                {
+                    "revision": 1,
+                    "entries": {
+                        "sync-user": {
+                            "name": "BOOT.bin",
+                            "created_by_user_id": 999999,
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        )
+        self.db.add(setting)
+        self.db.commit()
+
+        _migrate_legacy_auto_sync_state(self.db, setting, project_key)
+        self.db.commit()
+
+        state = self.db.query(RepositorySyncState).filter_by(project_key=project_key).one()
+        self.assertNotIn("created_by_user_id", json.loads(state.payload_json or "{}"))
+
+    def test_peer_state_never_uses_unknown_remote_user_id(self):
+        project_key = "proj_remote-user"
+        changed_count = _apply_project_auto_sync_state_to_local(
+            self.db,
+            project_key=project_key,
+            state={
+                "revision": 1,
+                "entries": {
+                    "sync-remote-user": {
+                        "name": "BOOT.bin",
+                        "created_by_user_id": 999999,
+                    }
+                },
+            },
+            fallback_user_id=888888,
+        )
+        self.db.commit()
+
+        repo = self.db.query(Repository).filter_by(project_key=project_key).one()
+        self.assertEqual(changed_count, 1)
+        self.assertIsNone(repo.created_by_user_id)
+
+    def test_delete_project_keeps_durable_tombstone_until_sync(self):
+        project_key = "proj_delete-durable"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            codearts_config_json=json.dumps(
+                {"enabled": True, "project_id": "delete-durable"},
+                ensure_ascii=False,
+            ),
+            updated_by_user_id=self.user.id,
+        )
+        repo = Repository(
+            name="BOOT.bin",
+            project_key=project_key,
+            sync_uuid="sync-delete-durable",
+            created_by_user_id=self.user.id,
+            source_type="codearts_sync",
+        )
+        self.db.add_all([setting, repo])
+        self.db.commit()
+
+        asyncio.run(delete_project(project_key, self.db, self.user, None))
+        self.db.expire_all()
+
+        self.assertEqual(self.db.query(Repository).filter_by(project_key=project_key).count(), 0)
+        change = self.db.query(RepositorySyncChange).filter_by(project_key=project_key).one()
+        self.assertEqual(change.change_type, _SYNC_CHANGE_DELETE_SERVER)
+        self.assertEqual(change.status, _SYNC_CHANGE_PENDING)
+        kept_setting = self.db.query(RepositoryProjectSetting).filter_by(project_key=project_key).one()
+        kept_config = json.loads(kept_setting.codearts_config_json or "{}")
+        self.assertTrue(kept_config.get("_data_sync_project_delete_pending"))
+
+    def test_project_setting_is_removed_after_delete_tombstone_publishes(self):
+        project_key = "proj_delete-published"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            codearts_config_json=json.dumps(
+                {"enabled": True, "project_id": "delete-published"},
+                ensure_ascii=False,
+            ),
+            updated_by_user_id=self.user.id,
+        )
+        repo = Repository(
+            name="BOOT.bin",
+            project_key=project_key,
+            sync_uuid="sync-delete-published",
+            created_by_user_id=self.user.id,
+            source_type="codearts_sync",
+        )
+        self.db.add_all([setting, repo])
+        self.db.commit()
+        asyncio.run(delete_project(project_key, self.db, self.user, None))
+
+        job = RepositorySyncJob(
+            project_key=project_key,
+            triggered_by_user_id=self.user.id,
+            trigger_source="project_delete_test",
+            status=_SYNC_JOB_PENDING,
+        )
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(job)
+
+        with patch("backend.routers.repositories.SessionLocal", self.SessionLocal):
+            _run_repository_auto_sync_job(job.id, project_key)
+        self.db.expire_all()
+
+        finished_job = self.db.query(RepositorySyncJob).filter_by(id=job.id).one()
+        change = self.db.query(RepositorySyncChange).filter_by(project_key=project_key).one()
+        self.assertEqual(finished_job.status, _SYNC_JOB_SUCCESS)
+        self.assertEqual(change.status, _SYNC_CHANGE_SYNCED)
+        self.assertEqual(
+            self.db.query(RepositoryProjectSetting).filter_by(project_key=project_key).count(),
+            0,
+        )
+
+    def test_initial_sync_rollback_rejects_already_published_project(self):
+        project_id = "rollback-published"
+        project_key = f"proj_{project_id}"
+        setting = RepositoryProjectSetting(
+            project_key=project_key,
+            codearts_config_json=json.dumps({"enabled": True, "project_id": project_id}),
+            updated_by_user_id=self.user.id,
+        )
+        state = RepositorySyncState(
+            project_key=project_key,
+            sync_uuid="sync-published",
+            revision=1,
+            deleted=False,
+            payload_json=json.dumps({"name": "BOOT.bin"}),
+        )
+        self.db.add_all([setting, state])
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(rollback_new_codearts_project(project_id, self.db, self.user, None))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(self.db.query(RepositoryProjectSetting).filter_by(project_key=project_key).count(), 1)
 
     def test_auto_sync_job_prefers_server_state_when_server_is_newer(self):
         project_key = "proj_sync-conflict"
@@ -185,6 +383,13 @@ class RepositoryAutoSyncTests(unittest.TestCase):
             status=_SYNC_JOB_PENDING,
         )
         self.db.add_all([setting, job])
+        self.db.add(
+            RepositorySyncLease(
+                project_key=project_key,
+                owner_id="dead-worker",
+                lease_until=datetime.utcnow() + timedelta(minutes=30),
+            )
+        )
         self.db.commit()
 
         with patch("backend.routers.repositories.SessionLocal", self.SessionLocal):
@@ -197,6 +402,7 @@ class RepositoryAutoSyncTests(unittest.TestCase):
         self.assertEqual(recovered_job.status, _SYNC_JOB_FAILED)
         self.assertIn("服务重启导致同步作业中断", str(recovered_job.error_message or ""))
         self.assertIn("服务重启导致同步作业中断", str(recovered_setting.auto_sync_last_error or ""))
+        self.assertEqual(self.db.query(RepositorySyncLease).count(), 0)
 
     def test_trigger_auto_sync_skips_when_previous_success_has_no_pending_changes(self):
         project_key = "proj_no-pending"
@@ -250,6 +456,195 @@ class RepositoryAutoSyncTests(unittest.TestCase):
         self.assertEqual(jobs[0].status, _SYNC_JOB_FAILED)
         self.assertIn("duplicate trigger skipped", str(jobs[0].error_message or ""))
 
+    def test_client_trigger_with_no_pending_still_launches_pull_job(self):
+        project_key = "proj_client-pull"
+        self.db.add(
+            RepositoryProjectSetting(
+                project_key=project_key,
+                codearts_config_json=json.dumps({"enabled": True}, ensure_ascii=False),
+            )
+        )
+        self.db.add(
+            RepositorySyncJob(
+                project_key=project_key,
+                triggered_by_user_id=self.user.id,
+                trigger_source="auto_connection",
+                status=_SYNC_JOB_SUCCESS,
+            )
+        )
+        self.db.commit()
+        client_config = {
+            "enabled": True,
+            "role": "client",
+            "server_base_url": "http://server.test:8000",
+            "batch_size": 500,
+            "request_timeout_seconds": 30,
+        }
+
+        with patch(
+            "backend.routers.repositories._get_repository_data_sync_config",
+            return_value=client_config,
+        ), patch(
+            "backend.routers.repositories._launch_repository_auto_sync_job",
+            return_value=True,
+        ) as launch:
+            result = asyncio.run(
+                trigger_codearts_auto_sync(
+                    {"project_key": project_key},
+                    self.db,
+                    self.user,
+                    None,
+                )
+            )
+
+        self.assertEqual(result["code"], 0)
+        launch.assert_called_once()
+        self.assertEqual(
+            self.db.query(RepositorySyncJob).filter_by(project_key=project_key).count(),
+            2,
+        )
+
+    def test_client_job_always_pushes_before_pull_even_without_pending(self):
+        project_key = "proj_client-order"
+        self.db.add(RepositoryProjectSetting(project_key=project_key))
+        job = RepositorySyncJob(
+            project_key=project_key,
+            triggered_by_user_id=self.user.id,
+            trigger_source="codearts_connection_monitor",
+            status=_SYNC_JOB_PENDING,
+        )
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(job)
+        events = []
+        client_config = {
+            "enabled": True,
+            "role": "client",
+            "server_base_url": "http://server.test:8000",
+            "batch_size": 500,
+            "request_timeout_seconds": 30,
+        }
+
+        def fake_push(*args, **kwargs):
+            events.append("push")
+            return 0, 0, 0, "server-node", "server-instance"
+
+        def fake_pull(*args, **kwargs):
+            events.append("pull")
+            return 1
+
+        with patch("backend.routers.repositories.SessionLocal", self.SessionLocal), patch(
+            "backend.routers.repositories._get_repository_data_sync_config",
+            return_value=client_config,
+        ), patch(
+            "backend.routers.repositories._repository_peer_health",
+            return_value={
+                "node_id": "server-node",
+                "server_instance_id": "server-instance",
+                "protocol_version": 1,
+            },
+        ), patch(
+            "backend.routers.repositories._push_repository_changes_to_peer",
+            side_effect=fake_push,
+        ), patch(
+            "backend.routers.repositories._pull_repository_states_from_peer",
+            side_effect=fake_pull,
+        ):
+            _run_repository_auto_sync_job(job.id, project_key)
+
+        self.db.expire_all()
+        synced_job = self.db.query(RepositorySyncJob).filter_by(id=job.id).one()
+        self.assertEqual(events, ["push", "pull"])
+        self.assertEqual(synced_job.status, _SYNC_JOB_SUCCESS)
+        self.assertEqual(synced_job.download_count, 1)
+
+    def test_changed_health_epoch_forces_zero_cursor_bootstrap_before_push(self):
+        project_key = "proj_restored-server"
+        server_url = "http://server.test:8000"
+        self.db.add(RepositoryProjectSetting(project_key=project_key))
+        self.db.add(
+            Repository(
+                name="BOOT.bin",
+                project_key=project_key,
+                sync_uuid="artifact-01",
+                source_type="local_upload",
+            )
+        )
+        self.db.add(
+            RepositorySyncPeer(
+                project_key=project_key,
+                server_base_url=server_url,
+                server_instance_id="epoch-before-restore",
+                pulled_revision=99,
+                bootstrap_completed_at=datetime.utcnow(),
+            )
+        )
+        job = RepositorySyncJob(
+            project_key=project_key,
+            triggered_by_user_id=self.user.id,
+            trigger_source="codearts_connection_monitor",
+            status=_SYNC_JOB_PENDING,
+        )
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(job)
+        client_config = {
+            "enabled": True,
+            "role": "client",
+            "server_base_url": server_url,
+            "batch_size": 500,
+            "request_timeout_seconds": 30,
+        }
+        observed = []
+
+        def fake_push(db, *args, **kwargs):
+            peer = db.query(RepositorySyncPeer).filter_by(project_key=project_key).one()
+            change = db.query(RepositorySyncChange).filter_by(project_key=project_key).one()
+            observed.append(("push", peer.pulled_revision, change.base_revision))
+            change.status = _SYNC_CHANGE_SYNCED
+            db.add(change)
+            db.commit()
+            return 1, 0, 0, "server-node", "epoch-after-restore"
+
+        def fake_pull(*args, **kwargs):
+            observed.append(("pull", kwargs.get("server_instance_id")))
+            return 0
+
+        with patch("backend.routers.repositories.SessionLocal", self.SessionLocal), patch(
+            "backend.routers.repositories._get_repository_data_sync_config",
+            return_value=client_config,
+        ), patch(
+            "backend.routers.repositories._repository_peer_health",
+            return_value={
+                "node_id": "server-node",
+                "server_instance_id": "epoch-after-restore",
+                "protocol_version": 1,
+            },
+        ), patch(
+            "backend.routers.repositories.get_repository_sync_node_id",
+            return_value="workstation-01",
+        ), patch(
+            "backend.routers.repositories._seed_repository_peer_snapshot",
+            wraps=_seed_repository_peer_snapshot,
+        ) as seed_snapshot, patch(
+            "backend.routers.repositories._push_repository_changes_to_peer",
+            side_effect=fake_push,
+        ), patch(
+            "backend.routers.repositories._pull_repository_states_from_peer",
+            side_effect=fake_pull,
+        ):
+            _run_repository_auto_sync_job(job.id, project_key)
+
+        self.db.expire_all()
+        peer = self.db.query(RepositorySyncPeer).filter_by(project_key=project_key).one()
+        synced_job = self.db.query(RepositorySyncJob).filter_by(id=job.id).one()
+        self.assertTrue(seed_snapshot.call_args.kwargs["force"])
+        self.assertEqual(seed_snapshot.call_args.kwargs["server_instance_id"], "epoch-after-restore")
+        self.assertEqual(observed, [("push", 0, 0), ("pull", "epoch-after-restore")])
+        self.assertEqual(peer.server_instance_id, "epoch-after-restore")
+        self.assertEqual(peer.pulled_revision, 0)
+        self.assertEqual(synced_job.status, _SYNC_JOB_SUCCESS)
+
     def test_auto_sync_job_processes_pending_changes_in_bounded_batches(self):
         project_key = "proj_batch-limit"
         self.db.add(RepositoryProjectSetting(project_key=project_key))
@@ -300,10 +695,10 @@ class RepositoryAutoSyncTests(unittest.TestCase):
         ]
 
         self.assertEqual(synced_job.status, _SYNC_JOB_SUCCESS)
-        self.assertEqual(synced_job.upload_count, 2)
-        self.assertEqual(synced_job.pending_change_count, 1)
-        self.assertEqual(statuses, [_SYNC_CHANGE_SYNCED, _SYNC_CHANGE_SYNCED, _SYNC_CHANGE_PENDING])
-        self.assertEqual(self.db.query(RepositorySyncState).filter(RepositorySyncState.project_key == project_key).count(), 2)
+        self.assertEqual(synced_job.upload_count, 3)
+        self.assertEqual(synced_job.pending_change_count, 0)
+        self.assertEqual(statuses, [_SYNC_CHANGE_SYNCED, _SYNC_CHANGE_SYNCED, _SYNC_CHANGE_SYNCED])
+        self.assertEqual(self.db.query(RepositorySyncState).filter(RepositorySyncState.project_key == project_key).count(), 3)
 
     def test_repository_crud_writes_pending_sync_changes(self):
         project_key = "proj_sync-crud"

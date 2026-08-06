@@ -51,6 +51,16 @@ type DownloadTarget = 'local' | 'server'
 type CodeartsRepositoryMode = 'release' | 'private' | 'web'
 type ProjectConfigIntent = 'create' | 'edit'
 
+const CODEARTS_SYNC_DEFINITIVE_ERROR = '__pcidsCodeartsSyncDefinitive'
+
+function isCodeartsSyncOutcomeUnknown(error: any) {
+  if (error?.[CODEARTS_SYNC_DEFINITIVE_ERROR] === true) return false
+  const errorCode = String(error?.code || '').trim().toUpperCase()
+  const errorMessage = String(error?.message || '').trim().toLowerCase()
+  const timedOut = errorCode === 'ECONNABORTED' || errorCode === 'ETIMEDOUT' || errorMessage.includes('timeout')
+  return timedOut || !error?.response
+}
+
 function normalizeServerLocationValue(value?: string | null, serverPath?: string | null) {
   const text = String(value || '').trim()
   if (!text) return ''
@@ -1272,7 +1282,9 @@ const Repository: React.FC = () => {
             full_refresh: true,
           })
           if (syncResult?.code !== 0) {
-            throw new Error(String(syncResult?.message || syncResult?.detail || 'CodeArts 同步失败'))
+            const syncError: any = new Error(String(syncResult?.message || syncResult?.detail || 'CodeArts 同步失败'))
+            syncError[CODEARTS_SYNC_DEFINITIVE_ERROR] = true
+            throw syncError
           }
 
           if (payload.project_id) {
@@ -1296,14 +1308,21 @@ const Repository: React.FC = () => {
             await refreshCodeartsConfig(newProjectKey)
           }
         } catch (e: any) {
-          if (createdProjectId) {
+          const syncOutcomeUnknown = isCodeartsSyncOutcomeUnknown(e)
+          if (createdProjectId && !syncOutcomeUnknown) {
             try {
               await repositoryApi.rollbackNewCodeartsProject(createdProjectId)
             } catch (rollbackError) {
               console.error('Failed to roll back project after initial sync failure', rollbackError)
             }
           }
-          showCreateProjectRequestError(e)
+          if (createdProjectId && syncOutcomeUnknown) {
+            const unknownResultMessage = 'CodeArts 同步请求结果未知，后台可能仍在执行；已保留项目配置，请稍后刷新仓库确认同步结果。'
+            setCreateProjectError(unknownResultMessage)
+            message.warning(unknownResultMessage)
+          } else {
+            showCreateProjectRequestError(e)
+          }
         } finally {
           setCreateProjectSubmitting(false)
         }

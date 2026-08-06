@@ -661,7 +661,7 @@ PCIDS 的协议能力与硬件适配器分开：
 外部配置文件：
 
 ```text
-C:\ProgramData\PCIDS\agent-discovery.yaml
+<PCIDS 安装目录>\data\agent-discovery.yaml
 ```
 
 示例：
@@ -738,73 +738,158 @@ Set-Item `
 - API 返回的文件列表不是空。
 - 文件落盘目录可写。
 
-### 7.2 SSH 传输
+### 7.2 数据同步与制品传输端口
 
-当任务在目标节点执行、制品位于服务器时，目标节点需要能通过 SSH 从服务器取文件。
+数据库同步和制品文件传输是两条独立通道，不能把 `22` 端口当成数据库同步端口。
 
-服务器应安装并启动 OpenSSH Server：
+两端均从外部配置文件读取服务器地址：
+
+```text
+<PCIDS 安装目录>\data\repository_download.yaml
+```
+
+典型 Windows 服务器配置：
+
+```yaml
+server_ip: 192.168.137.1
+server_port: 8000
+
+server_transport: ssh
+server_ssh_port: 22
+server_os: windows
+server_username: user
+
+repository_data_sync_enabled: true
+repository_data_sync_role: auto
+repository_data_sync_scheme: http
+repository_data_sync_interval_seconds: 30
+```
+
+修改该 YAML 后应重启 PCIDS 后端。数据库同步地址只由 `server_ip` 和 `server_port` 组成，不读取 `server_ssh_port`。
+
+| 通道 | 配置项 | 默认端口 | 服务器要求 | 普通客户端要求 |
+|---|---|---:|---|---|
+| PCIDS 数据库同步、健康检查和 Agent API | `server_ip` + `server_port` | `8000` | 运行 PCIDS，防火墙放行入站 TCP 8000 | 允许出站访问服务器 TCP 8000；不需要开放入站 8000 |
+| SSH/SFTP 制品文件传输 | `server_ip` + `server_ssh_port` | `22` | 仅在 `server_transport: ssh` 时安装并运行 OpenSSH Server，放行入站 TCP 22 | 允许出站访问服务器 TCP 22；不需要安装 OpenSSH Server，也不需要开放入站 22 |
+
+同一安装包可部署在服务器和客户端。`repository_data_sync_role: auto` 时：
+
+- `server_ip` 是当前电脑自己的地址：当前实例作为同步服务器。
+- `server_ip` 是其他电脑的地址：当前实例作为同步客户端。
+- 客户端检测到 CodeArts 制品域名可访问后，后台先把本地待同步数据推送到配置服务器，再从服务器拉取权威数据，全程不弹窗。
+
+数据库同步接口还要求两端配置相同的 PCIDS Agent 认证令牌。推荐放在服务器和客户端各自的：
+
+```text
+<PCIDS 安装目录>\data\agent.json
+```
+
+示例结构：
+
+```json
+{
+  "shared_token": "请使用现场生成的高强度随机令牌"
+}
+```
+
+不要把真实令牌提交到代码仓库或写入交付截图。也可通过环境变量 `PCIDS_AGENT_TOKEN` 配置；环境变量优先于文件。
+
+结论：只使用数据库同步、不使用 SSH 制品传输时，只需打通 `8000`，不需要安装 SSH 服务，也不需要开放 `22`。当前 YAML 若配置为 `server_transport: ssh`，则完整制品流程还需要服务器的 `22` 端口。
+
+### 7.3 Windows SSH 制品传输
+
+仅当 `repository_download.yaml` 使用 `server_transport: ssh` 时执行本节。OpenSSH Server 只安装在保存制品的 Windows 服务器上，普通客户端不安装 `sshd`。
+
+服务器使用管理员 PowerShell安装并启动 OpenSSH Server：
+
+```powershell
+$capability = Get-WindowsCapability -Online | Where-Object Name -Like 'OpenSSH.Server*'
+if ($capability.State -ne 'Installed') {
+  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+}
+
+Set-Service sshd -StartupType Automatic
+Start-Service sshd
+
+if (-not (Get-NetFirewallRule -DisplayName 'PCIDS SSH 22' -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule `
+    -DisplayName 'PCIDS SSH 22' `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 22 `
+    -Action Allow `
+    -Profile Private
+}
+```
+
+服务器检查：
 
 ```powershell
 Get-Service sshd
-Set-Service sshd -StartupType Automatic
-Start-Service sshd
+Get-NetTCPConnection -LocalPort 22 -State Listen
 ```
 
-目标机检查：
+客户端检查：
 
 ```powershell
-Get-Command ssh, scp
+Test-NetConnection <服务器IP> -Port 8000
 Test-NetConnection <服务器IP> -Port 22
 ```
 
-PCIDS 中填写：
+SSH 配置要求：
 
-- SSH 地址：服务器实际 IP。
-- SSH 用户名：服务器上真实存在、且有制品目录读取权限的账号。
-- SSH 密码：该账号密码。
+- `server_ip`：服务器实际 IP。
+- `server_username`：服务器上真实存在、允许登录且对制品目录有读写权限的 Windows 账号。
+- 密码或私钥必须与 `server_auth_type` 对应。
+- 普通客户端由 PCIDS 自身发起 SSH/SFTP 连接，不依赖客户端安装 Windows OpenSSH Server。
 
-若提示“SSH 下载配置缺少地址或用户名”，任务不应继续创建。出现乱码错误时应查看任务日志中的原始 stderr，并确认目标机部署的是当前修复包。
+若提示“SSH 下载配置缺少地址或用户名”，任务不应继续创建。若 `8000` 可达但 `22` 不可达，数据库同步仍可工作，但配置为 SSH 的制品上传、下载或清理会失败。
 
 ## 8. 数据、升级和防损坏要求
 
-PCIDS 用户数据通常位于：
+安装版 PCIDS 的配置、数据库、上传文件和日志统一位于用户选择的安装目录：
 
 ```text
-%APPDATA%\PCIDS\
+<PCIDS 安装目录>\data\
   app_data.db
   app_data.db-wal
   app_data.db-shm
   uploads\
   secure\
+  logs\
+  agent.json
+  agent-discovery.yaml
   repository_download.yaml
+  data-root.json
 ```
 
 升级前：
 
 1. 完整退出 PCIDS。
 2. 确认后台进程已结束。
-3. 备份整个 `%APPDATA%\PCIDS`，不能只备份 `app_data.db` 而漏掉仍有数据的 WAL。
+3. 备份整个 `<PCIDS 安装目录>\data`，不能只备份 `app_data.db` 而漏掉仍有数据的 WAL。
 
 ### 单一数据库规则
 
 安装版只允许使用一份 `app_data.db`：
 
-- 首次启动时在 `%ProgramData%\PCIDS\data-root.json` 写入机器级数据目录锁定记录。
-- 已升级机器若在原 `%APPDATA%\PCIDS` 中存在数据库，会锁定并继续使用该原库，不会新建空库。
-- 全新机器默认使用 `%ProgramData%\PCIDS\app_data.db`。
-- 后端同时收到固定的 `PCIDS_DATA_DIR` 与 `DB_PATH`，Windows 登录用户、管理员权限和安装目录变化都不会改变数据库位置。
+- 全新机器默认使用 `<PCIDS 安装目录>\data\app_data.db`，并在同目录生成 `data-root.json`。
+- 安装程序只给 `<PCIDS 安装目录>\data` 授予普通工作站用户修改权限，程序文件本身不需要写权限。
+- 原地升级时，旧卸载器会在删除程序文件前把完整 `data` 暂存到 `%ProgramData%\PCIDS-InstallDataBackup`；新安装器恢复并校验数据库后立即清除此临时目录。正常运行不依赖 ProgramData。
+- 用户主动卸载时同样会保留上述恢复副本，防止误卸载导致业务数据丢失；重新安装后会自动恢复。
+- 升级旧版本时，如果原 `%ProgramData%\PCIDS` 或 `%APPDATA%\PCIDS` 中只有一份数据库，首次启动会把完整数据目录迁移到新位置，并将原目录改名为带 `migrated-backup` 的可恢复备份。
+- 后端同时收到固定的 `PCIDS_DATA_DIR` 与 `DB_PATH`，所有可写配置、数据库、上传文件和日志都跟随当前安装目录。
 - 若已知目录中同时检测到两份数据库，程序会停止启动并明确列出冲突路径；禁止静默选择或创建第三份数据库。
-- 安装程序会为 `%ProgramData%\PCIDS` 配置普通工作站用户的修改权限。
 
-排障时先检查 `%ProgramData%\PCIDS\data-root.json`，再检查其中 `dataRoot` 指向的唯一数据库。不要手工复制单个 `app_data.db`；在线数据库启用 WAL 时，应使用 SQLite 在线备份或在后端完全退出后整体备份数据目录。
+排障时先检查 `<PCIDS 安装目录>\data\data-root.json`，再检查其中 `dataRoot` 指向的唯一数据库。不要手工复制单个 `app_data.db`；在线数据库启用 WAL 时，应使用 SQLite 在线备份或在后端完全退出后整体备份数据目录。
 
 ### 运行日志目录规则
 
-安装版的桌面启动日志和后端运行日志统一写入“实际安装目录下的 `logs`”，路径必须由当前程序 EXE 的所在目录动态计算，禁止写死盘符或 `C:\Program Files\pcids`。例如软件安装在 `D:\Applications\pcids` 时，日志目录应自动变为 `D:\Applications\pcids\logs`。
+安装版的桌面启动日志和后端运行日志统一写入“实际安装目录下的 `data\logs`”，路径必须由当前程序 EXE 的所在目录动态计算，禁止写死盘符或 `C:\Program Files\pcids`。例如软件安装在 `D:\Applications\pcids` 时，日志目录应自动变为 `D:\Applications\pcids\data\logs`。
 
 - `logs\desktop-backend-startup.log`：桌面程序拉起、监控和恢复后端时的输出。
 - `logs\backend.log`：后端服务的运行日志。
-- 安装程序必须为实际的 `$INSTDIR\logs` 配置工作站用户写入权限。
+- 安装程序必须为实际的 `$INSTDIR\data` 配置工作站用户修改权限。
 - 开发模式仍使用用户数据目录下的 `logs`，不污染源码目录。
 
 验收时应完全退出并重新打开软件，确认上述两个文件在实际安装目录中产生新时间戳；不能只检查目录是否存在。
@@ -813,8 +898,9 @@ PCIDS 用户数据通常位于：
 
 ```powershell
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$pcidsData = "D:\Applications\pcids\data"
 Copy-Item `
-  -LiteralPath "$env:APPDATA\PCIDS" `
+  -LiteralPath $pcidsData `
   -Destination "D:\PCIDS-Backup\PCIDS-$stamp" `
   -Recurse
 ```
@@ -973,7 +1059,7 @@ Get-PnpDevice -PresentOnly |
 - 通信协议适配器完成至少一次真实连接/收发。
 - 每类烧录器完成只读探测；正式交付范围内至少完成一次真实烧录。
 - XDS510Plus、USB-Blaster II 不能只凭设备管理器 `Status=OK` 判定完成，必须读到目标并保存成功任务日志。
-- `%APPDATA%\PCIDS` 已建立可恢复备份。
+- `<PCIDS 安装目录>\data` 已建立可恢复备份。
 
 最终交付记录至少保存：
 
@@ -1025,6 +1111,6 @@ CodeArts/SSH 验收结果
 5. **业务层**：PCIDS 分别完成一次擦除、写入、校验、复位；长任务超时不少于 1200 秒。
 6. **网络层**：跨节点扫描、CodeArts 实际文件同步、SSH 传输、FTP/TFTP 均用真实数据验收。
 7. **通信层**：串口/CAN/GPIO 按交付范围完成真实连接或收发。
-8. **恢复层**：备份 `%APPDATA%\PCIDS`，保存版本、驱动、日志、配置和哈希清单。
+8. **恢复层**：备份 `<PCIDS 安装目录>\data`，保存版本、驱动、日志、配置和哈希清单。
 
 只有上述八层全部通过，才能把该机器复制为下一台工作站的基线。任何“软件能打开”“设备管理器正常”“同步显示成功但 0 文件”都不能单独作为验收结论。

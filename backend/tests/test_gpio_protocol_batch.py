@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -12,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.models import Base, ProtocolLog, ProtocolSession, User
 from backend.routers import protocol_tests
+from backend.utils import wch_gpio
 
 
 class FakePortInfo:
@@ -248,6 +250,105 @@ class GpioProtocolBatchTests(unittest.TestCase):
 
         self.assertEqual(merged["gpio_transport_kind"], "wch_gpio")
         self.assertEqual(merged["gpio_transport_config"]["pin_base_index"], 0)
+
+    def test_wch_output_validation_uses_sampled_pin_state(self):
+        class FakeDll:
+            @staticmethod
+            def CH910x_GpioSet(*_args):
+                return 0
+
+            @staticmethod
+            def CH910x_GpioGet(_handle, _prop, status):
+                status._obj.value = 0
+                return 0
+
+        prop = wch_gpio.ChipPropertyS()
+        prop.ChipType = 1
+        prop.ChipTypeStr = b"CH343"
+        prop.GpioCount = 8
+        connection = wch_gpio.WchGpioConnection(
+            com_port="COM11",
+            handle=object(),
+            prop=prop,
+            chip_type=1,
+            chip_type_text="CH343",
+            gpio_count=8,
+            port_index=0,
+            pin_output_modes={0: True},
+        )
+
+        with patch("backend.utils.wch_gpio._load_dll", return_value=FakeDll()), patch(
+            "backend.utils.wch_gpio._read_config", return_value=(1, 1, 1)
+        ):
+            result = wch_gpio.run_wch_gpio_action(
+                com_port="COM11",
+                pin="GPIO0",
+                action="set_level",
+                target_level="高电平",
+                existing_connection=connection,
+            )
+
+        self.assertEqual(result.level, "低电平")
+        self.assertEqual(result.raw_status, 0)
+
+    def test_wch_listen_waits_until_requested_edge(self):
+        samples = [
+            SimpleNamespace(pin="GPIO0", gpio_index=0, raw_dir=0, raw_status=0, level="低电平"),
+            SimpleNamespace(pin="GPIO0", gpio_index=0, raw_dir=0, raw_status=0, level="低电平"),
+            SimpleNamespace(pin="GPIO0", gpio_index=0, raw_dir=0, raw_status=1, level="高电平"),
+        ]
+        session = SimpleNamespace(id=123)
+        action_spec = {
+            "pin": "GPIO0",
+            "action": "listen",
+            "trigger_type": "上升沿",
+            "timeout_ms": 200,
+        }
+        with patch("backend.routers.protocol_tests._get_wch_gpio_session_connection", return_value=object()), patch(
+            "backend.routers.protocol_tests.run_wch_gpio_action", side_effect=samples
+        ) as run_action:
+            reply, _ = asyncio.run(
+                protocol_tests._execute_gpio_transport_action(
+                    session=session,
+                    action_spec=action_spec,
+                    transport_kind="wch_gpio",
+                    transport_config={"com_port": "COM11", "poll_interval_ms": 1},
+                )
+            )
+
+        self.assertEqual(run_action.call_count, 3)
+        self.assertIn("GPIO0=HIGH", reply)
+
+    def test_gpio_edge_matching_requires_a_real_transition(self):
+        self.assertFalse(protocol_tests._gpio_edge_matches("高电平", "高电平", "上升沿"))
+        self.assertTrue(protocol_tests._gpio_edge_matches("低电平", "高电平", "上升沿"))
+        self.assertTrue(protocol_tests._gpio_edge_matches("高电平", "低电平", "下降沿"))
+
+    def test_wch_listen_times_out_without_an_edge(self):
+        unchanged_sample = SimpleNamespace(
+            pin="GPIO0",
+            gpio_index=0,
+            raw_dir=0,
+            raw_status=0,
+            level="低电平",
+        )
+        with patch("backend.routers.protocol_tests._get_wch_gpio_session_connection", return_value=object()), patch(
+            "backend.routers.protocol_tests.run_wch_gpio_action", return_value=unchanged_sample
+        ):
+            with self.assertRaisesRegex(TimeoutError, "等待上升沿超时"):
+                asyncio.run(
+                    protocol_tests._execute_gpio_transport_action(
+                        session=SimpleNamespace(id=123),
+                        action_spec={
+                            "pin": "GPIO0",
+                            "action": "listen",
+                            "trigger_type": "上升沿",
+                            "timeout_ms": 5,
+                        },
+                        transport_kind="wch_gpio",
+                        transport_config={"com_port": "COM11", "poll_interval_ms": 1},
+                    )
+                )
 
 
 if __name__ == "__main__":

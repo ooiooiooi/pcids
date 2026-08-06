@@ -24,8 +24,8 @@ function configureSingleDatabaseRoot(): string {
 
   const commonAppData = String(process.env.ProgramData || 'C:\\ProgramData').trim()
   const resolution = resolveSingleDataRoot({
-    machineRoot: path.join(commonAppData, 'PCIDS'),
-    legacyRoot: legacyUserDataRoot,
+    targetRoot: path.join(path.dirname(process.execPath), 'data'),
+    legacyRoots: [path.join(commonAppData, 'PCIDS'), legacyUserDataRoot],
     configuredRoot: process.env.PCIDS_DATA_DIR,
   })
   app.setPath('userData', resolution.dataRoot)
@@ -62,9 +62,7 @@ function getRuntimeRoot(): string {
 }
 
 function getBackendStartupLogPath(): string {
-  const logRoot = app.isPackaged
-    ? path.join(getRuntimeRoot(), 'logs')
-    : path.join(app.getPath('userData'), 'logs')
+  const logRoot = path.join(singleDataRoot, 'logs')
   return path.join(logRoot, 'desktop-backend-startup.log')
 }
 
@@ -475,7 +473,7 @@ function startPythonBackend(port: number): childProcess.ChildProcess {
   const backendBaseUrl = getBackendBaseUrl(port)
   const runtimeRoot = getRuntimeRoot()
   const dataRoot = singleDataRoot
-  const logRoot = app.isPackaged ? path.join(runtimeRoot, 'logs') : path.join(dataRoot, 'logs')
+  const logRoot = path.join(dataRoot, 'logs')
   const backendEnv = {
     ...process.env,
     PCIDS_BACKEND_HOST: '0.0.0.0',
@@ -625,6 +623,8 @@ async function createWindow() {
     minWidth: 1280,
     minHeight: 800,
     show: false,
+    // Use the native Windows title bar as the single source of window controls.
+    frame: true,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

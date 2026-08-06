@@ -5,8 +5,6 @@ import type { MenuProps } from 'antd'
 import {
   BellOutlined,
   UserOutlined,
-  MinusOutlined,
-  CloseOutlined,
   QuestionCircleOutlined,
   LeftOutlined,
   RightOutlined,
@@ -1162,9 +1160,6 @@ const App: React.FC = () => {
           <Badge dot={unreadCount > 0} offset={[-2, 2]}>
             <BellOutlined style={{ fontSize: 20, cursor: 'pointer', color: '#86909c' }} onClick={() => setIsMessageOpen(true)} />
           </Badge>
-          <div style={{ width: 1, height: 16, background: '#e8e8e8', margin: '0 4px' }}></div>
-          <MinusOutlined style={{ fontSize: 16, color: '#86909c', cursor: 'pointer' }} />
-          <CloseOutlined style={{ fontSize: 16, color: '#86909c', cursor: 'pointer' }} />
         </div>
       </Header>
       <Layout>

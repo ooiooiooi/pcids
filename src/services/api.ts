@@ -323,6 +323,7 @@ export const repositoryApi = {
     } as any),
   syncCodeartsProject: (data: { project_id: string; full_refresh?: boolean }) => request.post('/repositories/codearts/sync', data, {
     skipAutoErrorMessage: true,
+    timeout: 31 * 60 * 1000,
   } as any),
   importCodeartsArtifact: (data: { project_id: string; package_id: string; version_id: string; repo_id?: string; download_uri?: string; name?: string; version?: string; description?: string }) =>
     request.post('/repositories/codearts/import', data),

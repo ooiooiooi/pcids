@@ -41,6 +41,7 @@ from backend.routers.auth import get_current_user
 from backend.routers.repositories import _get_repository_server_transport_config
 from backend.utils.permission import require_permission
 from backend.utils.agent_security import build_agent_headers, require_agent_token
+from backend.utils.app_paths import get_app_data_root
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1965,8 +1966,7 @@ def _get_agent_discovery_config_path() -> Path:
     if configured:
         return Path(configured).expanduser()
     if os.name == "nt":
-        program_data = os.environ.get("PROGRAMDATA") or r"C:\\ProgramData"
-        return Path(program_data) / "PCIDS" / "agent-discovery.yaml"
+        return get_app_data_root() / "agent-discovery.yaml"
     return Path.home() / ".config" / "pcids" / "agent-discovery.yaml"
 
 

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Form, Input, Button, Checkbox, App as AntdApp } from 'antd'
-import { UserOutlined, LockOutlined, CloseOutlined } from '@ant-design/icons'
+import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { authApi } from '../../services/api'
 import { permissionApi } from '../../services/permission'
 import { usePermission } from '../../hooks'
@@ -53,19 +53,6 @@ const Login: React.FC = () => {
     }
   }
 
-  const handleClose = () => {
-    // 适配 Electron 窗口关闭或普通网页关闭
-    try {
-      if ((window as any).electronAPI) {
-        (window as any).electronAPI.send('window-close')
-      } else {
-        window.close()
-      }
-    } catch (e) {
-      console.error(e)
-    }
-  }
-
   return (
     <div style={{ 
       height: '100vh', 
@@ -74,21 +61,6 @@ const Login: React.FC = () => {
       background: '#fff', 
       position: 'relative'
     }}>
-      {/* Close Button */}
-      <CloseOutlined 
-        onClick={handleClose}
-        style={{ 
-          position: 'absolute', 
-          top: 24, 
-          right: 24, 
-          fontSize: 24, 
-          color: '#86909c', 
-          cursor: 'pointer',
-          zIndex: 10,
-          fontWeight: 'lighter'
-        }} 
-      />
-
       {/* Left Pane */}
       <div style={{ 
         flex: '0 0 50%', 

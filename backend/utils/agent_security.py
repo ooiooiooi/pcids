@@ -6,6 +6,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import HTTPException, Request
+from backend.utils.app_paths import get_app_data_root
 
 
 def _get_agent_config_paths() -> list[Path]:
@@ -13,6 +14,8 @@ def _get_agent_config_paths() -> list[Path]:
     configured = str(os.environ.get("PCIDS_AGENT_CONFIG") or "").strip()
     if configured:
         paths.append(Path(configured))
+
+    paths.append(get_app_data_root() / "agent.json")
 
     program_data = str(os.environ.get("PROGRAMDATA") or "").strip()
     if program_data:

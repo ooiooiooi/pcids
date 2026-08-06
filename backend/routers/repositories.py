@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 制品仓库路由
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Query, Request
 import asyncio
 import ast
 import base64
@@ -24,8 +24,10 @@ import subprocess
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typing import Optional
 from starlette.background import BackgroundTask
@@ -33,7 +35,17 @@ from starlette.responses import FileResponse, StreamingResponse
 from backend.utils.db import SessionLocal, get_db, ensure_schema
 from backend.utils.datetime_utils import database_time_to_local
 from backend.models.user import User
-from backend.models import Repository, RepositorySyncChange, RepositorySyncJob, RepositorySyncState
+from backend.models import (
+    Repository,
+    RepositorySyncChange,
+    RepositorySyncCursor,
+    RepositorySyncInstance,
+    RepositorySyncJob,
+    RepositorySyncLease,
+    RepositorySyncPeer,
+    RepositorySyncReceipt,
+    RepositorySyncState,
+)
 from backend.models.log import Record
 from backend.models.repository import RepositoryProjectMember, RepositoryProjectSetting
 from backend.models.task import BurningTask, TaskStatus
@@ -53,6 +65,17 @@ from backend.utils.deployment_readiness import build_windows_deployment_readines
 from backend.utils.ssh_client import SSHClientSession, remote_shell_command
 from backend.utils.text_normalization import normalize_text, normalize_text_payload
 from backend.utils.app_paths import get_app_data_root, get_repository_download_root_path, get_upload_root
+from backend.utils.repository_data_sync import (
+    build_repository_sync_headers,
+    get_repository_sync_node_id,
+    get_repository_sync_server_epoch,
+    normalize_repository_data_sync_config,
+    require_repository_sync_request,
+)
+from backend.utils.repository_sync_identity import (
+    generate_codearts_repository_sync_uuid,
+    generate_repository_sync_uuid,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -307,9 +330,15 @@ _SYNC_CHANGE_RESOLVED_SERVER = "resolved_server"
 _SYNC_CHANGE_FAILED = "failed"
 _SYNC_CHANGE_UPSERT = "upsert"
 _SYNC_CHANGE_DELETE_SERVER = "delete_server"
+_SYNC_PROJECT_DELETE_PENDING_FIELD = "_data_sync_project_delete_pending"
 _SYNC_RUNTIME_LOCK = threading.Lock()
 _SYNC_RUNNING_PROJECTS: set[str] = set()
 _SYNC_LAST_LAUNCH_MONOTONIC: dict[str, float] = {}
+_SYNC_CODEARTS_ONLINE_PROJECTS: set[str] = set()
+_SYNC_MONITOR_WAKE_EVENT: Optional[asyncio.Event] = None
+_SYNC_MONITOR_ERROR_LOGGED_AT: dict[str, float] = {}
+_SYNC_PROTOCOL_VERSION = 1
+_SYNC_LEASE_SECONDS = 10 * 60
 
 
 def _get_int_env(name: str, default: int, *, minimum: int = 0) -> int:
@@ -355,13 +384,12 @@ def _ensure_repository_sync_uuid(repo: Repository) -> str:
     download_uri = str(getattr(repo, "download_uri", "") or "").strip()
     display_path = str(getattr(repo, "display_path", "") or getattr(repo, "description", "") or "").strip()
     name = str(getattr(repo, "name", "") or "").strip()
-    if project_key and (display_path or download_uri):
-        # Repository paths are stable across syncs, while CodeArts download
-        # URLs may contain a short-lived token or timestamp.
-        seed = f"{project_key}|{display_path or download_uri}|{name}"
-        repo.sync_uuid = uuid.uuid5(uuid.NAMESPACE_URL, seed).hex
-    else:
-        repo.sync_uuid = uuid.uuid4().hex
+    repo.sync_uuid = generate_repository_sync_uuid(
+        project_key=project_key,
+        display_path=display_path,
+        download_uri=download_uri,
+        name=name,
+    )
     return str(repo.sync_uuid)
 
 
@@ -406,9 +434,16 @@ def _save_project_auto_sync_state(setting: RepositoryProjectSetting, state: dict
 def _sync_state_payload(state_row: Optional[RepositorySyncState]) -> dict:
     if not state_row:
         return {}
-    payload = _safe_json_loads(getattr(state_row, "payload_json", None))
-    payload["sync_uuid"] = str(getattr(state_row, "sync_uuid", "") or payload.get("sync_uuid") or "").strip()
-    payload["project_key"] = str(getattr(state_row, "project_key", "") or payload.get("project_key") or "").strip()
+    raw_payload = _safe_json_loads(getattr(state_row, "payload_json", None))
+    sync_uuid = str(getattr(state_row, "sync_uuid", "") or raw_payload.get("sync_uuid") or "").strip()
+    project_key = str(getattr(state_row, "project_key", "") or raw_payload.get("project_key") or "").strip()
+    # Legacy snapshots used to contain database-local user IDs.  Those IDs have
+    # no meaning on another PCIDS instance and can violate its users FK.
+    payload = _canonical_repository_sync_payload(
+        raw_payload,
+        project_key=project_key,
+        sync_uuid=sync_uuid,
+    )
     payload["deleted"] = bool(getattr(state_row, "deleted", False))
     return payload
 
@@ -440,25 +475,45 @@ def _migrate_legacy_auto_sync_state(db: Session, setting: Optional[RepositoryPro
         return 0
     revision = int(legacy.get("revision") or 0)
     migrated_count = 0
-    for sync_uuid, entry in entries.items():
-        if not isinstance(entry, dict):
-            continue
+    valid_entries = [
+        (sync_uuid, entry)
+        for sync_uuid, entry in entries.items()
+        if isinstance(entry, dict) and str(sync_uuid or entry.get("sync_uuid") or "").strip()
+    ]
+    next_revision = max(
+        _get_project_sync_state_revision(db, project_key),
+        max(revision - len(valid_entries), 0),
+    )
+    for sync_uuid, entry in valid_entries:
         normalized_uuid = str(sync_uuid or entry.get("sync_uuid") or "").strip()
-        if not normalized_uuid:
-            continue
-        payload = dict(entry)
-        payload["sync_uuid"] = normalized_uuid
-        payload["project_key"] = project_key
+        next_revision += 1
+        payload = _canonical_repository_sync_payload(
+            entry,
+            project_key=project_key,
+            sync_uuid=normalized_uuid,
+        )
+        payload["deleted"] = bool(entry.get("deleted"))
         state_row = RepositorySyncState(
             project_key=project_key,
             sync_uuid=normalized_uuid,
-            revision=revision,
+            revision=next_revision,
             deleted=bool(payload.get("deleted")),
             payload_json=json.dumps(payload, ensure_ascii=False),
             source_updated_at=_parse_sync_state_source_updated_at(payload),
         )
         db.add(state_row)
         migrated_count += 1
+    if migrated_count:
+        cursor = (
+            db.query(RepositorySyncCursor)
+            .filter(RepositorySyncCursor.project_key == project_key)
+            .first()
+        )
+        if not cursor:
+            cursor = RepositorySyncCursor(project_key=project_key, current_revision=next_revision)
+        else:
+            cursor.current_revision = max(int(cursor.current_revision or 0), next_revision)
+        db.add(cursor)
     return migrated_count
 
 
@@ -541,19 +596,63 @@ def _record_repository_sync_change(
     normalized_sync_uuid = str(repo_sync_uuid or "").strip()
     if not normalized_project_key or not normalized_sync_uuid:
         return None
+    state_row = (
+        db.query(RepositorySyncState)
+        .filter(
+            RepositorySyncState.project_key == normalized_project_key,
+            RepositorySyncState.sync_uuid == normalized_sync_uuid,
+        )
+        .first()
+    )
+    previous_change = (
+        db.query(RepositorySyncChange.change_uuid)
+        .filter(
+            RepositorySyncChange.project_key == normalized_project_key,
+            RepositorySyncChange.repo_sync_uuid == normalized_sync_uuid,
+            RepositorySyncChange.change_uuid.isnot(None),
+        )
+        .order_by(RepositorySyncChange.id.desc())
+        .first()
+    )
+    canonical_payload = _canonical_repository_sync_payload(
+        payload,
+        project_key=normalized_project_key,
+        sync_uuid=normalized_sync_uuid,
+    )
+    canonical_payload["deleted"] = change_type == _SYNC_CHANGE_DELETE_SERVER
+    if change_type == _SYNC_CHANGE_DELETE_SERVER:
+        canonical_payload.update(
+            {
+                "download_uri": None,
+                "server_exists": False,
+                "server_path": None,
+                "server_target": None,
+                "remote_downloadable": False,
+            }
+        )
     change = RepositorySyncChange(
+        change_uuid=uuid.uuid4().hex,
+        parent_change_uuid=(
+            str(previous_change[0]).strip()
+            if previous_change and str(previous_change[0] or "").strip()
+            else None
+        ),
         project_key=normalized_project_key,
         repo_db_id=repo_db_id,
         repo_sync_uuid=normalized_sync_uuid,
+        base_revision=int(getattr(state_row, "revision", 0) or 0),
         change_type=change_type,
         status=_SYNC_CHANGE_PENDING,
         source=source,
-        payload_json=json.dumps(payload or {}, ensure_ascii=False) if payload is not None else None,
+        payload_json=json.dumps(canonical_payload, ensure_ascii=False),
+        payload_hash=_repository_sync_payload_hash(canonical_payload),
+        origin_node_id=get_repository_sync_node_id(),
         created_by_user_id=getattr(current_user, "id", None),
     )
     db.add(change)
-    db.commit()
-    db.refresh(change)
+    # The caller owns the transaction.  The repository mutation and its outbox
+    # row must either commit together or both roll back.
+    db.flush()
     return change
 
 
@@ -566,10 +665,8 @@ def _record_repository_sync_change_for_repo(
     source: str = "local",
 ) -> Optional[RepositorySyncChange]:
     sync_uuid = _ensure_repository_sync_uuid(repo)
-    if getattr(repo, "id", None):
-        db.add(repo)
-        db.commit()
-        db.refresh(repo)
+    db.add(repo)
+    db.flush()
     return _record_repository_sync_change(
         db,
         project_key=getattr(repo, "project_key", None),
@@ -707,6 +804,7 @@ def get_repository_download_config_summary() -> dict:
     effective_download_root = str(Path(configured_download_root).expanduser() if configured_download_root else default_download_root)
     default_storage_root = "C:/pcids-artifacts" if server_os == "windows" else "/tmp/pcids-artifacts"
     effective_storage_root = str(cfg.get("server_storage_root") or default_storage_root).strip() or default_storage_root
+    data_sync = normalize_repository_data_sync_config(cfg)
     return {
         "default_config_path": str(_REPOSITORY_DOWNLOAD_CONFIG_PATH),
         "external_config_path": str(external_path),
@@ -720,6 +818,10 @@ def get_repository_download_config_summary() -> dict:
         "download_root": effective_download_root,
         "codearts_base_url": str(cfg.get("codearts_base_url") or "").strip() or None,
         "codearts_private_base_url": str(cfg.get("codearts_private_base_url") or "").strip() or None,
+        "repository_data_sync_enabled": bool(data_sync.get("enabled")),
+        "repository_data_sync_role": data_sync.get("role"),
+        "repository_data_sync_server_url": data_sync.get("server_base_url") or None,
+        "repository_data_sync_interval_seconds": data_sync.get("interval_seconds"),
     }
 
 
@@ -850,6 +952,149 @@ def _is_local_server_host(host: str) -> bool:
     except Exception:
         pass
     return normalized_host in local_names or normalized_host in local_addresses
+
+
+def _get_repository_data_sync_config() -> dict:
+    """Return the peer-sync configuration derived from repository_download.yaml.
+
+    Database synchronization always uses ``server_ip`` + ``server_port``.  The
+    artifact transport may independently use SSH and ``server_ssh_port``.
+    """
+    return normalize_repository_data_sync_config(_get_repository_download_config())
+
+
+def _repository_peer_endpoint(config: dict, path: str) -> str:
+    base_url = str(config.get("server_base_url") or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("未配置数据库同步服务器地址")
+    return f"{base_url}{path if str(path).startswith('/') else '/' + str(path)}"
+
+
+def _repository_peer_request_json(
+    config: dict,
+    path: str,
+    *,
+    payload: Optional[dict] = None,
+    method: str = "POST",
+    timeout_seconds: Optional[float] = None,
+) -> dict:
+    import urllib.error
+    import urllib.request
+
+    target_url = _repository_peer_endpoint(config, path)
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        **build_repository_sync_headers(),
+    }
+    request = urllib.request.Request(target_url, data=data, headers=headers, method=method)
+    effective_timeout = max(
+        float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else config.get("request_timeout_seconds") or 15
+        ),
+        0.5,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=effective_timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        try:
+            parsed = json.loads(detail or "{}")
+            detail = str(parsed.get("detail") or parsed.get("message") or detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"同步服务器 HTTP {exc.code}: {detail or exc.reason}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"无法连接同步服务器 {target_url}: {exc}") from exc
+    try:
+        parsed = json.loads(body or "{}")
+    except Exception as exc:
+        raise RuntimeError("同步服务器返回了无效 JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("同步服务器返回格式不正确")
+    if parsed.get("code") not in {None, 0}:
+        raise RuntimeError(str(parsed.get("message") or parsed.get("detail") or "同步服务器请求失败"))
+    data_payload = parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+    return dict(data_payload or {})
+
+
+def _repository_peer_health(config: dict) -> dict:
+    data = _repository_peer_request_json(
+        config,
+        "/api/repositories/peer-sync/v1/health",
+        method="GET",
+        timeout_seconds=float(config.get("connect_timeout_seconds") or 3),
+    )
+    remote_node_id = str(data.get("node_id") or "").strip()
+    if not remote_node_id:
+        raise RuntimeError("同步服务器未返回节点标识")
+    if remote_node_id == get_repository_sync_node_id():
+        raise RuntimeError("同步服务器地址指向当前实例，已阻止循环同步")
+    if int(data.get("protocol_version") or 0) != _SYNC_PROTOCOL_VERSION:
+        raise RuntimeError("同步服务器协议版本不兼容")
+    data["server_instance_id"] = str(data.get("server_instance_id") or remote_node_id)
+    return data
+
+
+class _RepositoryProbeNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # pragma: no cover - urllib callback
+        return None
+
+
+def _probe_codearts_repository_domain(config: dict, timeout_seconds: float = 3) -> bool:
+    """Silently test the trusted CodeArts origin without launching a browser."""
+    import urllib.error
+    import urllib.request
+
+    effective = _build_effective_codearts_config(config)
+    if _is_codearts_web_private_config(effective):
+        target_url = _resolve_codearts_devops_url(effective)
+    else:
+        service_defaults = _get_repository_codearts_service_config()
+        trusted_base_url = (
+            service_defaults.get("private_base_url")
+            if _normalize_codearts_repository_mode(effective.get("repository_mode")) == _CODEARTS_REPOSITORY_MODE_PRIVATE
+            else service_defaults.get("base_url")
+        )
+        target_url = str(trusted_base_url or "").strip()
+        region = str(effective.get("region") or "").strip()
+        if region:
+            _validate_codearts_region(region)
+        target_url = _safe_format_path(target_url, region=region) if target_url else ""
+    parsed = urllib.parse.urlsplit(target_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    # Probe only the configured, trusted origin. Project payloads cannot choose
+    # an arbitrary target and therefore cannot turn this into an SSRF primitive.
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+    opener = urllib.request.build_opener(_RepositoryProbeNoRedirect())
+    headers = {"User-Agent": "PCIDS-CodeArts-Reachability/1.0", "Accept": "text/html,*/*"}
+    effective_timeout = max(float(timeout_seconds or 3), 0.5)
+    for method in ("HEAD", "GET"):
+        request_headers = dict(headers)
+        if method == "GET":
+            request_headers["Range"] = "bytes=0-0"
+        request = urllib.request.Request(origin, headers=request_headers, method=method)
+        try:
+            with opener.open(request, timeout=effective_timeout) as response:
+                status = int(getattr(response, "status", 200) or 200)
+            return 200 <= status < 500
+        except urllib.error.HTTPError as exc:
+            status = int(getattr(exc, "code", 0) or 0)
+            if 200 <= status < 500:
+                return True
+            if method == "HEAD" and status in {405, 501}:
+                continue
+            return False
+        except Exception:
+            if method == "HEAD":
+                continue
+            return False
+    return False
 
 
 def _powershell_quote(value: str) -> str:
@@ -3290,6 +3535,7 @@ def _remove_repository_server_artifact(server_path: Optional[str], server_target
             )
         return
 
+    cfg = _get_repository_download_config()
     server_ip = str(cfg.get("server_ip") or "").strip()
     server_port = cfg.get("server_port")
     delete_api_path = str(cfg.get("server_delete_api_path") or "/delete").strip()
@@ -3601,7 +3847,10 @@ def _get_visible_codearts_project_configs(db: Session, current_user: User) -> li
                 query = query.filter(RepositoryProjectSetting.project_key.in_(member_project_keys))
     configs: list[dict] = []
     for setting in query.all():
-        cfg = _build_effective_codearts_config(_safe_json_loads(setting.codearts_config_json))
+        raw_cfg = _safe_json_loads(setting.codearts_config_json)
+        if bool(raw_cfg.get(_SYNC_PROJECT_DELETE_PENDING_FIELD)):
+            continue
+        cfg = _build_effective_codearts_config(raw_cfg)
         if bool(cfg.get("enabled")) and str(cfg.get("project_id") or "").strip():
             configs.append(cfg)
     return configs
@@ -3816,6 +4065,1104 @@ def _parse_sync_timestamp(value: Optional[object]) -> Optional[datetime]:
         return None
 
 
+def _normalize_sync_timestamp_value(value: Optional[object], fallback: Optional[datetime] = None) -> datetime:
+    parsed = value if isinstance(value, datetime) else _parse_sync_timestamp(value)
+    parsed = parsed or fallback or datetime.utcnow()
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.replace(microsecond=0)
+
+
+_SYNC_PAYLOAD_FIELDS = {
+    "sync_uuid",
+    "project_key",
+    "name",
+    "repo_id",
+    "tenant",
+    "description",
+    "version",
+    "size",
+    "md5",
+    "sha256",
+    "source_type",
+    "remote_repo_id",
+    "display_path",
+    "download_uri",
+    "repo_detail",
+    "server_exists",
+    "server_path",
+    "server_target",
+    "remote_downloadable",
+    "updated_at",
+    "deleted",
+}
+
+
+def _canonical_repository_sync_payload(payload: Optional[dict], *, project_key: str, sync_uuid: str) -> dict:
+    source = payload if isinstance(payload, dict) else {}
+    normalized = {key: source.get(key) for key in _SYNC_PAYLOAD_FIELDS if key in source}
+    normalized["project_key"] = project_key
+    normalized["sync_uuid"] = sync_uuid
+    normalized.pop("created_by_user_id", None)
+    return normalize_text_payload(normalized)
+
+
+def _repository_sync_payload_hash(payload: Optional[dict]) -> str:
+    encoded = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _repository_state_wire_payload(row: Optional[RepositorySyncState]) -> Optional[dict]:
+    if not row:
+        return None
+    payload = _sync_state_payload(row)
+    return {
+        "sync_uuid": str(getattr(row, "sync_uuid", "") or ""),
+        "revision": int(getattr(row, "revision", 0) or 0),
+        "deleted": bool(getattr(row, "deleted", False)),
+        "source_updated_at": _normalize_sync_datetime(getattr(row, "source_updated_at", None)),
+        "origin_node_id": str(getattr(row, "origin_node_id", "") or "") or None,
+        "origin_change_uuid": str(getattr(row, "origin_change_uuid", "") or "") or None,
+        "server_instance_id": str(getattr(row, "server_instance_id", "") or "") or None,
+        "payload_hash": str(getattr(row, "payload_hash", "") or "") or _repository_sync_payload_hash(payload),
+        "payload": payload,
+    }
+
+
+def _next_repository_server_revision(db: Session, project_key: str) -> int:
+    cursor = (
+        db.query(RepositorySyncCursor)
+        .filter(RepositorySyncCursor.project_key == project_key)
+        .first()
+    )
+    if not cursor:
+        cursor = RepositorySyncCursor(
+            project_key=project_key,
+            current_revision=_get_project_sync_state_revision(db, project_key),
+        )
+        db.add(cursor)
+        db.flush()
+    cursor.current_revision = int(getattr(cursor, "current_revision", 0) or 0) + 1
+    db.add(cursor)
+    db.flush()
+    return int(cursor.current_revision)
+
+
+def _current_repository_server_revision(db: Session, project_key: str) -> int:
+    cursor = (
+        db.query(RepositorySyncCursor.current_revision)
+        .filter(RepositorySyncCursor.project_key == project_key)
+        .first()
+    )
+    if cursor:
+        return int(cursor[0] or 0)
+    # Databases upgraded from the legacy JSON/state implementation can have
+    # state revisions before the cursor table exists.  Never let the first new
+    # write move the authoritative revision backwards.
+    return _get_project_sync_state_revision(db, project_key)
+
+
+def _get_repository_server_instance_id(db: Session) -> str:
+    """Return the backup-aware public server incarnation/epoch.
+
+    ``RepositorySyncInstance.instance_uuid`` remains the database marker used
+    to recognize a rebuilt database.  The value exposed to peers lives in an
+    application-data sidecar and also tracks revision high-water marks, so
+    restoring an older copy of the same database marker rotates the epoch.
+    """
+
+    instance = db.query(RepositorySyncInstance).filter(RepositorySyncInstance.id == 1).first()
+    if not instance:
+        candidate = uuid.uuid4().hex
+        if db.get_bind().dialect.name == "sqlite":
+            db.execute(
+                text(
+                    "INSERT OR IGNORE INTO repository_sync_instances "
+                    "(id, instance_uuid, created_at, updated_at) "
+                    "VALUES (1, :instance_uuid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {"instance_uuid": candidate},
+            )
+            db.flush()
+            instance = db.query(RepositorySyncInstance).filter(RepositorySyncInstance.id == 1).one()
+        else:
+            instance = RepositorySyncInstance(id=1, instance_uuid=candidate)
+            db.add(instance)
+            db.flush()
+    database_instance_id = str(getattr(instance, "instance_uuid", "") or "")
+    project_revisions = {
+        str(project_key or "").strip(): int(current_revision or 0)
+        for project_key, current_revision in db.query(
+            RepositorySyncCursor.project_key,
+            RepositorySyncCursor.current_revision,
+        ).all()
+        if str(project_key or "").strip()
+    }
+    return get_repository_sync_server_epoch(
+        database_instance_id=database_instance_id,
+        project_revisions=project_revisions,
+    )
+
+
+def _apply_repository_peer_changes(
+    db: Session,
+    *,
+    project_key: str,
+    origin_node_id: str,
+    changes: list[dict],
+) -> dict:
+    """Apply a peer batch transactionally to the authoritative server state."""
+    results: list[dict] = []
+    changed_sync_uuids: set[str] = set()
+    server_node_id = get_repository_sync_node_id()
+    server_instance_id = _get_repository_server_instance_id(db)
+
+    for raw_change in changes:
+        if not isinstance(raw_change, dict):
+            continue
+        change_uuid = str(raw_change.get("change_uuid") or "").strip()
+        sync_uuid = str(raw_change.get("sync_uuid") or "").strip()
+        operation = str(raw_change.get("operation") or raw_change.get("change_type") or "").strip()
+        if operation == _SYNC_CHANGE_DELETE_SERVER:
+            operation = "delete"
+        if not change_uuid or len(change_uuid) > 64 or not sync_uuid or len(sync_uuid) > 64 or operation not in {"upsert", "delete"}:
+            results.append(
+                {
+                    "change_uuid": change_uuid or None,
+                    "sync_uuid": sync_uuid or None,
+                    "outcome": "invalid",
+                    "error": "同步变更标识或操作类型不正确",
+                }
+            )
+            continue
+
+        request_payload = _canonical_repository_sync_payload(
+            raw_change.get("payload") if isinstance(raw_change.get("payload"), dict) else {},
+            project_key=project_key,
+            sync_uuid=sync_uuid,
+        )
+        request_payload["deleted"] = operation == "delete"
+        if operation == "delete":
+            request_payload.update(
+                {
+                    "download_uri": None,
+                    "server_exists": False,
+                    "server_path": None,
+                    "server_target": None,
+                    "remote_downloadable": False,
+                }
+            )
+        request_hash = _repository_sync_payload_hash(
+            {
+                "node_id": origin_node_id,
+                "project_key": project_key,
+                "sync_uuid": sync_uuid,
+                "operation": operation,
+                "base_revision": int(raw_change.get("base_revision") or 0),
+                "parent_change_uuid": str(raw_change.get("parent_change_uuid") or "").strip() or None,
+                "changed_at": raw_change.get("changed_at") or request_payload.get("updated_at"),
+                "payload": request_payload,
+            }
+        )
+
+        receipt = (
+            db.query(RepositorySyncReceipt)
+            .filter(RepositorySyncReceipt.change_uuid == change_uuid)
+            .first()
+        )
+        if receipt:
+            if (
+                str(getattr(receipt, "node_id", "") or "") != origin_node_id
+                or str(getattr(receipt, "project_key", "") or "") != project_key
+                or str(getattr(receipt, "sync_uuid", "") or "") != sync_uuid
+            ):
+                results.append(
+                    {
+                        "change_uuid": change_uuid,
+                        "sync_uuid": sync_uuid,
+                        "outcome": "invalid",
+                        "error": "同步变更标识已被其他节点或项目使用",
+                    }
+                )
+                continue
+            saved_request_hash = str(getattr(receipt, "request_hash", "") or "")
+            if saved_request_hash and saved_request_hash != request_hash:
+                results.append(
+                    {
+                        "change_uuid": change_uuid,
+                        "sync_uuid": sync_uuid,
+                        "outcome": "invalid",
+                        "error": "同步变更标识重放时载荷发生变化",
+                    }
+                )
+                continue
+            if not saved_request_hash:
+                receipt.request_hash = request_hash
+                db.add(receipt)
+            saved_result = _safe_json_loads(getattr(receipt, "result_json", None))
+            if saved_result:
+                saved_result["outcome"] = "already_applied" if saved_result.get("outcome") == "applied" else saved_result.get("outcome")
+                results.append(saved_result)
+            else:
+                state_row = (
+                    db.query(RepositorySyncState)
+                    .filter(
+                        RepositorySyncState.project_key == project_key,
+                        RepositorySyncState.sync_uuid == sync_uuid,
+                    )
+                    .first()
+                )
+                results.append(
+                    {
+                        "change_uuid": change_uuid,
+                        "sync_uuid": sync_uuid,
+                        "outcome": "already_applied",
+                        "server_revision": int(getattr(receipt, "server_revision", 0) or 0),
+                        "canonical": _repository_state_wire_payload(state_row),
+                    }
+                )
+            continue
+
+        state_row = (
+            db.query(RepositorySyncState)
+            .filter(
+                RepositorySyncState.project_key == project_key,
+                RepositorySyncState.sync_uuid == sync_uuid,
+            )
+            .first()
+        )
+        current_revision = int(getattr(state_row, "revision", 0) or 0) if state_row else 0
+        base_revision = int(raw_change.get("base_revision") or 0)
+        parent_change_uuid = str(raw_change.get("parent_change_uuid") or "").strip()
+        current_origin_change_uuid = str(getattr(state_row, "origin_change_uuid", "") or "") if state_row else ""
+        incoming_deleted = operation == "delete"
+        incoming_payload = dict(request_payload)
+        incoming_payload["deleted"] = incoming_deleted
+        changed_at = _normalize_sync_timestamp_value(
+            raw_change.get("changed_at") or incoming_payload.get("updated_at")
+        )
+        incoming_payload["updated_at"] = _normalize_sync_datetime(changed_at)
+        if incoming_deleted:
+            incoming_payload.update(
+                {
+                    "download_uri": None,
+                    "server_exists": False,
+                    "server_path": None,
+                    "server_target": None,
+                    "remote_downloadable": False,
+                }
+            )
+        incoming_hash = _repository_sync_payload_hash(incoming_payload)
+        current_hash = str(getattr(state_row, "payload_hash", "") or "") if state_row else ""
+        if state_row and not current_hash:
+            current_hash = _repository_sync_payload_hash(_sync_state_payload(state_row))
+        same_content = bool(
+            state_row
+            and bool(getattr(state_row, "deleted", False)) == incoming_deleted
+            and current_hash == incoming_hash
+        )
+        can_apply = bool(
+            (state_row is None and base_revision == 0)
+            or (state_row is not None and base_revision == current_revision)
+            or (state_row is not None and parent_change_uuid and parent_change_uuid == current_origin_change_uuid)
+        )
+
+        if same_content:
+            outcome = "no_op"
+            resulting_revision = current_revision
+        elif can_apply:
+            outcome = "applied"
+            resulting_revision = _next_repository_server_revision(db, project_key)
+            state_row = _upsert_repository_sync_state(
+                db,
+                project_key=project_key,
+                sync_uuid=sync_uuid,
+                payload=incoming_payload,
+                deleted=incoming_deleted,
+                revision=resulting_revision,
+                source_updated_at=changed_at,
+                applied_change_id=None,
+                updated_by_job_id=None,
+            )
+            state_row.payload_hash = incoming_hash
+            state_row.origin_node_id = origin_node_id
+            state_row.origin_change_uuid = change_uuid
+            state_row.server_instance_id = server_instance_id
+            db.add(state_row)
+            db.flush()
+            changed_sync_uuids.add(sync_uuid)
+        else:
+            outcome = "conflict_server_wins"
+            resulting_revision = current_revision
+
+        result = {
+            "change_uuid": change_uuid,
+            "sync_uuid": sync_uuid,
+            "outcome": outcome,
+            "server_revision": resulting_revision,
+            "canonical": _repository_state_wire_payload(state_row),
+        }
+        receipt = RepositorySyncReceipt(
+            change_uuid=change_uuid,
+            node_id=origin_node_id,
+            project_key=project_key,
+            sync_uuid=sync_uuid,
+            outcome=outcome,
+            server_revision=resulting_revision,
+            request_hash=request_hash,
+            result_json=json.dumps(result, ensure_ascii=False),
+        )
+        db.add(receipt)
+        db.flush()
+        results.append(result)
+
+    if changed_sync_uuids:
+        _apply_project_sync_states_to_local(
+            db,
+            project_key=project_key,
+            fallback_user_id=None,
+            target_sync_uuids=changed_sync_uuids,
+        )
+        db.flush()
+        # Persist the new authoritative revision high-water mark in the
+        # database-external epoch sidecar before this transaction can commit.
+        # If the DB later rolls back, the harmless watermark lead forces a safe
+        # epoch rotation; allowing the sidecar to lag could miss restoration of
+        # the newest committed revision.
+        server_instance_id = _get_repository_server_instance_id(db)
+    return {
+        "protocol_version": _SYNC_PROTOCOL_VERSION,
+        "server_node_id": server_node_id,
+        "server_instance_id": server_instance_id,
+        "server_revision": _current_repository_server_revision(db, project_key),
+        "results": results,
+    }
+
+
+def _prepare_repository_sync_change(db: Session, change: RepositorySyncChange) -> None:
+    sync_uuid = str(getattr(change, "repo_sync_uuid", "") or "").strip()
+    if not sync_uuid:
+        return
+    if not str(getattr(change, "change_uuid", "") or "").strip():
+        change.change_uuid = uuid.uuid4().hex
+    change.origin_node_id = str(getattr(change, "origin_node_id", "") or "").strip() or get_repository_sync_node_id()
+    if getattr(change, "base_revision", None) is None:
+        state_row = (
+            db.query(RepositorySyncState.revision)
+            .filter(
+                RepositorySyncState.project_key == change.project_key,
+                RepositorySyncState.sync_uuid == sync_uuid,
+            )
+            .first()
+        )
+        change.base_revision = int(state_row[0] or 0) if state_row else 0
+    if not str(getattr(change, "parent_change_uuid", "") or "").strip():
+        previous = None
+        if getattr(change, "id", None) is not None:
+            previous = (
+                db.query(RepositorySyncChange.change_uuid)
+                .filter(
+                    RepositorySyncChange.project_key == change.project_key,
+                    RepositorySyncChange.repo_sync_uuid == sync_uuid,
+                    RepositorySyncChange.id < change.id,
+                    RepositorySyncChange.change_uuid.isnot(None),
+                )
+                .order_by(RepositorySyncChange.id.desc())
+                .first()
+            )
+        if previous and str(previous[0] or "").strip():
+            change.parent_change_uuid = str(previous[0]).strip()
+    payload = _canonical_repository_sync_payload(
+        _safe_json_loads(getattr(change, "payload_json", None)),
+        project_key=str(change.project_key),
+        sync_uuid=sync_uuid,
+    )
+    change.payload_json = json.dumps(payload, ensure_ascii=False)
+    change.payload_hash = _repository_sync_payload_hash(payload)
+    db.add(change)
+
+
+def _repository_change_wire_payload(change: RepositorySyncChange) -> dict:
+    payload = _safe_json_loads(getattr(change, "payload_json", None))
+    operation = "delete" if str(getattr(change, "change_type", "") or "") == _SYNC_CHANGE_DELETE_SERVER else "upsert"
+    changed_at = _normalize_sync_timestamp_value(
+        payload.get("updated_at"),
+        getattr(change, "created_at", None),
+    )
+    return {
+        "change_uuid": str(getattr(change, "change_uuid", "") or ""),
+        "parent_change_uuid": str(getattr(change, "parent_change_uuid", "") or "") or None,
+        "sync_uuid": str(getattr(change, "repo_sync_uuid", "") or ""),
+        "operation": operation,
+        "base_revision": int(getattr(change, "base_revision", 0) or 0),
+        "changed_at": _normalize_sync_datetime(changed_at),
+        "payload": payload,
+    }
+
+
+def _get_or_create_repository_sync_peer(db: Session, project_key: str, server_base_url: str) -> tuple[RepositorySyncPeer, bool]:
+    peer = (
+        db.query(RepositorySyncPeer)
+        .filter(
+            RepositorySyncPeer.project_key == project_key,
+            RepositorySyncPeer.server_base_url == server_base_url,
+        )
+        .first()
+    )
+    if peer:
+        return peer, False
+    peer = RepositorySyncPeer(
+        project_key=project_key,
+        server_base_url=server_base_url,
+        pulled_revision=0,
+    )
+    db.add(peer)
+    db.flush()
+    return peer, True
+
+
+def _seed_repository_peer_snapshot(
+    db: Session,
+    project_key: str,
+    config: dict,
+    *,
+    force: bool = False,
+    server_instance_id: Optional[str] = None,
+) -> RepositorySyncPeer:
+    peer, created = _get_or_create_repository_sync_peer(db, project_key, str(config.get("server_base_url") or ""))
+    if not created and not force:
+        return peer
+    if force:
+        peer.pulled_revision = 0
+        peer.bootstrap_completed_at = None
+    if server_instance_id:
+        peer.server_instance_id = server_instance_id
+    db.add(peer)
+
+    # A repository can intentionally survive a server-side deletion when it
+    # still has a local encrypted copy.  In that case the deleted sync state
+    # (and the marker copied onto the Repository row) is authoritative during
+    # bootstrap.  Discover tombstones before looking at pending changes or
+    # repositories so an old local row can never be re-seeded as an upsert.
+    deleted_states = (
+        db.query(RepositorySyncState)
+        .filter(
+            RepositorySyncState.project_key == project_key,
+            RepositorySyncState.deleted.is_(True),
+        )
+        .all()
+    )
+    tombstone_payloads: dict[str, dict] = {}
+    for state_row in deleted_states:
+        sync_uuid = str(getattr(state_row, "sync_uuid", "") or "").strip()
+        if sync_uuid:
+            tombstone_payloads[sync_uuid] = _sync_state_payload(state_row)
+
+    repos = db.query(Repository).filter(Repository.project_key == project_key).all()
+    for repo in repos:
+        sync_uuid = _ensure_repository_sync_uuid(repo)
+        db.add(repo)
+        file_detail = _safe_json_loads(getattr(repo, "file_detail_json", None))
+        if bool(file_detail.get("sync_deleted_on_server")):
+            tombstone_payloads.setdefault(sync_uuid, _build_repository_sync_payload(repo))
+
+    for sync_uuid, payload in list(tombstone_payloads.items()):
+        canonical = _canonical_repository_sync_payload(
+            payload,
+            project_key=project_key,
+            sync_uuid=sync_uuid,
+        )
+        canonical.update(
+            {
+                "deleted": True,
+                "download_uri": None,
+                "server_exists": False,
+                "server_path": None,
+                "server_target": None,
+                "remote_downloadable": False,
+            }
+        )
+        tombstone_payloads[sync_uuid] = canonical
+
+    pending_rows = (
+        db.query(RepositorySyncChange)
+        .filter(
+            RepositorySyncChange.project_key == project_key,
+            RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+        )
+        .order_by(RepositorySyncChange.id.asc())
+        .all()
+    )
+    pending_uuids: set[str] = set()
+    last_change_by_uuid: dict[str, str] = {}
+    for change in pending_rows:
+        _prepare_repository_sync_change(db, change)
+        sync_uuid = str(getattr(change, "repo_sync_uuid", "") or "").strip()
+        if not sync_uuid:
+            continue
+        change.base_revision = 0
+        change.parent_change_uuid = last_change_by_uuid.get(sync_uuid)
+        if sync_uuid in tombstone_payloads:
+            # Supersede every queued bootstrap upsert for this identity with a
+            # tombstone. Receipts are globally keyed by change_uuid, not by
+            # server instance, so changing either the operation or payload must
+            # also create a fresh idempotency key.
+            tombstone_hash = _repository_sync_payload_hash(tombstone_payloads[sync_uuid])
+            operation_or_payload_changed = bool(
+                str(getattr(change, "change_type", "") or "") != _SYNC_CHANGE_DELETE_SERVER
+                or str(getattr(change, "payload_hash", "") or "") != tombstone_hash
+            )
+            if operation_or_payload_changed:
+                change.change_uuid = uuid.uuid4().hex
+            change.change_type = _SYNC_CHANGE_DELETE_SERVER
+            change.payload_json = json.dumps(tombstone_payloads[sync_uuid], ensure_ascii=False)
+            change.payload_hash = tombstone_hash
+        last_change_by_uuid[sync_uuid] = str(change.change_uuid)
+        pending_uuids.add(sync_uuid)
+        db.add(change)
+
+    # Create missing tombstones before repository upserts.  The repo loop below
+    # skips every UUID placed in pending_uuids, including retained local copies.
+    for sync_uuid, payload in tombstone_payloads.items():
+        if sync_uuid in pending_uuids:
+            continue
+        change = RepositorySyncChange(
+            change_uuid=uuid.uuid4().hex,
+            project_key=project_key,
+            repo_sync_uuid=sync_uuid,
+            change_type=_SYNC_CHANGE_DELETE_SERVER,
+            status=_SYNC_CHANGE_PENDING,
+            source="bootstrap_tombstone",
+            payload_json=json.dumps(payload, ensure_ascii=False),
+            payload_hash=_repository_sync_payload_hash(payload),
+            base_revision=0,
+            origin_node_id=get_repository_sync_node_id(),
+        )
+        db.add(change)
+        db.flush()
+        pending_uuids.add(sync_uuid)
+
+    for repo in repos:
+        sync_uuid = str(getattr(repo, "sync_uuid", "") or "").strip()
+        if sync_uuid in pending_uuids:
+            continue
+        change = RepositorySyncChange(
+            change_uuid=uuid.uuid4().hex,
+            project_key=project_key,
+            repo_db_id=getattr(repo, "id", None),
+            repo_sync_uuid=sync_uuid,
+            change_type=_SYNC_CHANGE_UPSERT,
+            status=_SYNC_CHANGE_PENDING,
+            source="bootstrap",
+            payload_json=json.dumps(_build_repository_sync_payload(repo), ensure_ascii=False),
+            base_revision=0,
+            origin_node_id=get_repository_sync_node_id(),
+        )
+        db.add(change)
+        db.flush()
+        _prepare_repository_sync_change(db, change)
+        pending_uuids.add(sync_uuid)
+    db.flush()
+    return peer
+
+
+def _stage_repository_sync_state_revision_conflicts(
+    db: Session,
+    *,
+    project_key: str,
+    target_revisions: dict[str, int],
+) -> None:
+    """Move rows that block canonical revisions into a temporary namespace.
+
+    SQLite enforces UNIQUE indexes after each row update.  Updating A@1,B@2 to
+    A@2,B@3 therefore fails on A even though the final mapping is unique.  Move
+    both incoming rows and any current holder of an incoming revision to unique
+    negative revisions, flush that phase, then let the caller write the exact
+    authoritative revisions.  A displaced row not present in the current page
+    stays negative only until its own canonical state arrives in a later batch.
+    """
+
+    if not target_revisions:
+        return
+    revision_owners: dict[int, str] = {}
+    for sync_uuid, revision in target_revisions.items():
+        normalized_revision = int(revision or 0)
+        if normalized_revision <= 0:
+            raise RuntimeError("同步服务器返回了无效的状态修订号")
+        previous_owner = revision_owners.get(normalized_revision)
+        if previous_owner and previous_owner != sync_uuid:
+            raise RuntimeError("同步服务器返回了重复的状态修订号")
+        revision_owners[normalized_revision] = sync_uuid
+
+    existing_rows = (
+        db.query(RepositorySyncState)
+        .filter(RepositorySyncState.project_key == project_key)
+        .all()
+    )
+    rows_to_stage: list[RepositorySyncState] = []
+    existing_revisions: list[int] = []
+    for row in existing_rows:
+        sync_uuid = str(getattr(row, "sync_uuid", "") or "").strip()
+        current_revision = int(getattr(row, "revision", 0) or 0)
+        existing_revisions.append(current_revision)
+        target_revision = target_revisions.get(sync_uuid)
+        incoming_owner = revision_owners.get(current_revision)
+        if (
+            (target_revision is not None and int(target_revision) != current_revision)
+            or (incoming_owner is not None and incoming_owner != sync_uuid)
+        ):
+            rows_to_stage.append(row)
+
+    if not rows_to_stage:
+        return
+    used_revisions = set(existing_revisions) | set(revision_owners)
+    temporary_revision = min(used_revisions | {0}) - 1
+    for row in rows_to_stage:
+        while temporary_revision in used_revisions:
+            temporary_revision -= 1
+        row.revision = temporary_revision
+        used_revisions.add(temporary_revision)
+        temporary_revision -= 1
+        db.add(row)
+    db.flush()
+
+
+def _apply_peer_canonical_states(
+    db: Session,
+    *,
+    project_key: str,
+    states: list[dict],
+    fallback_user_id: Optional[int],
+) -> int:
+    prepared_states: list[tuple[dict, str, dict, int, datetime]] = []
+    target_revisions: dict[str, int] = {}
+    for item in states:
+        if not isinstance(item, dict):
+            continue
+        sync_uuid = str(item.get("sync_uuid") or "").strip()
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if not sync_uuid:
+            continue
+        has_pending = (
+            db.query(RepositorySyncChange.id)
+            .filter(
+                RepositorySyncChange.project_key == project_key,
+                RepositorySyncChange.repo_sync_uuid == sync_uuid,
+                RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+            )
+            .first()
+        )
+        if has_pending:
+            continue
+        revision = int(item.get("revision") or 0)
+        if sync_uuid in target_revisions:
+            raise RuntimeError("同步服务器在同一批次返回了重复的制品状态")
+        source_updated_at = _normalize_sync_timestamp_value(item.get("source_updated_at") or payload.get("updated_at"))
+        target_revisions[sync_uuid] = revision
+        prepared_states.append((item, sync_uuid, payload, revision, source_updated_at))
+
+    if not prepared_states:
+        return 0
+    _stage_repository_sync_state_revision_conflicts(
+        db,
+        project_key=project_key,
+        target_revisions=target_revisions,
+    )
+
+    applied_uuids: set[str] = set()
+    for item, sync_uuid, payload, revision, source_updated_at in prepared_states:
+        state_row = _upsert_repository_sync_state(
+            db,
+            project_key=project_key,
+            sync_uuid=sync_uuid,
+            payload=payload,
+            deleted=bool(item.get("deleted")),
+            revision=revision,
+            source_updated_at=source_updated_at,
+            applied_change_id=None,
+            updated_by_job_id=None,
+        )
+        state_row.payload_hash = str(item.get("payload_hash") or "") or _repository_sync_payload_hash(payload)
+        state_row.origin_node_id = str(item.get("origin_node_id") or "") or None
+        state_row.origin_change_uuid = str(item.get("origin_change_uuid") or "") or None
+        state_row.server_instance_id = str(item.get("server_node_id") or item.get("server_instance_id") or "") or None
+        db.add(state_row)
+        applied_uuids.add(sync_uuid)
+    db.flush()
+    return _apply_project_sync_states_to_local(
+        db,
+        project_key=project_key,
+        fallback_user_id=fallback_user_id,
+        target_sync_uuids=applied_uuids,
+    )
+
+
+def _mark_repository_push_results(
+    db: Session,
+    *,
+    project_key: str,
+    results: list[dict],
+    fallback_user_id: Optional[int],
+) -> tuple[int, int, int]:
+    uploaded = 0
+    conflicts = 0
+    failed = 0
+    canonical_states: list[dict] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        change_uuid = str(result.get("change_uuid") or "").strip()
+        change = (
+            db.query(RepositorySyncChange)
+            .filter(
+                RepositorySyncChange.project_key == project_key,
+                RepositorySyncChange.change_uuid == change_uuid,
+            )
+            .first()
+        )
+        if not change:
+            continue
+        outcome = str(result.get("outcome") or "").strip()
+        if outcome in {"applied", "already_applied", "no_op"}:
+            change.status = _SYNC_CHANGE_SYNCED
+            uploaded += 1
+        elif outcome == "conflict_server_wins":
+            change.status = _SYNC_CHANGE_RESOLVED_SERVER
+            conflicts += 1
+        else:
+            change.status = _SYNC_CHANGE_FAILED
+            change.error_message = str(result.get("error") or "同步服务器拒绝了该变更")
+            failed += 1
+        change.server_revision = int(result.get("server_revision") or 0)
+        change.synced_at = datetime.utcnow()
+        db.add(change)
+        canonical = result.get("canonical")
+        if isinstance(canonical, dict):
+            canonical_states.append(canonical)
+    db.flush()
+    _apply_peer_canonical_states(
+        db,
+        project_key=project_key,
+        states=canonical_states,
+        fallback_user_id=fallback_user_id,
+    )
+    return uploaded, conflicts, failed
+
+
+def _push_repository_changes_to_peer(
+    db: Session,
+    *,
+    project_key: str,
+    config: dict,
+    fallback_user_id: Optional[int],
+    lease_owner_id: Optional[str] = None,
+    lease_seconds: int = _SYNC_LEASE_SECONDS,
+    expected_server_instance_id: Optional[str] = None,
+) -> tuple[int, int, int, str, str]:
+    health = _repository_peer_health(config)
+    server_node_id = str(health.get("node_id") or "")
+    server_instance_id = str(health.get("server_instance_id") or server_node_id)
+    if expected_server_instance_id and server_instance_id != expected_server_instance_id:
+        raise RuntimeError("同步服务器数据库实例在本地快照准备后发生变化")
+    uploaded = conflicts = failed = 0
+    batch_size = max(int(config.get("batch_size") or _SYNC_AUTO_BATCH_LIMIT), 1)
+    while True:
+        rows = (
+            db.query(RepositorySyncChange)
+            .filter(
+                RepositorySyncChange.project_key == project_key,
+                RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+            )
+            .order_by(RepositorySyncChange.created_at.asc(), RepositorySyncChange.id.asc())
+            .limit(batch_size)
+            .all()
+        )
+        if not rows:
+            break
+        for row in rows:
+            _prepare_repository_sync_change(db, row)
+        if lease_owner_id:
+            _renew_repository_sync_lease(db, project_key, lease_owner_id, lease_seconds=lease_seconds)
+        db.commit()
+        wire_changes = [_repository_change_wire_payload(row) for row in rows]
+        response = _repository_peer_request_json(
+            config,
+            f"/api/repositories/peer-sync/v1/projects/{urllib.parse.quote(project_key, safe='')}/push",
+            payload={
+                "protocol_version": _SYNC_PROTOCOL_VERSION,
+                "node_id": get_repository_sync_node_id(),
+                "batch_uuid": uuid.uuid4().hex,
+                "changes": wire_changes,
+            },
+        )
+        response_node_id = str(response.get("server_node_id") or "")
+        if response_node_id and response_node_id != server_node_id:
+            raise RuntimeError("同步服务器节点标识在请求期间发生变化")
+        response_instance_id = str(response.get("server_instance_id") or response_node_id)
+        if response_instance_id and response_instance_id != server_instance_id:
+            raise RuntimeError("同步服务器数据库实例在请求期间发生变化")
+        results = response.get("results") if isinstance(response.get("results"), list) else []
+        returned = {str(item.get("change_uuid") or "") for item in results if isinstance(item, dict)}
+        expected = {str(item.get("change_uuid") or "") for item in wire_changes}
+        if returned != expected:
+            raise RuntimeError("同步服务器未完整确认本批次变更")
+        batch_uploaded, batch_conflicts, batch_failed = _mark_repository_push_results(
+            db,
+            project_key=project_key,
+            results=results,
+            fallback_user_id=fallback_user_id,
+        )
+        uploaded += batch_uploaded
+        conflicts += batch_conflicts
+        failed += batch_failed
+        if lease_owner_id:
+            _renew_repository_sync_lease(db, project_key, lease_owner_id, lease_seconds=lease_seconds)
+        db.commit()
+    return uploaded, conflicts, failed, server_node_id, server_instance_id
+
+
+def _pull_repository_states_from_peer(
+    db: Session,
+    *,
+    project_key: str,
+    config: dict,
+    fallback_user_id: Optional[int],
+    server_node_id: str,
+    server_instance_id: str,
+    lease_owner_id: Optional[str] = None,
+    lease_seconds: int = _SYNC_LEASE_SECONDS,
+) -> int:
+    peer, _ = _get_or_create_repository_sync_peer(db, project_key, str(config.get("server_base_url") or ""))
+    if str(getattr(peer, "server_instance_id", "") or "") not in {"", server_instance_id}:
+        peer.pulled_revision = 0
+    peer.server_instance_id = server_instance_id
+    db.add(peer)
+    if lease_owner_id:
+        _renew_repository_sync_lease(db, project_key, lease_owner_id, lease_seconds=lease_seconds)
+    db.commit()
+    downloaded = 0
+    batch_size = max(int(config.get("batch_size") or _SYNC_AUTO_BATCH_LIMIT), 1)
+    while True:
+        after_revision = int(getattr(peer, "pulled_revision", 0) or 0)
+        query = urllib.parse.urlencode({"after_revision": after_revision, "limit": batch_size})
+        response = _repository_peer_request_json(
+            config,
+            f"/api/repositories/peer-sync/v1/projects/{urllib.parse.quote(project_key, safe='')}/pull?{query}",
+            method="GET",
+        )
+        response_node_id = str(response.get("server_node_id") or "")
+        if response_node_id != server_node_id:
+            raise RuntimeError("同步服务器节点标识发生变化")
+        response_instance_id = str(response.get("server_instance_id") or response_node_id)
+        if response_instance_id != server_instance_id:
+            raise RuntimeError("同步服务器数据库实例发生变化")
+        states = response.get("states") if isinstance(response.get("states"), list) else []
+        downloaded += _apply_peer_canonical_states(
+            db,
+            project_key=project_key,
+            states=states,
+            fallback_user_id=fallback_user_id,
+        )
+        peer = (
+            db.query(RepositorySyncPeer)
+            .filter(
+                RepositorySyncPeer.project_key == project_key,
+                RepositorySyncPeer.server_base_url == str(config.get("server_base_url") or ""),
+            )
+            .one()
+        )
+        peer.server_instance_id = server_instance_id
+        peer.pulled_revision = max(
+            int(getattr(peer, "pulled_revision", 0) or 0),
+            int(response.get("next_revision") or after_revision),
+        )
+        peer.last_pull_at = datetime.utcnow()
+        db.add(peer)
+        if lease_owner_id:
+            _renew_repository_sync_lease(db, project_key, lease_owner_id, lease_seconds=lease_seconds)
+        db.commit()
+        if not bool(response.get("has_more")):
+            break
+    return downloaded
+
+
+def _seed_authoritative_repository_snapshot(db: Session, project_key: str) -> int:
+    """Queue baseline changes for repositories created before the outbox existed.
+
+    Server/standalone upgrades can contain business rows but no sync state.  If
+    a client then sends a zero-based bootstrap change, the empty state table
+    would incorrectly let the client replace server data.  Seed those rows into
+    the normal transactional outbox first; publishing them establishes a
+    non-zero authoritative revision before peer changes are evaluated.
+    """
+
+    state_uuids = {
+        str(row[0] or "").strip()
+        for row in db.query(RepositorySyncState.sync_uuid)
+        .filter(RepositorySyncState.project_key == project_key)
+        .all()
+        if str(row[0] or "").strip()
+    }
+    pending_uuids = {
+        str(row[0] or "").strip()
+        for row in db.query(RepositorySyncChange.repo_sync_uuid)
+        .filter(
+            RepositorySyncChange.project_key == project_key,
+            RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+        )
+        .all()
+        if str(row[0] or "").strip()
+    }
+    seeded = 0
+    repos = db.query(Repository).filter(Repository.project_key == project_key).all()
+    for repo in repos:
+        sync_uuid = _ensure_repository_sync_uuid(repo)
+        db.add(repo)
+        if sync_uuid in state_uuids or sync_uuid in pending_uuids:
+            continue
+        file_detail = _safe_json_loads(getattr(repo, "file_detail_json", None))
+        change_type = (
+            _SYNC_CHANGE_DELETE_SERVER
+            if bool(file_detail.get("sync_deleted_on_server"))
+            else _SYNC_CHANGE_UPSERT
+        )
+        change = _record_repository_sync_change_for_repo(
+            db,
+            repo,
+            change_type=change_type,
+            current_user=None,
+            source="server_upgrade_baseline",
+        )
+        if change is not None:
+            pending_uuids.add(sync_uuid)
+            seeded += 1
+    return seeded
+
+
+def _publish_local_repository_changes(
+    db: Session,
+    *,
+    project_key: str,
+    fallback_user_id: Optional[int] = None,
+    lease_owner_id: Optional[str] = None,
+    lease_seconds: int = _SYNC_LEASE_SECONDS,
+) -> tuple[int, int, int]:
+    uploaded = conflicts = failed = 0
+    # This is called only for authoritative roles (the local server job and
+    # peer endpoints).  Keep baseline seeding in the same caller-owned
+    # transaction as the first publication batch.
+    _seed_authoritative_repository_snapshot(db, project_key)
+    while True:
+        rows = (
+            db.query(RepositorySyncChange)
+            .filter(
+                RepositorySyncChange.project_key == project_key,
+                RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+            )
+            .order_by(RepositorySyncChange.created_at.asc(), RepositorySyncChange.id.asc())
+            .limit(_SYNC_AUTO_BATCH_LIMIT)
+            .all()
+        )
+        if not rows:
+            break
+        for row in rows:
+            _prepare_repository_sync_change(db, row)
+        db.flush()
+        result = _apply_repository_peer_changes(
+            db,
+            project_key=project_key,
+            origin_node_id=get_repository_sync_node_id(),
+            changes=[_repository_change_wire_payload(row) for row in rows],
+        )
+        batch_uploaded, batch_conflicts, batch_failed = _mark_repository_push_results(
+            db,
+            project_key=project_key,
+            results=result.get("results") if isinstance(result.get("results"), list) else [],
+            fallback_user_id=fallback_user_id,
+        )
+        uploaded += batch_uploaded
+        conflicts += batch_conflicts
+        failed += batch_failed
+        if lease_owner_id:
+            _renew_repository_sync_lease(db, project_key, lease_owner_id, lease_seconds=lease_seconds)
+        db.commit()
+    # Persist committed revision high-water marks before a job or endpoint can
+    # report success.  If the sidecar cannot be made durable, a retry is safer
+    # than acknowledging a cursor that a later database restore could hide.
+    _get_repository_server_instance_id(db)
+    return uploaded, conflicts, failed
+
+
+def _acquire_repository_sync_lease(
+    db: Session,
+    project_key: str,
+    owner_id: str,
+    *,
+    lease_seconds: int = _SYNC_LEASE_SECONDS,
+) -> bool:
+    db.rollback()
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    now = datetime.utcnow()
+    lease = (
+        db.query(RepositorySyncLease)
+        .filter(RepositorySyncLease.project_key == project_key)
+        .first()
+    )
+    if lease and str(getattr(lease, "owner_id", "") or "") != owner_id and getattr(lease, "lease_until", None) and lease.lease_until > now:
+        db.rollback()
+        return False
+    if not lease:
+        lease = RepositorySyncLease(project_key=project_key)
+    lease.owner_id = owner_id
+    lease.lease_until = now + timedelta(seconds=max(int(lease_seconds), 60))
+    lease.heartbeat_at = now
+    db.add(lease)
+    db.commit()
+    return True
+
+
+def _renew_repository_sync_lease(
+    db: Session,
+    project_key: str,
+    owner_id: str,
+    *,
+    lease_seconds: int = _SYNC_LEASE_SECONDS,
+) -> None:
+    lease = (
+        db.query(RepositorySyncLease)
+        .filter(
+            RepositorySyncLease.project_key == project_key,
+            RepositorySyncLease.owner_id == owner_id,
+        )
+        .first()
+    )
+    if not lease:
+        raise RuntimeError("仓库数据同步租约已丢失")
+    now = datetime.utcnow()
+    lease.lease_until = now + timedelta(seconds=max(int(lease_seconds), 60))
+    lease.heartbeat_at = now
+    db.add(lease)
+
+
+def _release_repository_sync_lease(db: Session, project_key: str, owner_id: str) -> None:
+    db.rollback()
+    lease = (
+        db.query(RepositorySyncLease)
+        .filter(
+            RepositorySyncLease.project_key == project_key,
+            RepositorySyncLease.owner_id == owner_id,
+        )
+        .first()
+    )
+    if lease:
+        # owner_id/lease_until are deliberately NOT NULL.  Removing the row is
+        # both the clean release operation and prevents a stale owner from
+        # blocking the next background cycle.
+        db.delete(lease)
+        db.commit()
+
+
 def _apply_project_auto_sync_entry_to_local(
     db: Session,
     *,
@@ -3856,9 +5203,22 @@ def _apply_project_auto_sync_entry_to_local(
 
     created = False
     if not repo:
+        local_user_id: Optional[int] = None
+        try:
+            candidate_user_id = int(fallback_user_id) if fallback_user_id is not None else None
+        except (TypeError, ValueError):
+            candidate_user_id = None
+        if candidate_user_id is not None:
+            local_user_id = (
+                db.query(User.id)
+                .filter(User.id == candidate_user_id)
+                .scalar()
+            )
         repo = Repository(
             project_key=project_key,
-            created_by_user_id=fallback_user_id or entry.get("created_by_user_id"),
+            # Never consume a user ID from a remote/legacy payload.  Only a
+            # verified user from this local database may own the new row.
+            created_by_user_id=local_user_id,
             source_type=str(entry.get("source_type") or "local_upload"),
         )
         created = True
@@ -3960,7 +5320,7 @@ def _apply_project_auto_sync_state_to_local(
     query = db.query(Repository).filter(Repository.project_key == project_key)
     if target_sync_uuids is not None:
         query = query.filter(Repository.sync_uuid.in_(target_sync_uuids))
-    
+
     rows = query.all()
     existing_by_sync_uuid: dict[str, Repository] = {}
     for row in rows:
@@ -3997,9 +5357,9 @@ def _apply_project_sync_states_to_local(
     )
     if target_sync_uuids is not None:
         query = query.filter(RepositorySyncState.sync_uuid.in_(target_sync_uuids))
-        
+
     rows = query.order_by(RepositorySyncState.revision.asc(), RepositorySyncState.id.asc()).all()
-    
+
     state = {
         "revision": max([int(getattr(row, "revision", 0) or 0) for row in rows] or [0]),
         "entries": {},
@@ -4020,21 +5380,28 @@ def _apply_project_sync_states_to_local(
 
 def _run_repository_auto_sync_job(job_id: int, project_key: str) -> None:
     db = SessionLocal()
+    owner_id = uuid.uuid4().hex
+    lease_acquired = False
     try:
         job = db.query(RepositorySyncJob).filter(RepositorySyncJob.id == job_id).first()
         if not job:
             return
-        setting = _get_or_create_project_setting(db, project_key)
-        pending_changes = (
-            db.query(RepositorySyncChange)
-            .filter(
-                RepositorySyncChange.project_key == project_key,
-                RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
-            )
-            .order_by(RepositorySyncChange.created_at.asc(), RepositorySyncChange.id.asc())
-            .limit(_SYNC_AUTO_BATCH_LIMIT)
-            .all()
+        sync_config = _get_repository_data_sync_config()
+        lease_seconds = max(
+            _SYNC_LEASE_SECONDS,
+            int(float(sync_config.get("request_timeout_seconds") or 30)) + 60,
         )
+        lease_acquired = _acquire_repository_sync_lease(
+            db,
+            project_key,
+            owner_id,
+            lease_seconds=lease_seconds,
+        )
+        if not lease_acquired:
+            raise RuntimeError("当前项目已有其他实例正在同步")
+        setting = _get_or_create_project_setting(db, project_key)
+        setting_config = _safe_json_loads(getattr(setting, "codearts_config_json", None))
+        project_delete_pending = bool(setting_config.get(_SYNC_PROJECT_DELETE_PENDING_FIELD))
         total_pending_before = (
             db.query(RepositorySyncChange)
             .filter(
@@ -4055,106 +5422,105 @@ def _run_repository_auto_sync_job(job_id: int, project_key: str) -> None:
         if setting and getattr(setting, "auto_sync_state_json", None):
             setting.auto_sync_state_json = None
             db.add(setting)
-        db.flush()
-        current_revision = _get_project_sync_state_revision(db, project_key)
-        upload_count = 0
-        conflict_count = 0
-        now = datetime.utcnow()
-        processed_sync_uuids = set()
-        for i, change in enumerate(pending_changes):
-            payload = _safe_json_loads(getattr(change, "payload_json", None))
-            sync_uuid = str(getattr(change, "repo_sync_uuid", None) or payload.get("sync_uuid") or "").strip()
-            if not sync_uuid:
-                change.status = _SYNC_CHANGE_FAILED
-                change.error_message = "缺少同步标识"
-                change.synced_job_id = job.id
-                change.synced_at = now
-                db.add(change)
-                continue
-
-            processed_sync_uuids.add(sync_uuid)
-            state_row = (
-                db.query(RepositorySyncState)
+        db.commit()
+        upload_count = conflict_count = skipped_count = download_count = 0
+        server_node_id: Optional[str] = None
+        server_instance_id: Optional[str] = None
+        if sync_config.get("role") == "client":
+            initial_health = _repository_peer_health(sync_config)
+            initial_instance_id = str(
+                initial_health.get("server_instance_id")
+                or initial_health.get("node_id")
+                or ""
+            )
+            existing_peer = (
+                db.query(RepositorySyncPeer)
                 .filter(
-                    RepositorySyncState.project_key == project_key,
-                    RepositorySyncState.sync_uuid == sync_uuid,
+                    RepositorySyncPeer.project_key == project_key,
+                    RepositorySyncPeer.server_base_url == str(sync_config.get("server_base_url") or ""),
                 )
                 .first()
             )
-            current_entry = _sync_state_payload(state_row)
-            server_updated_at = getattr(state_row, "source_updated_at", None) or _parse_sync_timestamp((current_entry or {}).get("updated_at"))
-            local_updated_at = _parse_sync_timestamp(payload.get("updated_at")) or getattr(change, "created_at", None) or now
-
-            if change.change_type == _SYNC_CHANGE_UPSERT:
-                is_conflict = False
-                if current_entry and server_updated_at and local_updated_at and server_updated_at > local_updated_at:
-                    c_sha = str(current_entry.get("sha256") or current_entry.get("md5") or "").strip()
-                    p_sha = str(payload.get("sha256") or payload.get("md5") or "").strip()
-                    if not (c_sha and p_sha and c_sha == p_sha):
-                        is_conflict = True
-
-                if is_conflict:
-                    change.status = _SYNC_CHANGE_RESOLVED_SERVER
-                    conflict_count += 1
-                else:
-                    current_revision += 1
-                    next_entry = dict(current_entry or {})
-                    next_entry.update(payload)
-                    next_entry["deleted"] = False
-                    next_entry["updated_at"] = payload.get("updated_at") or _normalize_sync_datetime(local_updated_at)
-                    _upsert_repository_sync_state(
-                        db,
-                        project_key=project_key,
-                        sync_uuid=sync_uuid,
-                        payload=next_entry,
-                        deleted=False,
-                        revision=current_revision,
-                        source_updated_at=local_updated_at,
-                        applied_change_id=getattr(change, "id", None),
-                        updated_by_job_id=getattr(job, "id", None),
+            previous_instance_id = str(getattr(existing_peer, "server_instance_id", "") or "") if existing_peer else ""
+            force_bootstrap = bool(
+                existing_peer
+                and (
+                    previous_instance_id != initial_instance_id
+                    or (
+                        not previous_instance_id
+                        and int(getattr(existing_peer, "pulled_revision", 0) or 0) > 0
                     )
-                    change.status = _SYNC_CHANGE_SYNCED
-                    upload_count += 1
-            elif change.change_type == _SYNC_CHANGE_DELETE_SERVER:
-                current_revision += 1
-                next_entry = dict(current_entry or {})
-                next_entry.update(payload)
-                next_entry["deleted"] = True
-                next_entry["updated_at"] = _normalize_sync_datetime(local_updated_at)
-                next_entry["download_uri"] = None
-                next_entry["server_exists"] = False
-                next_entry["server_path"] = None
-                next_entry["server_target"] = None
-                next_entry["remote_downloadable"] = False
-                _upsert_repository_sync_state(
+                )
+            )
+            peer = _seed_repository_peer_snapshot(
+                db,
+                project_key,
+                sync_config,
+                force=force_bootstrap,
+                server_instance_id=initial_instance_id,
+            )
+            db.commit()
+            # A cycle is push followed by pull. If a local edit arrives during
+            # pull, start another cycle so a successful job never leaves work
+            # silently queued.
+            for _ in range(20):
+                pushed, conflicts, failed, server_node_id, server_instance_id = _push_repository_changes_to_peer(
                     db,
                     project_key=project_key,
-                    sync_uuid=sync_uuid,
-                    payload=next_entry,
-                    deleted=True,
-                    revision=current_revision,
-                    source_updated_at=local_updated_at,
-                    applied_change_id=getattr(change, "id", None),
-                    updated_by_job_id=getattr(job, "id", None),
+                    config=sync_config,
+                    fallback_user_id=getattr(job, "triggered_by_user_id", None),
+                    lease_owner_id=owner_id,
+                    lease_seconds=lease_seconds,
+                    expected_server_instance_id=initial_instance_id,
                 )
-                change.status = _SYNC_CHANGE_SYNCED
-                upload_count += 1
+                upload_count += pushed
+                conflict_count += conflicts
+                skipped_count += failed
+                download_count += _pull_repository_states_from_peer(
+                    db,
+                    project_key=project_key,
+                    config=sync_config,
+                    fallback_user_id=getattr(job, "triggered_by_user_id", None),
+                    server_node_id=server_node_id,
+                    server_instance_id=server_instance_id,
+                    lease_owner_id=owner_id,
+                    lease_seconds=lease_seconds,
+                )
+                remaining = (
+                    db.query(RepositorySyncChange.id)
+                    .filter(
+                        RepositorySyncChange.project_key == project_key,
+                        RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+                    )
+                    .count()
+                )
+                if remaining == 0:
+                    break
             else:
-                change.status = _SYNC_CHANGE_FAILED
-                change.error_message = f"未知变更类型: {change.change_type}"
-            change.synced_job_id = job.id
-            change.synced_at = now
-            db.add(change)
+                raise RuntimeError("同步期间本地变更持续写入，已达到安全循环上限")
+            peer = (
+                db.query(RepositorySyncPeer)
+                .filter(
+                    RepositorySyncPeer.project_key == project_key,
+                    RepositorySyncPeer.server_base_url == str(sync_config.get("server_base_url") or ""),
+                )
+                .one()
+            )
+            peer.bootstrap_completed_at = peer.bootstrap_completed_at or datetime.utcnow()
+            peer.last_push_at = datetime.utcnow()
+            peer.last_success_at = datetime.utcnow()
+            peer.last_error = None
+            db.add(peer)
+            db.commit()
+        else:
+            upload_count, conflict_count, skipped_count = _publish_local_repository_changes(
+                db,
+                project_key=project_key,
+                fallback_user_id=getattr(job, "triggered_by_user_id", None),
+                lease_owner_id=owner_id,
+                lease_seconds=lease_seconds,
+            )
 
-        db.flush()
-        setting.auto_sync_last_error = None
-        download_count = _apply_project_sync_states_to_local(
-            db,
-            project_key=project_key,
-            fallback_user_id=getattr(job, "triggered_by_user_id", None),
-            target_sync_uuids=processed_sync_uuids,
-        )
-        db.flush()
         remaining_pending = (
             db.query(RepositorySyncChange)
             .filter(
@@ -4170,22 +5536,45 @@ def _run_repository_auto_sync_job(job_id: int, project_key: str) -> None:
         job.conflict_count = conflict_count
         job.total_synced_count = upload_count + download_count
         job.pending_change_count = remaining_pending
-        job.skipped_count = max(len(pending_changes) - upload_count - conflict_count, 0)
+        job.skipped_count = skipped_count
         job.result_json = json.dumps(
             {
-                "revision": current_revision,
+                "mode": "peer" if sync_config.get("role") == "client" else "authoritative",
+                "server_node_id": server_node_id,
+                "server_instance_id": server_instance_id,
+                "revision": _get_project_sync_state_revision(db, project_key),
                 "upload_count": upload_count,
                 "download_count": download_count,
                 "conflict_count": conflict_count,
-                "processed_change_count": len(pending_changes),
                 "pending_change_count": remaining_pending,
-                "batch_limit": _SYNC_AUTO_BATCH_LIMIT,
+                "batch_limit": int(sync_config.get("batch_size") or _SYNC_AUTO_BATCH_LIMIT),
             },
             ensure_ascii=False,
         )
-        setting.auto_sync_last_job_id = job.id
-        setting.auto_sync_last_success_at = job.finished_at
-        db.add(setting)
+        delete_completed = bool(
+            project_delete_pending
+            and remaining_pending == 0
+            and conflict_count == 0
+            and skipped_count == 0
+        )
+        if delete_completed:
+            db.query(RepositoryProjectMember).filter(
+                RepositoryProjectMember.project_key == project_key
+            ).delete(synchronize_session=False)
+            db.delete(setting)
+        else:
+            if project_delete_pending and (conflict_count > 0 or skipped_count > 0):
+                # Server-wins conflict means the requested project deletion did
+                # not complete.  Make the project visible again instead of
+                # leaving a permanently hidden, non-retryable configuration.
+                setting_config.pop(_SYNC_PROJECT_DELETE_PENDING_FIELD, None)
+                setting.codearts_config_json = json.dumps(setting_config, ensure_ascii=False)
+                setting.auto_sync_last_error = "项目删除未被同步服务器接受，已保留服务器状态"
+            else:
+                setting.auto_sync_last_error = None
+            setting.auto_sync_last_job_id = job.id
+            setting.auto_sync_last_success_at = job.finished_at
+            db.add(setting)
         db.add(job)
         db.commit()
     except Exception as exc:
@@ -4207,6 +5596,11 @@ def _run_repository_auto_sync_job(job_id: int, project_key: str) -> None:
             json.dumps({"project_key": project_key, "job_id": job_id, "error": str(exc)}, ensure_ascii=False, default=str),
         )
     finally:
+        if lease_acquired:
+            try:
+                _release_repository_sync_lease(db, project_key, owner_id)
+            except Exception:
+                logger.exception("repository.auto_sync.lease_release_failed | project_key=%s", project_key)
         db.close()
         with _SYNC_RUNTIME_LOCK:
             _SYNC_RUNNING_PROJECTS.discard(project_key)
@@ -4231,12 +5625,18 @@ def _launch_repository_auto_sync_job(job_id: int, project_key: str) -> bool:
 def recover_repository_auto_sync_jobs() -> None:
     db = SessionLocal()
     try:
+        # Lease owners are in-process worker identities.  After a service
+        # restart none of them can still be alive, so retaining a future lease
+        # would unnecessarily block automatic recovery for up to the request
+        # timeout window.
+        db.query(RepositorySyncLease).delete(synchronize_session=False)
         interrupted_jobs = (
             db.query(RepositorySyncJob)
             .filter(RepositorySyncJob.status.in_([_SYNC_JOB_PENDING, _SYNC_JOB_RUNNING]))
             .all()
         )
         if not interrupted_jobs:
+            db.commit()
             return
         interrupted_projects = {str(getattr(job, "project_key", "") or "").strip() for job in interrupted_jobs if str(getattr(job, "project_key", "") or "").strip()}
         now = datetime.utcnow()
@@ -4253,6 +5653,462 @@ def recover_repository_auto_sync_jobs() -> None:
         db.commit()
     finally:
         db.close()
+
+
+def _list_enabled_repository_sync_projects() -> list[dict]:
+    """Load enabled CodeArts projects without depending on an interactive user."""
+    db = SessionLocal()
+    try:
+        candidates: list[dict] = []
+        for setting in db.query(RepositoryProjectSetting).all():
+            project_key = str(getattr(setting, "project_key", "") or "").strip()
+            raw_config = _safe_json_loads(getattr(setting, "codearts_config_json", None))
+            delete_pending = bool(raw_config.get(_SYNC_PROJECT_DELETE_PENDING_FIELD))
+            if not project_key.startswith("proj_") or not (bool(raw_config.get("enabled")) or delete_pending):
+                continue
+            candidates.append(
+                {
+                    "project_key": project_key,
+                    "codearts_config": _build_effective_codearts_config(raw_config),
+                    "triggered_by_user_id": getattr(setting, "updated_by_user_id", None),
+                    "project_delete_pending": delete_pending,
+                }
+            )
+        return candidates
+    finally:
+        db.close()
+
+
+def _enqueue_repository_data_sync_job(
+    project_key: str,
+    *,
+    triggered_by_user_id: Optional[int],
+    trigger_source: str,
+) -> Optional[int]:
+    """Create and launch one durable job unless the project already has one."""
+    if _is_repository_auto_sync_running(project_key):
+        return None
+    db = SessionLocal()
+    job_id: Optional[int] = None
+    try:
+        running = (
+            db.query(RepositorySyncJob)
+            .filter(
+                RepositorySyncJob.project_key == project_key,
+                RepositorySyncJob.status.in_([_SYNC_JOB_PENDING, _SYNC_JOB_RUNNING]),
+            )
+            .first()
+        )
+        if running:
+            return None
+        pending_count = (
+            db.query(RepositorySyncChange)
+            .filter(
+                RepositorySyncChange.project_key == project_key,
+                RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+            )
+            .count()
+        )
+        setting = _get_or_create_project_setting(db, project_key)
+        job = RepositorySyncJob(
+            project_key=project_key,
+            triggered_by_user_id=triggered_by_user_id,
+            trigger_source=trigger_source,
+            status=_SYNC_JOB_PENDING,
+            pending_change_count=pending_count,
+        )
+        db.add(job)
+        db.flush()
+        job_id = int(job.id)
+        setting.auto_sync_last_job_id = job_id
+        setting.auto_sync_last_error = None
+        db.add(setting)
+        db.commit()
+    finally:
+        db.close()
+
+    if job_id is None:
+        return None
+    if _launch_repository_auto_sync_job(job_id, project_key):
+        return job_id
+
+    # A simultaneous request won the in-process launch race.  Do not leave a
+    # durable pending row that would make all future cycles appear busy.
+    db = SessionLocal()
+    try:
+        job = db.query(RepositorySyncJob).filter(RepositorySyncJob.id == job_id).first()
+        if job and job.status == _SYNC_JOB_PENDING:
+            job.status = _SYNC_JOB_FAILED
+            job.finished_at = datetime.utcnow()
+            job.error_message = "auto sync already running; duplicate trigger skipped"
+            db.add(job)
+            db.commit()
+    finally:
+        db.close()
+    return None
+
+
+def _repository_sync_project_needs_run(
+    project_key: str,
+    sync_config: dict,
+    *,
+    became_online: bool,
+) -> bool:
+    """Check local outbox and, for a client, the remote revision cursor."""
+    db = SessionLocal()
+    try:
+        pending_count = (
+            db.query(RepositorySyncChange.id)
+            .filter(
+                RepositorySyncChange.project_key == project_key,
+                RepositorySyncChange.status == _SYNC_CHANGE_PENDING,
+            )
+            .count()
+        )
+        if sync_config.get("role") != "client":
+            if pending_count > 0:
+                return True
+            # An upgraded server may have repository rows that predate the
+            # transactional outbox.  Treat a missing state as runnable work so
+            # the coordinator establishes the authoritative baseline without
+            # waiting for the first client request.
+            state_uuids = {
+                str(row[0] or "").strip()
+                for row in db.query(RepositorySyncState.sync_uuid)
+                .filter(RepositorySyncState.project_key == project_key)
+                .all()
+                if str(row[0] or "").strip()
+            }
+            repository_sync_uuids = [
+                str(row[0] or "").strip()
+                for row in db.query(Repository.sync_uuid)
+                .filter(Repository.project_key == project_key)
+                .all()
+            ]
+            return any(
+                not sync_uuid or sync_uuid not in state_uuids
+                for sync_uuid in repository_sync_uuids
+            )
+        peer = (
+            db.query(RepositorySyncPeer)
+            .filter(
+                RepositorySyncPeer.project_key == project_key,
+                RepositorySyncPeer.server_base_url == str(sync_config.get("server_base_url") or ""),
+            )
+            .first()
+        )
+        after_revision = int(getattr(peer, "pulled_revision", 0) or 0) if peer else 0
+        peer_instance_id = str(getattr(peer, "server_instance_id", "") or "") if peer else ""
+        needs_bootstrap = peer is None or getattr(peer, "bootstrap_completed_at", None) is None
+    finally:
+        db.close()
+
+    # Verify the configured PCIDS server before creating a job, keeping normal
+    # network outages silent and free from failed-job spam.
+    health = _repository_peer_health(sync_config)
+    server_node_id = str(health.get("node_id") or "")
+    server_instance_id = str(health.get("server_instance_id") or server_node_id)
+    if pending_count > 0 or became_online or needs_bootstrap or peer_instance_id != server_instance_id:
+        return True
+    query = urllib.parse.urlencode({"after_revision": after_revision})
+    status = _repository_peer_request_json(
+        sync_config,
+        f"/api/repositories/peer-sync/v1/projects/{urllib.parse.quote(project_key, safe='')}/status?{query}",
+        method="GET",
+        timeout_seconds=float(sync_config.get("connect_timeout_seconds") or 3),
+    )
+    if str(status.get("server_node_id") or "") != server_node_id:
+        raise RuntimeError("同步服务器节点标识在连通性检查期间发生变化")
+    status_instance_id = str(status.get("server_instance_id") or server_node_id)
+    return status_instance_id != server_instance_id or bool(status.get("has_changes"))
+
+
+def _log_repository_sync_monitor_error(project_key: str, exc: Exception) -> None:
+    now = time.monotonic()
+    last_logged = _SYNC_MONITOR_ERROR_LOGGED_AT.get(project_key, 0.0)
+    if now - last_logged < 300:
+        return
+    _SYNC_MONITOR_ERROR_LOGGED_AT[project_key] = now
+    logger.warning(
+        "repository.data_sync.monitor_unavailable | %s",
+        json.dumps({"project_key": project_key, "error": str(exc)}, ensure_ascii=False, default=str),
+    )
+
+
+async def _monitor_repository_sync_project(candidate: dict, sync_config: dict) -> None:
+    project_key = str(candidate.get("project_key") or "")
+    codearts_config = candidate.get("codearts_config") if isinstance(candidate.get("codearts_config"), dict) else {}
+    try:
+        reachable = await asyncio.to_thread(
+            _probe_codearts_repository_domain,
+            codearts_config,
+            float(sync_config.get("connect_timeout_seconds") or 3),
+        )
+        if not reachable:
+            _SYNC_CODEARTS_ONLINE_PROJECTS.discard(project_key)
+            return
+        became_online = project_key not in _SYNC_CODEARTS_ONLINE_PROJECTS
+        _SYNC_CODEARTS_ONLINE_PROJECTS.add(project_key)
+        needs_run = await asyncio.to_thread(
+            _repository_sync_project_needs_run,
+            project_key,
+            sync_config,
+            became_online=became_online,
+        )
+        if needs_run:
+            await asyncio.to_thread(
+                _enqueue_repository_data_sync_job,
+                project_key,
+                triggered_by_user_id=candidate.get("triggered_by_user_id"),
+                trigger_source="codearts_connection_monitor",
+            )
+        _SYNC_MONITOR_ERROR_LOGGED_AT.pop(project_key, None)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _log_repository_sync_monitor_error(project_key, exc)
+
+
+async def run_repository_data_sync_coordinator() -> None:
+    """Continuously perform silent CodeArts reachability-triggered data sync."""
+    global _SYNC_MONITOR_WAKE_EVENT
+    wake_event = asyncio.Event()
+    _SYNC_MONITOR_WAKE_EVENT = wake_event
+    try:
+        while True:
+            wake_event.clear()
+            interval_seconds = 30.0
+            try:
+                sync_config = await asyncio.to_thread(_get_repository_data_sync_config)
+                interval_seconds = float(sync_config.get("interval_seconds") or interval_seconds)
+                if bool(sync_config.get("enabled")):
+                    candidates = await asyncio.to_thread(_list_enabled_repository_sync_projects)
+                    if candidates:
+                        await asyncio.gather(
+                            *(
+                                _monitor_repository_sync_project(candidate, sync_config)
+                                for candidate in candidates
+                            )
+                        )
+                    configured_projects = {str(item.get("project_key") or "") for item in candidates}
+                    _SYNC_CODEARTS_ONLINE_PROJECTS.intersection_update(configured_projects)
+                else:
+                    _SYNC_CODEARTS_ONLINE_PROJECTS.clear()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("repository.data_sync.coordinator_cycle_failed")
+            try:
+                await asyncio.wait_for(wake_event.wait(), timeout=max(interval_seconds, 5.0))
+            except asyncio.TimeoutError:
+                pass
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if _SYNC_MONITOR_WAKE_EVENT is wake_event:
+            _SYNC_MONITOR_WAKE_EVENT = None
+        _SYNC_CODEARTS_ONLINE_PROJECTS.clear()
+
+
+def wake_repository_data_sync_coordinator() -> None:
+    wake_event = _SYNC_MONITOR_WAKE_EVENT
+    if wake_event is not None:
+        wake_event.set()
+
+
+def _ensure_repository_peer_server_enabled() -> dict:
+    config = _get_repository_data_sync_config()
+    if not bool(config.get("enabled")) or config.get("role") != "server":
+        raise HTTPException(status_code=409, detail="当前实例不是仓库数据同步服务器")
+    return config
+
+
+def _acquire_repository_peer_project_lease(db: Session, project_key: str, config: dict) -> tuple[str, int]:
+    owner_id = uuid.uuid4().hex
+    lease_seconds = max(
+        _SYNC_LEASE_SECONDS,
+        int(float(config.get("request_timeout_seconds") or 30)) + 60,
+    )
+    if not _acquire_repository_sync_lease(
+        db,
+        project_key,
+        owner_id,
+        lease_seconds=lease_seconds,
+    ):
+        raise HTTPException(status_code=409, detail="当前项目正在同步，请稍后重试")
+    return owner_id, lease_seconds
+
+
+@router.get("/peer-sync/v1/health", response_model=Response)
+async def repository_peer_sync_health(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    require_repository_sync_request(request)
+    _ensure_repository_peer_server_enabled()
+    server_instance_id = _get_repository_server_instance_id(db)
+    db.commit()
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "protocol_version": _SYNC_PROTOCOL_VERSION,
+            "node_id": get_repository_sync_node_id(),
+            "server_instance_id": server_instance_id,
+            "service": "pcids-repository-peer-sync",
+        },
+    }
+
+
+@router.post("/peer-sync/v1/projects/{project_key}/push", response_model=Response)
+async def repository_peer_sync_push(
+    project_key: str,
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    request_context = require_repository_sync_request(request)
+    config = _ensure_repository_peer_server_enabled()
+    normalized_project_key = _normalize_project_sync_key(project_key)
+    if int(payload.get("protocol_version") or 0) != _SYNC_PROTOCOL_VERSION:
+        raise HTTPException(status_code=409, detail="仓库同步协议版本不兼容")
+    origin_node_id = str(request_context.get("origin_node_id") or "")
+    if str(payload.get("node_id") or "").strip() != origin_node_id:
+        raise HTTPException(status_code=400, detail="同步节点标识与请求头不一致")
+    changes = payload.get("changes") if isinstance(payload.get("changes"), list) else []
+    max_batch = max(int(config.get("batch_size") or _SYNC_AUTO_BATCH_LIMIT), 1)
+    if not changes or len(changes) > max_batch:
+        raise HTTPException(status_code=400, detail=f"同步批次必须包含 1 到 {max_batch} 条变更")
+    lease_owner_id, lease_seconds = _acquire_repository_peer_project_lease(
+        db,
+        normalized_project_key,
+        config,
+    )
+    try:
+        # Publish server-side CRUD first so incoming base revisions compare
+        # against the latest authoritative state.
+        _publish_local_repository_changes(
+            db,
+            project_key=normalized_project_key,
+            lease_owner_id=lease_owner_id,
+            lease_seconds=lease_seconds,
+        )
+        db.rollback()
+        if db.get_bind().dialect.name == "sqlite":
+            db.execute(text("BEGIN IMMEDIATE"))
+        result = _apply_repository_peer_changes(
+            db,
+            project_key=normalized_project_key,
+            origin_node_id=origin_node_id,
+            changes=changes,
+        )
+        _renew_repository_sync_lease(
+            db,
+            normalized_project_key,
+            lease_owner_id,
+            lease_seconds=lease_seconds,
+        )
+        db.commit()
+        result["server_instance_id"] = _get_repository_server_instance_id(db)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("repository.peer_sync.push_failed | project_key=%s", normalized_project_key)
+        raise HTTPException(status_code=500, detail=f"服务器应用同步变更失败：{exc}") from exc
+    finally:
+        try:
+            _release_repository_sync_lease(db, normalized_project_key, lease_owner_id)
+        except Exception:
+            logger.exception("repository.peer_sync.lease_release_failed | project_key=%s", normalized_project_key)
+    return {"code": 0, "message": "success", "data": result}
+
+
+@router.get("/peer-sync/v1/projects/{project_key}/pull", response_model=Response)
+async def repository_peer_sync_pull(
+    project_key: str,
+    request: Request,
+    after_revision: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    require_repository_sync_request(request)
+    config = _ensure_repository_peer_server_enabled()
+    normalized_project_key = _normalize_project_sync_key(project_key)
+    effective_limit = min(int(limit), max(int(config.get("batch_size") or limit), 1))
+    lease_owner_id, lease_seconds = _acquire_repository_peer_project_lease(db, normalized_project_key, config)
+    try:
+        _publish_local_repository_changes(
+            db,
+            project_key=normalized_project_key,
+            lease_owner_id=lease_owner_id,
+            lease_seconds=lease_seconds,
+        )
+        rows = (
+            db.query(RepositorySyncState)
+            .filter(
+                RepositorySyncState.project_key == normalized_project_key,
+                RepositorySyncState.revision > int(after_revision),
+            )
+            .order_by(RepositorySyncState.revision.asc(), RepositorySyncState.id.asc())
+            .limit(effective_limit + 1)
+            .all()
+        )
+        has_more = len(rows) > effective_limit
+        page_rows = rows[:effective_limit]
+        next_revision = max([int(getattr(row, "revision", 0) or 0) for row in page_rows] or [int(after_revision)])
+        response_data = {
+            "protocol_version": _SYNC_PROTOCOL_VERSION,
+            "server_node_id": get_repository_sync_node_id(),
+            "server_instance_id": _get_repository_server_instance_id(db),
+            "server_revision": _current_repository_server_revision(db, normalized_project_key),
+            "next_revision": next_revision,
+            "has_more": has_more,
+            "states": [_repository_state_wire_payload(row) for row in page_rows],
+        }
+    finally:
+        _release_repository_sync_lease(db, normalized_project_key, lease_owner_id)
+    return {
+        "code": 0,
+        "message": "success",
+        "data": response_data,
+    }
+
+
+@router.get("/peer-sync/v1/projects/{project_key}/status", response_model=Response)
+async def repository_peer_sync_status(
+    project_key: str,
+    request: Request,
+    after_revision: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    require_repository_sync_request(request)
+    config = _ensure_repository_peer_server_enabled()
+    normalized_project_key = _normalize_project_sync_key(project_key)
+    lease_owner_id, lease_seconds = _acquire_repository_peer_project_lease(db, normalized_project_key, config)
+    try:
+        _publish_local_repository_changes(
+            db,
+            project_key=normalized_project_key,
+            lease_owner_id=lease_owner_id,
+            lease_seconds=lease_seconds,
+        )
+        revision = _current_repository_server_revision(db, normalized_project_key)
+        server_instance_id = _get_repository_server_instance_id(db)
+    finally:
+        _release_repository_sync_lease(db, normalized_project_key, lease_owner_id)
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "protocol_version": _SYNC_PROTOCOL_VERSION,
+            "server_node_id": get_repository_sync_node_id(),
+            "server_instance_id": server_instance_id,
+            "server_revision": revision,
+            "has_changes": revision > int(after_revision),
+        },
+    }
 
 
 @router.get("/codearts/config", response_model=Response)
@@ -4306,12 +6162,26 @@ async def get_codearts_status(
                 and str(stored_cfg.get("username") or "").strip()
                 and str(stored_cfg.get("password") or "").strip()
             )
+            reachable = bool(
+                configured
+                and await asyncio.to_thread(
+                    _probe_codearts_repository_domain,
+                    stored_cfg,
+                    int(_get_repository_data_sync_config().get("connect_timeout_seconds") or 3),
+                )
+            )
             return {
                 "code": 0,
                 "message": "success",
                 "data": {
-                    "connected": configured,
-                    "detail": "页面会话将在同步或下载时自动验证" if configured else "Web 页面库配置不完整",
+                    "connected": reachable,
+                    "detail": (
+                        ""
+                        if reachable
+                        else "Web 制品仓库域名当前不可访问"
+                        if configured
+                        else "Web 页面库配置不完整"
+                    ),
                 },
             }
         cfg, token = await _build_codearts_download_context_async(
@@ -4425,6 +6295,7 @@ async def trigger_codearts_auto_sync(
         .order_by(RepositorySyncJob.id.desc())
         .first()
     )
+    data_sync_config = _get_repository_data_sync_config()
     if _is_repository_auto_sync_running(normalized_project_key):
         return {
             "code": 0,
@@ -4446,7 +6317,12 @@ async def trigger_codearts_auto_sync(
             },
         }
 
-    if pending_change_count <= 0 and latest_job and str(getattr(latest_job, "status", "") or "").strip() == _SYNC_JOB_SUCCESS:
+    if (
+        data_sync_config.get("role") != "client"
+        and pending_change_count <= 0
+        and latest_job
+        and str(getattr(latest_job, "status", "") or "").strip() == _SYNC_JOB_SUCCESS
+    ):
         return {
             "code": 0,
             "message": "no pending sync changes",
@@ -4456,7 +6332,11 @@ async def trigger_codearts_auto_sync(
                 "job": _sync_job_to_dict(latest_job, pending_change_count=0),
             },
         }
-    if pending_change_count <= 0 and _repository_auto_sync_recently_launched(normalized_project_key):
+    if (
+        data_sync_config.get("role") != "client"
+        and pending_change_count <= 0
+        and _repository_auto_sync_recently_launched(normalized_project_key)
+    ):
         return {
             "code": 0,
             "message": "auto sync trigger throttled",
@@ -4581,6 +6461,7 @@ async def set_codearts_config(
     _save_project_codearts_config(db, project_key, merged, current_user)
     _ensure_project_member_seed(db, project_key, current_user, allow_creator=not bool(existing_setting))
     db.commit()
+    wake_repository_data_sync_coordinator()
     _log_event(
         "repository.codearts_config.set.success",
         **_current_user_log_context(current_user),
@@ -4636,7 +6517,47 @@ async def rollback_new_codearts_project(
     ):
         raise HTTPException(status_code=403, detail="只能回滚当前用户刚创建的项目")
 
+    active_job = (
+        db.query(RepositorySyncJob.id)
+        .filter(
+            RepositorySyncJob.project_key == project_key,
+            RepositorySyncJob.status.in_([_SYNC_JOB_PENDING, _SYNC_JOB_RUNNING]),
+        )
+        .first()
+    )
+    has_server_sync_evidence = bool(
+        getattr(setting, "auto_sync_last_success_at", None)
+        or db.query(RepositorySyncState.id)
+        .filter(RepositorySyncState.project_key == project_key)
+        .first()
+        or db.query(RepositorySyncChange.id)
+        .filter(
+            RepositorySyncChange.project_key == project_key,
+            RepositorySyncChange.status.in_([_SYNC_CHANGE_SYNCED, _SYNC_CHANGE_RESOLVED_SERVER]),
+        )
+        .first()
+    )
+    if active_job or has_server_sync_evidence:
+        raise HTTPException(
+            status_code=409,
+            detail="该项目已开始数据同步，不能按首次创建失败回滚，请使用项目删除",
+        )
+
     repos = db.query(Repository).filter(Repository.project_key == project_key).all()
+    for repo in repos:
+        _detach_repository_references(db, repo, project_key=project_key)
+        db.delete(repo)
+    # Initial CodeArts synchronization can queue local outbox rows before the
+    # request reports a failure.  They were never published (guarded above), so
+    # remove them with the rolled-back project instead of leaving orphan work.
+    db.query(RepositorySyncChange).filter(
+        RepositorySyncChange.project_key == project_key
+    ).delete(synchronize_session=False)
+    db.query(RepositoryProjectMember).filter(
+        RepositoryProjectMember.project_key == project_key
+    ).delete(synchronize_session=False)
+    db.delete(setting)
+    db.commit()
     for repo in repos:
         _remove_repository_local_file_safely(
             repo,
@@ -4644,13 +6565,6 @@ async def rollback_new_codearts_project(
             project_key=project_key,
             reason="rollback_failed_initial_sync",
         )
-        _detach_repository_references(db, repo, project_key=project_key)
-        db.delete(repo)
-    db.query(RepositoryProjectMember).filter(
-        RepositoryProjectMember.project_key == project_key
-    ).delete(synchronize_session=False)
-    db.delete(setting)
-    db.commit()
     _log_event(
         "repository.codearts_config.rollback_initial_sync",
         **_current_user_log_context(current_user),
@@ -5216,13 +7130,13 @@ async def sync_codearts_project(
             repo.created_by_user_id = current_user.id
             repo.source_type = "codearts_sync"
         if not str(getattr(repo, "sync_uuid", "") or "").strip():
-            sync_uuid_seed = f"{project_key}|{sync_key}|codearts_sync"
-            if repository_mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
-                sync_uuid_seed = f"{sync_uuid_seed}|private"
-            repo.sync_uuid = uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                sync_uuid_seed,
-            ).hex
+            repo.sync_uuid = generate_codearts_repository_sync_uuid(
+                project_key=project_key,
+                remote_repo_id=remote_repo_id,
+                display_path=display_path,
+                name=filename,
+                repository_mode=repository_mode,
+            )
         repo.name = filename
         repo.description = display_path
         repo.version = resolved_version
@@ -5271,38 +7185,27 @@ async def sync_codearts_project(
     # resulting snapshot (including full-refresh deletions) so the existing
     # data warehouse synchronization uses the same path as CRUD and downloads.
     db.flush()
-    now = datetime.utcnow()
     for deleted_change in deleted_sync_changes:
-        db.add(
-            RepositorySyncChange(
-                project_key=project_key,
-                repo_db_id=deleted_change["repo_db_id"],
-                repo_sync_uuid=deleted_change["repo_sync_uuid"],
-                change_type=_SYNC_CHANGE_DELETE_SERVER,
-                status=_SYNC_CHANGE_PENDING,
-                source="codearts_sync",
-                payload_json=json.dumps(deleted_change["payload"], ensure_ascii=False),
-                created_by_user_id=current_user.id,
-                created_at=now,
-                updated_at=now,
-            )
+        _record_repository_sync_change(
+            db,
+            project_key=project_key,
+            repo_db_id=deleted_change["repo_db_id"],
+            repo_sync_uuid=deleted_change["repo_sync_uuid"],
+            payload=deleted_change["payload"],
+            change_type=_SYNC_CHANGE_DELETE_SERVER,
+            current_user=current_user,
+            source="codearts_sync",
         )
     for repo in synced_repos.values():
-        db.add(
-            RepositorySyncChange(
-                project_key=project_key,
-                repo_db_id=getattr(repo, "id", None),
-                repo_sync_uuid=_ensure_repository_sync_uuid(repo),
-                change_type=_SYNC_CHANGE_UPSERT,
-                status=_SYNC_CHANGE_PENDING,
-                source="codearts_sync",
-                payload_json=json.dumps(_build_repository_sync_payload(repo), ensure_ascii=False),
-                created_by_user_id=current_user.id,
-                created_at=now,
-                updated_at=now,
-            )
+        _record_repository_sync_change_for_repo(
+            db,
+            repo,
+            change_type=_SYNC_CHANGE_UPSERT,
+            current_user=current_user,
+            source="codearts_sync",
         )
     db.commit()
+    wake_repository_data_sync_coordinator()
     # Physical cleanup must happen after the database transaction succeeds.
     # If the commit fails, the rows and their encrypted local files stay intact.
     for deleted_repo in deferred_local_file_cleanup:
@@ -5615,14 +7518,16 @@ async def import_codearts_artifact(
         local_path=_normalize_repository_file_url(file_path),
     )
     db.add(repo)
-    db.commit()
-    db.refresh(repo)
+    db.flush()
     _record_repository_sync_change_for_repo(
         db,
         repo,
         change_type=_SYNC_CHANGE_UPSERT,
         current_user=current_user,
     )
+    db.commit()
+    db.refresh(repo)
+    wake_repository_data_sync_coordinator()
     _log_event(
         "repository.codearts_import.success",
         **_current_user_log_context(current_user),
@@ -6003,9 +7908,8 @@ async def download_codearts_artifact_to_server(
                     local_exists=True,
                     local_path=local_saved_path,
                 )
-            db.commit()
-            db.refresh(repo_record)
-            file_detail = _safe_json_loads(getattr(repo_record, "file_detail_json", None))
+            db.add(repo_record)
+            db.flush()
             if getattr(repo_record, "project_key", None):
                 _record_repository_sync_change_for_repo(
                     db,
@@ -6013,6 +7917,10 @@ async def download_codearts_artifact_to_server(
                     change_type=_SYNC_CHANGE_UPSERT,
                     current_user=current_user,
                 )
+            db.commit()
+            db.refresh(repo_record)
+            wake_repository_data_sync_coordinator()
+            file_detail = _safe_json_loads(getattr(repo_record, "file_detail_json", None))
 
     _log_event(
         "repository.codearts_download_server.success",
@@ -6327,24 +8235,84 @@ async def delete_project(
 
     repos = db.query(Repository).filter(Repository.project_key == project_key).all()
     deleted_repo_count = len(repos)
+    queued_delete_count = 0
+    repository_sync_uuids: set[str] = set()
     for r in repos:
-        _remove_repository_local_file_safely(
+        sync_uuid = _ensure_repository_sync_uuid(r)
+        repository_sync_uuids.add(sync_uuid)
+        if _record_repository_sync_change_for_repo(
+            db,
             r,
+            change_type=_SYNC_CHANGE_DELETE_SERVER,
+            current_user=current_user,
+            source="delete_project",
+        ):
+            queued_delete_count += 1
+        _detach_repository_references(db, r, project_key=project_key)
+        db.delete(r)
+
+    # A previous server snapshot may contain rows that are no longer present in
+    # the local repositories table.  Preserve their tombstones as part of the
+    # project deletion too, otherwise they could return on the next pull.
+    stale_states = (
+        db.query(RepositorySyncState)
+        .filter(
+            RepositorySyncState.project_key == project_key,
+            RepositorySyncState.deleted.is_(False),
+        )
+        .all()
+    )
+    for state_row in stale_states:
+        sync_uuid = str(getattr(state_row, "sync_uuid", "") or "").strip()
+        if not sync_uuid or sync_uuid in repository_sync_uuids:
+            continue
+        if _record_repository_sync_change(
+            db,
+            project_key=project_key,
+            repo_db_id=None,
+            repo_sync_uuid=sync_uuid,
+            payload=_sync_state_payload(state_row),
+            change_type=_SYNC_CHANGE_DELETE_SERVER,
+            current_user=current_user,
+            source="delete_project",
+        ):
+            queued_delete_count += 1
+
+    db.query(RepositoryProjectMember).filter(RepositoryProjectMember.project_key == project_key).delete(synchronize_session=False)
+    setting = (
+        db.query(RepositoryProjectSetting)
+        .filter(RepositoryProjectSetting.project_key == project_key)
+        .first()
+    )
+    if queued_delete_count:
+        setting = setting or RepositoryProjectSetting(project_key=project_key)
+        raw_config = _safe_json_loads(getattr(setting, "codearts_config_json", None))
+        raw_config[_SYNC_PROJECT_DELETE_PENDING_FIELD] = True
+        setting.codearts_config_json = json.dumps(raw_config, ensure_ascii=False)
+        setting.updated_by_user_id = getattr(current_user, "id", None)
+        db.add(setting)
+    elif setting:
+        db.delete(setting)
+    db.commit()
+    if queued_delete_count:
+        wake_repository_data_sync_coordinator()
+
+    # External files are removed only after the repository rows and durable
+    # tombstones commit together.  A database failure therefore cannot leave a
+    # live row pointing at a file that was already erased.
+    for repo in repos:
+        _remove_repository_local_file_safely(
+            repo,
             current_user=current_user,
             project_key=project_key,
             reason="delete_project",
         )
-        _detach_repository_references(db, r, project_key=project_key)
-        db.delete(r)
-
-    db.query(RepositoryProjectMember).filter(RepositoryProjectMember.project_key == project_key).delete(synchronize_session=False)
-    db.query(RepositoryProjectSetting).filter(RepositoryProjectSetting.project_key == project_key).delete(synchronize_session=False)
-    db.commit()
     _log_event(
         "repository.project.delete.success",
         **_current_user_log_context(current_user),
         project_key=project_key,
         deleted_repo_count=deleted_repo_count,
+        queued_delete_count=queued_delete_count,
     )
     return {"code": 0, "message": "删除成功", "data": {"project_key": project_key}}
 
@@ -6841,16 +8809,18 @@ async def create_repository(
             local_path=_normalize_repository_file_url(str(repo.file_url)),
         )
     db.add(repo)
-    db.commit()
-    db.refresh(repo)
+    db.flush()
     if getattr(repo, "project_key", None):
-        _ensure_project_member_seed(db, repo.project_key, current_user, allow_creator=True)
         _record_repository_sync_change_for_repo(
             db,
             repo,
             change_type=_SYNC_CHANGE_UPSERT,
             current_user=current_user,
         )
+        _ensure_project_member_seed(db, repo.project_key, current_user, allow_creator=True)
+    db.commit()
+    db.refresh(repo)
+    wake_repository_data_sync_coordinator()
     _log_event(
         "repository.create",
         **_current_user_log_context(current_user),
@@ -6874,6 +8844,8 @@ async def update_repository(
         raise HTTPException(status_code=404, detail="项目不存在")
     updates = data.model_dump(exclude_unset=True)
     current_project_key = str(getattr(repo, "project_key", "") or "").strip()
+    sync_uuid = _ensure_repository_sync_uuid(repo)
+    previous_payload = _build_repository_sync_payload(repo)
     if current_project_key:
         _require_project_permission(db, current_project_key, current_user, "mark_flash_file")
     next_project_key = str(updates.get("project_key") or "").strip() if "project_key" in updates else current_project_key
@@ -6881,15 +8853,28 @@ async def update_repository(
         _require_project_permission(db, next_project_key, current_user, "mark_flash_file")
     for field, value in updates.items():
         setattr(repo, field, value)
-    db.commit()
-    db.refresh(repo)
-    if getattr(repo, "project_key", None):
+    db.add(repo)
+    db.flush()
+    if current_project_key and current_project_key != next_project_key:
+        _record_repository_sync_change(
+            db,
+            project_key=current_project_key,
+            repo_db_id=repo.id,
+            repo_sync_uuid=sync_uuid,
+            payload=previous_payload,
+            change_type=_SYNC_CHANGE_DELETE_SERVER,
+            current_user=current_user,
+        )
+    if next_project_key:
         _record_repository_sync_change_for_repo(
             db,
             repo,
             change_type=_SYNC_CHANGE_UPSERT,
             current_user=current_user,
         )
+    db.commit()
+    db.refresh(repo)
+    wake_repository_data_sync_coordinator()
     _log_event(
         "repository.update",
         **_current_user_log_context(current_user),
@@ -6927,14 +8912,6 @@ async def delete_repository_artifact(
     if normalized_scope == "all" and not (location_state["local_exists"] and location_state["server_exists"]):
         raise HTTPException(status_code=400, detail="当前制品未同时存在本地和服务器副本")
 
-    if normalized_scope in {"local", "all"} and location_state["local_exists"]:
-        _remove_repository_file_by_path(location_state["local_path"])
-    if normalized_scope in {"server", "all"} and location_state["server_exists"]:
-        try:
-            _remove_repository_server_artifact(location_state["server_path"], location_state["server_target"])
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"删除服务器制品失败：{str(exc)}")
-
     next_local_exists = location_state["local_exists"] and normalized_scope not in {"local", "all"}
     next_server_exists = location_state["server_exists"] and normalized_scope not in {"server", "all"}
     _apply_repository_location_state(
@@ -6948,20 +8925,42 @@ async def delete_repository_artifact(
     )
 
     remaining_state = _get_repository_location_state(repo, _safe_json_loads(getattr(repo, "file_detail_json", None)))
-    if normalized_scope in {"server", "all"} and project_key:
+    should_keep_record = remaining_state["local_exists"] or remaining_state["server_exists"] or remaining_state["remote_downloadable"] or str(getattr(repo, "source_type", "") or "") == "codearts_sync"
+    if project_key and (normalized_scope in {"server", "all"} or not should_keep_record):
         _record_repository_sync_change_for_repo(
             db,
             repo,
             change_type=_SYNC_CHANGE_DELETE_SERVER,
             current_user=current_user,
         )
-    should_keep_record = remaining_state["local_exists"] or remaining_state["server_exists"] or remaining_state["remote_downloadable"] or str(getattr(repo, "source_type", "") or "") == "codearts_sync"
     if should_keep_record:
         db.add(repo)
     else:
+        _detach_repository_references(db, repo, project_key=project_key)
         db.delete(repo)
     db.commit()
-    return {"code": 0, "message": "删除成功", "data": {"scope": normalized_scope}}
+    wake_repository_data_sync_coordinator()
+
+    # Database state and its outbox entry are durable before external files are
+    # touched.  Cleanup is best effort and cannot undo a committed logical
+    # deletion.
+    if normalized_scope in {"local", "all"} and location_state["local_exists"]:
+        _remove_repository_file_by_path(location_state["local_path"])
+    cleanup_warning = None
+    if normalized_scope in {"server", "all"} and location_state["server_exists"]:
+        try:
+            _remove_repository_server_artifact(location_state["server_path"], location_state["server_target"])
+        except Exception as exc:
+            cleanup_warning = f"服务器制品清理失败，将保留日志供后续处理：{str(exc)}"
+            logger.exception(
+                "repository.artifact.server_cleanup_failed | repo_db_id=%s",
+                repo_id_db,
+            )
+    return {
+        "code": 0,
+        "message": "删除成功",
+        "data": {"scope": normalized_scope, "cleanup_warning": cleanup_warning},
+    }
 
 
 @router.delete("/{repo_id_db}", response_model=Response)
@@ -6988,6 +8987,10 @@ async def delete_repository(
             change_type=_SYNC_CHANGE_DELETE_SERVER,
             current_user=current_user,
         )
+    _detach_repository_references(db, repo, project_key=project_key)
+    db.delete(repo)
+    db.commit()
+    wake_repository_data_sync_coordinator()
     if location_state["local_exists"]:
         _remove_repository_file_by_path(location_state["local_path"])
     if location_state["server_exists"]:
@@ -6998,8 +9001,6 @@ async def delete_repository(
                 "repository.delete.server_cleanup_failed | %s",
                 json.dumps({"repo_db_id": repo_id_db, "server_path": location_state["server_path"]}, ensure_ascii=False, default=str),
             )
-    db.delete(repo)
-    db.commit()
     _log_event(
         "repository.delete",
         **_current_user_log_context(current_user),

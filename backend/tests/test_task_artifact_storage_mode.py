@@ -7,6 +7,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 from backend.routers.tasks import (
     _build_task_codearts_download_auth,
+    _cleanup_repository_artifacts_after_execution,
     _download_repository_artifact_to_local_storage,
     _download_repository_artifact_to_server_storage,
     _ensure_repository_local_file_available_for_runtime,
@@ -151,7 +152,9 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
         ) as encrypt_mock, patch(
             "backend.routers.tasks._get_repository_location_state",
             return_value={"server_exists": False, "server_path": None, "server_target": None},
-        ), patch("backend.routers.tasks._apply_repository_location_state"):
+        ), patch("backend.routers.tasks._apply_repository_location_state"), patch(
+            "backend.routers.tasks._commit_repository_runtime_state_with_outbox",
+        ) as commit_with_outbox:
             result = _download_repository_artifact_to_local_storage(db, repo, SimpleNamespace(id=1))
 
         self.assertIs(result, repo)
@@ -163,6 +166,12 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
             username="repo-user",
             password="repo-password",
             timeout_seconds=300,
+        )
+        commit_with_outbox.assert_called_once_with(
+            db,
+            repo,
+            current_user=ANY,
+            source="task_local_download",
         )
 
     def test_codearts_uses_local_storage_for_local_burner(self):
@@ -244,7 +253,9 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
         ), patch(
             "backend.routers.tasks._get_repository_location_state",
             return_value=location_state,
-        ), patch("backend.routers.tasks._apply_repository_location_state"):
+        ), patch("backend.routers.tasks._apply_repository_location_state"), patch(
+            "backend.routers.tasks._commit_repository_runtime_state_with_outbox",
+        ) as commit_with_outbox:
             result = _download_repository_artifact_to_server_storage(db, repo, current_user)
 
         self.assertIs(result, repo)
@@ -256,6 +267,71 @@ class TaskArtifactStorageModeTests(unittest.TestCase):
             "firmware.bin",
         )
         self.assertTrue(str(web_download.call_args.kwargs["trace_id"]).startswith("task-artifact-server-"))
+        commit_with_outbox.assert_called_once_with(
+            db,
+            repo,
+            current_user=current_user,
+            source="task_server_download",
+        )
+
+    def test_server_artifact_cleanup_commits_repository_with_sync_outbox(self):
+        repo = SimpleNamespace(
+            id=44,
+            file_detail_json=json.dumps(
+                {
+                    "local_exists": False,
+                    "server_exists": True,
+                    "server_path": "C:/pcids/artifacts/firmware.bin.pcenc",
+                    "server_target": "artifact-server",
+                }
+            ),
+        )
+        task = SimpleNamespace(
+            id=55,
+            config_json=json.dumps(
+                {
+                    "cleanup_local_artifact_after_execution": False,
+                    "cleanup_server_artifact_after_execution": True,
+                }
+            ),
+        )
+        db = MagicMock()
+        location_state = {
+            "local_exists": False,
+            "local_path": None,
+            "server_exists": True,
+            "server_path": "C:/pcids/artifacts/firmware.bin.pcenc",
+            "server_target": "artifact-server",
+        }
+
+        with patch(
+            "backend.routers.tasks._get_repository_location_state",
+            return_value=location_state,
+        ), patch(
+            "backend.routers.tasks._remove_repository_server_artifact",
+        ) as remove_server_artifact, patch(
+            "backend.routers.tasks._apply_repository_location_state",
+        ), patch(
+            "backend.routers.tasks._commit_repository_runtime_state_with_outbox",
+        ) as commit_with_outbox:
+            _cleanup_repository_artifacts_after_execution(
+                db,
+                repo,
+                task,
+                {"cleanup_server_artifact_after_execution": True},
+            )
+
+        remove_server_artifact.assert_called_once_with(
+            "C:/pcids/artifacts/firmware.bin.pcenc",
+            "artifact-server",
+        )
+        commit_with_outbox.assert_called_once_with(
+            db,
+            repo,
+            current_user=None,
+            source="task_artifact_cleanup",
+        )
+        self.assertFalse(json.loads(task.config_json)["cleanup_server_artifact_after_execution"])
 
     def test_server_source_keeps_server_storage(self):
         self.assertEqual(_resolve_artifact_storage_mode("server", "local", None), "server")

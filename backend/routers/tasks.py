@@ -77,6 +77,7 @@ from backend.routers.repositories import (
     _normalize_repository_file_url,
     _remove_repository_file_by_path,
     _remove_repository_server_artifact,
+    _record_repository_sync_change_for_repo,
     _retrieve_repository_artifact_via_ssh,
     _require_project_permission,
     _resolve_codearts_download_auth,
@@ -84,6 +85,7 @@ from backend.routers.repositories import (
     _safe_format_path,
     repository_to_dict,
     _transfer_repository_artifact_via_ssh,
+    wake_repository_data_sync_coordinator,
 )
 from backend.utils.artifact_crypto import (
     ArtifactDecryptionError,
@@ -1494,6 +1496,27 @@ def _resolve_task_artifact_download_source(
     return "codearts_api", None
 
 
+def _commit_repository_runtime_state_with_outbox(
+    db: Session,
+    repo: Repository,
+    *,
+    current_user: Optional[User],
+    source: str,
+) -> None:
+    """Commit a task-side repository mutation and its sync outbox atomically."""
+
+    sync_change = _record_repository_sync_change_for_repo(
+        db,
+        repo,
+        change_type="upsert",
+        current_user=current_user,
+        source=source,
+    )
+    db.commit()
+    if sync_change is not None:
+        wake_repository_data_sync_coordinator()
+
+
 def _download_repository_artifact_to_local_storage(db: Session, repo: Repository, current_user: User) -> Repository:
     trace_id = f"task-artifact-local-{uuid.uuid4().hex[:12]}"
     repo_detail = repository_to_dict(repo)
@@ -1585,8 +1608,12 @@ def _download_repository_artifact_to_local_storage(db: Session, repo: Repository
         server_path=current_state["server_path"],
         server_target=current_state["server_target"],
     )
-    db.add(repo)
-    db.commit()
+    _commit_repository_runtime_state_with_outbox(
+        db,
+        repo,
+        current_user=current_user,
+        source="task_local_download",
+    )
     db.refresh(repo)
     logger.info(
         "task.artifact.download_local.success | %s",
@@ -1778,8 +1805,12 @@ def _download_repository_artifact_to_server_storage(db: Session, repo: Repositor
     )
     if server_saved_path and local_saved_path != current_state["local_path"]:
         _remove_repository_file_by_path(local_saved_path)
-    db.add(repo)
-    db.commit()
+    _commit_repository_runtime_state_with_outbox(
+        db,
+        repo,
+        current_user=current_user,
+        source="task_server_download",
+    )
     db.refresh(repo)
     logger.info(
         "task.artifact.download_server.success | %s",
@@ -2114,9 +2145,17 @@ def _cleanup_repository_artifacts_after_execution(
         task_config["cleanup_local_artifact_after_execution"] = False
         task_config["cleanup_server_artifact_after_execution"] = False
         task.config_json = json.dumps(task_config, ensure_ascii=False)
-        db.add(repo)
         db.add(task)
-        db.commit()
+        if cleanup_server and location_state["server_exists"]:
+            _commit_repository_runtime_state_with_outbox(
+                db,
+                repo,
+                current_user=None,
+                source="task_artifact_cleanup",
+            )
+        else:
+            db.add(repo)
+            db.commit()
     except Exception:
         db.rollback()
         logger.exception(
