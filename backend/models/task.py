@@ -22,7 +22,20 @@ class TaskStatus(IntEnum):
 class BurningTask(Base, TimestampMixin):
     """烧录任务表"""
     __tablename__ = "tasks"
-    __table_args__ = (Index("ix_tasks_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_tasks_created_at", "created_at"),
+        Index("ix_tasks_status_burner_id", "status", "burner_id"),
+        Index("ix_tasks_status_created_at_id", "status", "created_at", "id"),
+        Index("ix_tasks_creator_created_at_id", "created_by_user_id", "created_at", "id"),
+        Index("ix_tasks_creator_updated_at_id", "created_by_user_id", "updated_at", "id"),
+        Index(
+            "ix_tasks_repository_status_updated_at_id",
+            "repository_id",
+            "status",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     task_no: Mapped[Optional[str]] = mapped_column(String(20), index=True)

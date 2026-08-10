@@ -1,4 +1,3 @@
-import asyncio
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -26,6 +25,7 @@ from backend.routers.dashboard import (
     _query_monthly_success_trend,
     _query_target_counts,
     _query_task_window_metrics,
+    _query_task_windows_metrics,
     get_dashboard_stats,
 )
 from backend.utils.datetime_utils import local_time_to_database
@@ -180,6 +180,40 @@ class DashboardStatsTests(unittest.TestCase):
 
         denied_metrics = _query_task_window_metrics(self.db, self._user("unknown"), today)
         self.assertEqual(denied_metrics, {"total": 0, "completed": 0, "success": 0})
+
+    def test_two_day_metrics_are_loaded_with_one_select(self):
+        yesterday = _build_local_day_window(self.local_now, day_offset=-1)
+        today = _build_local_day_window(self.local_now)
+        self._add_task(
+            "YESTERDAY",
+            created_at=yesterday.start_time + timedelta(hours=1),
+            status=TaskStatus.SUCCESS,
+        )
+        self._add_task(
+            "TODAY",
+            created_at=today.start_time + timedelta(hours=1),
+            status=TaskStatus.FAILED,
+        )
+        self.db.commit()
+        statements = []
+
+        def capture_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", capture_statement)
+        try:
+            metrics = _query_task_windows_metrics(
+                self.db,
+                self._user("self"),
+                [yesterday, today],
+            )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture_statement)
+
+        self.assertEqual(len(statements), 1)
+        self.assertEqual(metrics[0], {"total": 1, "completed": 1, "success": 1})
+        self.assertEqual(metrics[1], {"total": 1, "completed": 1, "success": 0})
 
     def test_monthly_trend_is_one_query_and_excludes_pending_and_future_tasks(self):
         windows = _build_month_windows(self.local_now, 6)
@@ -340,7 +374,7 @@ class DashboardStatsTests(unittest.TestCase):
                 self.assertEqual(preview["status"], expected_status)
                 self.assertIn(expected_label, preview["primary_text"])
 
-    def test_endpoint_exposes_availability_and_releases_transaction_before_probe(self):
+    def test_endpoint_exposes_availability_and_uses_cached_burner_status(self):
         local_today = _build_local_day_window(self.local_now)
         local_yesterday = _build_local_day_window(self.local_now, day_offset=-1)
         self._add_task(
@@ -380,6 +414,8 @@ class DashboardStatsTests(unittest.TestCase):
             host_type="agent",
             agent_url="http://192.0.2.10:8000",
             is_enabled=1,
+            status=0,
+            sn="IDLE-1",
         )
         busy_burner = Burner(
             name="remote-busy",
@@ -387,6 +423,7 @@ class DashboardStatsTests(unittest.TestCase):
             host_type="agent",
             agent_url="http://192.0.2.11:8000",
             is_enabled=1,
+            status=0,
         )
         offline_burner = Burner(
             name="remote-offline",
@@ -394,6 +431,7 @@ class DashboardStatsTests(unittest.TestCase):
             host_type="agent",
             agent_url="http://192.0.2.12:8000",
             is_enabled=1,
+            status=1,
         )
         self.db.add_all([idle_burner, busy_burner, offline_burner])
         self.db.flush()
@@ -406,35 +444,32 @@ class DashboardStatsTests(unittest.TestCase):
         self.db.commit()
         self.repo_member.name = "uncommitted-change"
 
-        async def probe_after_transaction(burners, occupied_ids):
+        seen_burner_ids = set()
+
+        def cached_after_transaction(burner, occupied_ids):
             self.assertFalse(self.db.in_transaction())
-            self.assertEqual(
-                {item.id for item in burners},
-                {idle_burner.id, busy_burner.id, offline_burner.id},
-            )
-            self.assertTrue(all(inspect(item).detached for item in burners))
+            self.assertTrue(inspect(burner).detached)
             self.assertEqual(occupied_ids, {busy_burner.id})
+            seen_burner_ids.add(burner.id)
             return {
                 idle_burner.id: 0,
                 busy_burner.id: 2,
                 offline_burner.id: 1,
-            }, 0
+            }[burner.id]
 
         with (
             patch("backend.routers.dashboard.datetime", _FixedDateTime),
             patch(
-                "backend.routers.dashboard._compute_burner_runtime_statuses",
-                side_effect=probe_after_transaction,
+                "backend.routers.dashboard._compute_burner_cached_status",
+                side_effect=cached_after_transaction,
             ),
         ):
-            response = asyncio.run(
-                get_dashboard_stats(
-                    trend_months=6,
-                    target_months=6,
-                    db=self.db,
-                    current_user=self._user("self"),
-                    _=None,
-                )
+            response = get_dashboard_stats(
+                trend_months=6,
+                target_months=6,
+                db=self.db,
+                current_user=self._user("self"),
+                _=None,
             )
 
         stats = response["data"]["stats"]
@@ -450,6 +485,10 @@ class DashboardStatsTests(unittest.TestCase):
         self.assertEqual(stats["burnerIdle"], 1)
         self.assertEqual(stats["burnerInUse"], 1)
         self.assertEqual(stats["burnerOffline"], 1)
+        self.assertEqual(
+            seen_burner_ids,
+            {idle_burner.id, busy_burner.id, offline_burner.id},
+        )
         self.assertEqual(
             self.db.get(Repository, self.repo_member.id).name,
             "member-repo",
@@ -548,21 +587,13 @@ class DashboardStatsTests(unittest.TestCase):
 
         for data_scope in ("project:project-member", "tenant:tenant-a"):
             with self.subTest(data_scope=data_scope):
-                with (
-                    patch("backend.routers.dashboard.datetime", _FixedDateTime),
-                    patch(
-                        "backend.routers.dashboard._compute_burner_runtime_statuses",
-                        return_value=({}, 0),
-                    ),
-                ):
-                    response = asyncio.run(
-                        get_dashboard_stats(
-                            trend_months=6,
-                            target_months=6,
-                            db=self.db,
-                            current_user=self._user(data_scope),
-                            _=None,
-                        )
+                with patch("backend.routers.dashboard.datetime", _FixedDateTime):
+                    response = get_dashboard_stats(
+                        trend_months=6,
+                        target_months=6,
+                        db=self.db,
+                        current_user=self._user(data_scope),
+                        _=None,
                     )
 
                 notifications = response["data"]["notifications"]
@@ -584,21 +615,13 @@ class DashboardStatsTests(unittest.TestCase):
         )
         self.db.commit()
 
-        with (
-            patch("backend.routers.dashboard.datetime", _FixedDateTime),
-            patch(
-                "backend.routers.dashboard._compute_burner_runtime_statuses",
-                return_value=({}, 0),
-            ),
-        ):
-            response = asyncio.run(
-                get_dashboard_stats(
-                    trend_months=6,
-                    target_months=6,
-                    db=self.db,
-                    current_user=self._user("self"),
-                    _=None,
-                )
+        with patch("backend.routers.dashboard.datetime", _FixedDateTime):
+            response = get_dashboard_stats(
+                trend_months=6,
+                target_months=6,
+                db=self.db,
+                current_user=self._user("self"),
+                _=None,
             )
 
         stats = response["data"]["stats"]

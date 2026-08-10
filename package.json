@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build:backend": "node tools/build-backend.mjs",
+    "build:license-tool": "node scripts/build-license-issuer.mjs",
+    "build:license-tool:win": "node scripts/build-windows-license-issuer.mjs",
     "build": "npm run build:backend && tsc && vite build && npm run build:electron",
     "build:electron": "tsc -p tsconfig.electron.json",
     "test:unit": "tsx --test tests/*.test.ts tests/*.test.cjs",

@@ -87,6 +87,12 @@ request.interceptors.response.use(
       ;(error as any).__backendServiceErrorNotified = true
     }
 
+    const isLicenseRequired = error.response?.status === 403 && error.response?.data?.code === 'LICENSE_REQUIRED'
+    if (isLicenseRequired) {
+      window.dispatchEvent(new CustomEvent('pcids-license-invalid'))
+      return Promise.reject(error)
+    }
+
     if ((error.config as any)?.skipAutoErrorMessage) {
       return Promise.reject(error)
     }
@@ -125,6 +131,22 @@ request.interceptors.response.use(
 )
 
 export default request
+
+export const licenseApi = {
+  getStatus: () => request.get('/license/status', {
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+  } as any),
+  getMachineRequest: () => request.get('/license/machine-request', {
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+  } as any),
+  importLicense: (data: FormData) => request.post('/license/import', data, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+  } as any),
+}
 
 // 认证服务
 export const authApi = {

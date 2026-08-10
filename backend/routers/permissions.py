@@ -24,7 +24,7 @@ router = APIRouter()
 # ============ 菜单管理 ============
 
 @router.get("/my", response_model=Response)
-async def get_my_permissions(
+def get_my_permissions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -38,7 +38,7 @@ async def get_my_permissions(
 
 
 @router.get("/menus", response_model=Response)
-async def get_menus(
+def get_menus(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

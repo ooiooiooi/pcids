@@ -12,6 +12,7 @@ const distRoot = process.env.PCIDS_BACKEND_DIST_DIR
 const backendSourcePath = path.join(projectRoot, 'backend')
 const backendEntryPath = path.join(backendSourcePath, 'run_backend.py')
 const agentConfigPath = path.join(backendSourcePath, 'config', 'agent.json')
+const licensePublicKeyPath = path.join(backendSourcePath, 'config', 'license_public_key.pem')
 const isWindows = process.platform === 'win32'
 const execName = isWindows ? 'pcids_backend.exe' : 'pcids_backend'
 const venvPython = isWindows
@@ -61,6 +62,11 @@ function main() {
   if (!fs.existsSync(agentConfigPath)) {
     throw new Error(
       'backend/config/agent.json is missing. Refusing to build a package with LAN Agent authentication disabled.',
+    )
+  }
+  if (!fs.existsSync(licensePublicKeyPath)) {
+    throw new Error(
+      'backend/config/license_public_key.pem is missing. Refusing to build a package without offline license verification.',
     )
   }
   const pythonBin = resolvePython()

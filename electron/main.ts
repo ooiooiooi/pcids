@@ -551,6 +551,7 @@ function startPythonBackend(port: number): childProcess.ChildProcess {
     PCIDS_NODE_BIN: process.execPath,
     PCIDS_RUNTIME_ROOT: runtimeRoot,
     PCIDS_DATA_DIR: dataRoot,
+    PCIDS_LICENSE_ENFORCEMENT: app.isPackaged ? '1' : (process.env.PCIDS_LICENSE_ENFORCEMENT || '1'),
     DB_PATH: path.join(dataRoot, 'app_data.db'),
     PCIDS_LOG_DIR: logRoot,
     ELECTRON_RUN_AS_NODE: '1',

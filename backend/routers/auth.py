@@ -8,6 +8,8 @@ import secrets
 import shutil
 import uuid
 import os
+import time
+from threading import Lock
 from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -54,8 +56,26 @@ def _load_secret_key() -> str:
 SECRET_KEY = _load_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 小时
+LAST_ACTIVE_WRITE_INTERVAL_SECONDS = 60.0
+_last_active_write_lock = Lock()
+_last_active_write_times: dict[int, float] = {}
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+
+
+def _claim_last_active_write(user_id: int) -> bool:
+    now = time.monotonic()
+    with _last_active_write_lock:
+        previous = _last_active_write_times.get(user_id)
+        if previous is not None and now - previous < LAST_ACTIVE_WRITE_INTERVAL_SECONDS:
+            return False
+        _last_active_write_times[user_id] = now
+        return True
+
+
+def _release_last_active_write(user_id: int) -> None:
+    with _last_active_write_lock:
+        _last_active_write_times.pop(user_id, None)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -71,11 +91,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return encoded_jwt
 
 
-async def get_current_user(
+def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ) -> User:
-    """获取当前登录用户，并校验并发License"""
+    """获取当前登录用户并记录账号活动时间。"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无法验证凭据",
@@ -104,26 +124,13 @@ async def get_current_user(
             detail="该账号已被禁用，请联系管理员"
         )
 
-    # License 浮动并发验证
-    now = datetime.utcnow()
-    five_mins_ago = now - timedelta(minutes=5)
-    
-    # 判断当前用户是否已经是活跃用户（最近5分钟内活跃过）
-    is_active = user.last_active_at and user.last_active_at >= five_mins_ago
-    
-    if not is_active:
-        # 如果当前用户不活跃，准备分配一个新许可
-        # 查询当前有多少个活跃用户
-        active_count = db.query(User).filter(User.last_active_at >= five_mins_ago).count()
-        if active_count >= 5:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="系统并发浮动License已满（最大5个），请等待其他用户下线释放许可"
-            )
-            
-    # 更新最后活跃时间（心跳维持）
-    user.last_active_at = now
-    db.commit()
+    if _claim_last_active_write(int(user.id)):
+        user.last_active_at = datetime.utcnow()
+        try:
+            db.commit()
+        except Exception:
+            _release_last_active_write(int(user.id))
+            raise
 
     return user
 
@@ -168,28 +175,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             detail="该账号已被禁用，请联系管理员"
         )
 
-    # License 浮动并发验证
     now = datetime.utcnow()
-    five_mins_ago = now - timedelta(minutes=5)
-    
-    is_active = user.last_active_at and user.last_active_at >= five_mins_ago
-    if not is_active:
-        active_count = db.query(User).filter(User.last_active_at >= five_mins_ago).count()
-        if active_count >= 5:
-            db.add(LoginLog(
-                user_id=user.id,
-                ip_address=ip,
-                log_type="login",
-                login_time=datetime.utcnow(),
-                result="系统并发浮动License已满（最大5个）"
-            ))
-            db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="系统并发浮动License已满（最大5个），请等待其他用户下线释放许可"
-            )
-            
-    # 更新活跃时间
     user.last_active_at = now
     db.commit()
 
@@ -229,7 +215,7 @@ async def logout(request: Request, db: Session = Depends(get_db), current_user: 
 
 
 @router.get("/me", response_model=Response)
-async def get_me(current_user: User = Depends(get_current_user)):
+def get_me(current_user: User = Depends(get_current_user)):
     """获取当前登录用户信息"""
     return {
         "code": 0,

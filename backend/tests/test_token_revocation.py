@@ -26,9 +26,13 @@ class TokenRevocationTests(unittest.IsolatedAsyncioTestCase):
         db = self._db_for(user)
         token = auth.create_access_token({"sub": user.username, "uid": user.id, "ver": 3})
 
-        resolved = await auth.get_current_user(token=token, db=db)
+        resolved = auth.get_current_user(token=token, db=db)
+        resolved_again = auth.get_current_user(token=token, db=db)
 
         self.assertIs(resolved, user)
+        self.assertIs(resolved_again, user)
+        # Parallel page bootstrap requests must not turn every authenticated
+        # SQLite read into a serialized write transaction.
         db.commit.assert_called_once_with()
 
     async def test_stale_or_legacy_token_is_rejected(self):
@@ -45,8 +49,29 @@ class TokenRevocationTests(unittest.IsolatedAsyncioTestCase):
 
         for token in (stale, legacy):
             with self.assertRaises(HTTPException) as context:
-                await auth.get_current_user(token=token, db=db)
+                auth.get_current_user(token=token, db=db)
             self.assertEqual(context.exception.status_code, 401)
+
+    async def test_login_does_not_apply_a_concurrent_user_license_cap(self):
+        user = SimpleNamespace(
+            id=7,
+            username="operator",
+            token_version=0,
+            status=1,
+            last_active_at=None,
+            verify_password=lambda password: password == "valid-password",
+        )
+        db = self._db_for(user)
+        db.query.return_value.filter.return_value.count.return_value = 999
+        request = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
+        form = SimpleNamespace(username=user.username, password="valid-password")
+
+        result = await auth.login(request=request, form_data=form, db=db)
+
+        self.assertEqual(result["token_type"], "bearer")
+        self.assertTrue(result["access_token"])
+        self.assertIsNotNone(user.last_active_at)
+        db.query.return_value.filter.return_value.count.assert_not_called()
 
     async def test_logout_revokes_all_existing_tokens(self):
         user = SimpleNamespace(id=7, token_version=2, last_active_at=object())

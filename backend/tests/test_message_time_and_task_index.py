@@ -509,6 +509,16 @@ class MessageBatchEnrichmentTests(unittest.TestCase):
 
 
 class TaskCreatedAtIndexTests(unittest.TestCase):
+    expected_task_indexes = {
+        "ix_tasks_created_at",
+        "ix_tasks_task_no",
+        "ix_tasks_status_burner_id",
+        "ix_tasks_status_created_at_id",
+        "ix_tasks_creator_created_at_id",
+        "ix_tasks_creator_updated_at_id",
+        "ix_tasks_repository_status_updated_at_id",
+    }
+
     def test_model_creates_index_and_range_query_uses_it(self):
         engine = create_engine("sqlite:///:memory:")
         try:
@@ -531,7 +541,7 @@ class TaskCreatedAtIndexTests(unittest.TestCase):
         finally:
             engine.dispose()
 
-        self.assertIn("ix_tasks_created_at", index_names)
+        self.assertTrue(self.expected_task_indexes.issubset(index_names))
         plan_text = " ".join(str(row) for row in plan_rows)
         self.assertIn("ix_tasks_created_at", plan_text)
 
@@ -542,22 +552,51 @@ class TaskCreatedAtIndexTests(unittest.TestCase):
             try:
                 Base.metadata.create_all(engine)
                 with engine.begin() as conn:
-                    conn.execute(text("DROP INDEX ix_tasks_created_at"))
+                    for index_name in self.expected_task_indexes:
+                        conn.execute(text(f"DROP INDEX {index_name}"))
 
                 with patch.object(db_utils, "engine", engine):
                     db_utils._ensure_schema_uncached()
                     db_utils._ensure_schema_uncached()
 
                 with engine.connect() as conn:
-                    matching_indexes = [
-                        row
+                    matching_indexes = {
+                        row[1]
                         for row in conn.execute(text("PRAGMA index_list(tasks)"))
-                        if row[1] == "ix_tasks_created_at"
-                    ]
+                        if row[1] in self.expected_task_indexes
+                    }
             finally:
                 engine.dispose()
 
-        self.assertEqual(len(matching_indexes), 1)
+        self.assertEqual(matching_indexes, self.expected_task_indexes)
+
+    def test_operational_sort_indexes_avoid_temporary_btrees(self):
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            Base.metadata.create_all(engine)
+            with engine.connect() as conn:
+                recent_task_plan = conn.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT * FROM tasks "
+                        "WHERE created_by_user_id = 1 "
+                        "ORDER BY updated_at DESC, id DESC LIMIT 8"
+                    )
+                ).fetchall()
+                operation_log_plan = conn.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT * FROM operation_logs "
+                        "ORDER BY operation_time DESC, id DESC LIMIT 20"
+                    )
+                ).fetchall()
+        finally:
+            engine.dispose()
+
+        recent_plan_text = " ".join(str(row) for row in recent_task_plan)
+        operation_plan_text = " ".join(str(row) for row in operation_log_plan)
+        self.assertIn("ix_tasks_creator_updated_at_id", recent_plan_text)
+        self.assertNotIn("TEMP B-TREE", recent_plan_text)
+        self.assertIn("ix_operation_logs_operation_time_id", operation_plan_text)
+        self.assertNotIn("TEMP B-TREE", operation_plan_text)
 
 
 if __name__ == "__main__":

@@ -131,7 +131,7 @@ async def get_product_image(filename: str):
     return FileResponse(str(path))
 
 @router.get("", response_model=PaginatedResponse)
-async def get_products(
+def get_products(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=1000),

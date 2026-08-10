@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Sequence
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse, StreamingResponse
 from backend.utils.db import SessionLocal, get_db, ensure_schema
@@ -66,6 +66,7 @@ from backend.utils.deployment_readiness import build_windows_deployment_readines
 from backend.utils.ssh_client import SSHClientSession, remote_shell_command
 from backend.utils.text_normalization import normalize_text, normalize_text_payload
 from backend.utils.app_paths import get_app_data_root, get_repository_download_root_path, get_upload_root
+from backend.utils.license_manager import get_license_status
 from backend.utils.repository_data_sync import (
     build_repository_sync_headers,
     get_repository_sync_node_id,
@@ -706,9 +707,13 @@ def _sync_job_to_dict(job: Optional[RepositorySyncJob], pending_change_count: Op
     }
 
 
-def repository_to_dict(r):
+def repository_to_dict(r, allowed_roots: Optional[Sequence[str]] = None):
     file_detail = _safe_json_loads(getattr(r, "file_detail_json", None))
-    location_state = _get_repository_location_state(r, file_detail)
+    location_state = _get_repository_location_state(
+        r,
+        file_detail,
+        allowed_roots=allowed_roots,
+    )
     return {
         "id": r.id,
         "sync_uuid": str(getattr(r, "sync_uuid", "") or "").strip() or None,
@@ -1328,7 +1333,12 @@ def _normalize_server_target_value(value: Optional[str], server_path: Optional[s
     return text
 
 
-def _get_repository_location_state(repo: Optional[Repository], file_detail: Optional[dict] = None) -> dict:
+def _get_repository_location_state(
+    repo: Optional[Repository],
+    file_detail: Optional[dict] = None,
+    *,
+    allowed_roots: Optional[Sequence[str]] = None,
+) -> dict:
     detail = dict(file_detail or {})
     source_type = str(getattr(repo, "source_type", "") or "")
     storage_location = _normalize_storage_location(detail.get("storage_location"))
@@ -1345,8 +1355,10 @@ def _get_repository_location_state(repo: Optional[Repository], file_detail: Opti
     local_exists = bool(detail.get("local_exists"))
     if local_path and (storage_location in {"", "local", "both"} or source_type == "local_upload" or (repo_file_url == local_path and storage_location != "server")):
         local_exists = True
-    if local_exists and local_path and any(_is_path_within_root(local_path, root) for root in _repository_allowed_roots()):
-        local_exists = os.path.exists(local_path) and os.path.isfile(local_path)
+    if local_exists and local_path:
+        effective_allowed_roots = allowed_roots if allowed_roots is not None else _repository_allowed_roots()
+        if any(_is_path_within_root(local_path, root) for root in effective_allowed_roots):
+            local_exists = os.path.exists(local_path) and os.path.isfile(local_path)
     elif local_exists and not local_path:
         local_exists = False
 
@@ -5887,21 +5899,26 @@ async def run_repository_data_sync_coordinator() -> None:
             wake_event.clear()
             interval_seconds = 30.0
             try:
-                sync_config = await asyncio.to_thread(_get_repository_data_sync_config)
-                interval_seconds = float(sync_config.get("interval_seconds") or interval_seconds)
-                if bool(sync_config.get("enabled")):
-                    candidates = await asyncio.to_thread(_list_enabled_repository_sync_projects)
-                    if candidates:
-                        await asyncio.gather(
-                            *(
-                                _monitor_repository_sync_project(candidate, sync_config)
-                                for candidate in candidates
-                            )
-                        )
-                    configured_projects = {str(item.get("project_key") or "") for item in candidates}
-                    _SYNC_CODEARTS_ONLINE_PROJECTS.intersection_update(configured_projects)
-                else:
+                license_status = await asyncio.to_thread(get_license_status)
+                if not license_status["valid"]:
+                    interval_seconds = 5.0
                     _SYNC_CODEARTS_ONLINE_PROJECTS.clear()
+                else:
+                    sync_config = await asyncio.to_thread(_get_repository_data_sync_config)
+                    interval_seconds = float(sync_config.get("interval_seconds") or interval_seconds)
+                    if bool(sync_config.get("enabled")):
+                        candidates = await asyncio.to_thread(_list_enabled_repository_sync_projects)
+                        if candidates:
+                            await asyncio.gather(
+                                *(
+                                    _monitor_repository_sync_project(candidate, sync_config)
+                                    for candidate in candidates
+                                )
+                            )
+                        configured_projects = {str(item.get("project_key") or "") for item in candidates}
+                        _SYNC_CODEARTS_ONLINE_PROJECTS.intersection_update(configured_projects)
+                    else:
+                        _SYNC_CODEARTS_ONLINE_PROJECTS.clear()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -8592,7 +8609,7 @@ async def set_project_permissions(
 
 
 @router.get("", response_model=dict)
-async def list_repositories(
+def list_repositories(
     page: int = 1,
     page_size: int = 10,
     keyword: Optional[str] = None,
@@ -8616,6 +8633,7 @@ async def list_repositories(
     total = len(visible_rows)
     start = max(page - 1, 0) * page_size
     data = visible_rows[start:start + page_size]
+    allowed_roots = _repository_allowed_roots()
     _log_event(
         "repository.list",
         **_current_user_log_context(current_user),
@@ -8628,7 +8646,7 @@ async def list_repositories(
     return {
         "code": 0,
         "message": "success",
-        "data": [repository_to_dict(r) for r in data],
+        "data": [repository_to_dict(r, allowed_roots=allowed_roots) for r in data],
         "total": total,
         "page": page,
         "page_size": page_size,

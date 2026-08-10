@@ -66,6 +66,7 @@ def start_node(name: str, port: int, data_dir: Path, master_key: str, log_dir: P
         {
             "DB_PATH": str(data_dir / "app_data.db"),
             "PCIDS_DATA_DIR": str(data_dir),
+            "PCIDS_LICENSE_ENFORCEMENT": "0",
             "PCIDS_REPOSITORY_SYNC_NODE_ID": name,
             "PCIDS_AGENT_TOKEN": TOKEN,
             "PCIDS_ARTIFACT_MASTER_KEY": master_key,

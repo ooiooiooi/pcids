@@ -73,6 +73,10 @@ out/
 release/
 release-*/
 release-test*/
+license-tool-dist/
+license-tool-delivery/
+.license-tool-build/
+license-tool/windows/cmd/pcids-license-issuer/*.syso
 .package-*.pid
 .rebuild-*.pid
 .package-smoke/
@@ -110,6 +114,11 @@ uploads/
 # Generated exports
 frontend_source*.docx
 .tools/
+issuer_private_key.pem
+issuer_password.txt
+issuer_ledger.db
+issuer_private_key.pcissuer
+issuer_ledger.json
 release-win7-private/
 tools/*
 !tools/build-backend.mjs

@@ -14,8 +14,12 @@ from backend.utils.permission import require_any_permission
 router = APIRouter()
 
 
-def login_log_to_dict(log, db: Session):
-    user = db.query(User).filter(User.id == log.user_id).first()
+def login_log_to_dict(log, db: Session, users_by_id: Optional[dict[int, User]] = None):
+    user = (
+        users_by_id.get(log.user_id)
+        if users_by_id is not None
+        else db.query(User).filter(User.id == log.user_id).first()
+    )
     return {
         "id": log.id,
         "user_id": log.user_id,
@@ -29,8 +33,12 @@ def login_log_to_dict(log, db: Session):
     }
 
 
-def operation_log_to_dict(log, db: Session):
-    user = db.query(User).filter(User.id == log.user_id).first()
+def operation_log_to_dict(log, db: Session, users_by_id: Optional[dict[int, User]] = None):
+    user = (
+        users_by_id.get(log.user_id)
+        if users_by_id is not None
+        else db.query(User).filter(User.id == log.user_id).first()
+    )
     return {
         "id": log.id,
         "user_id": log.user_id,
@@ -47,7 +55,7 @@ def operation_log_to_dict(log, db: Session):
 
 
 @router.get("/login", response_model=PaginatedResponse)
-async def get_login_logs(
+def get_login_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     user_id: Optional[int] = None,
@@ -81,14 +89,23 @@ async def get_login_logs(
     if end_date:
         query = query.filter(LoginLog.login_time <= end_date)
 
-    query = query.order_by(LoginLog.login_time.desc())
-    total = query.count()
-    logs = query.offset((page - 1) * page_size).limit(page_size).all()
+    total = query.order_by(None).count()
+    logs = (
+        query.order_by(LoginLog.login_time.desc(), LoginLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    user_ids = {log.user_id for log in logs if log.user_id is not None}
+    users_by_id = {
+        user.id: user
+        for user in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
 
     return {
         "code": 0,
         "message": "success",
-        "data": [login_log_to_dict(log, db) for log in logs],
+        "data": [login_log_to_dict(log, db, users_by_id) for log in logs],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -108,7 +125,7 @@ async def clear_login_logs(
 
 
 @router.get("/operation", response_model=PaginatedResponse)
-async def get_operation_logs(
+def get_operation_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     user_id: Optional[int] = None,
@@ -144,14 +161,23 @@ async def get_operation_logs(
     if end_date:
         query = query.filter(OperationLog.operation_time <= end_date)
 
-    query = query.order_by(OperationLog.operation_time.desc())
-    total = query.count()
-    logs = query.offset((page - 1) * page_size).limit(page_size).all()
+    total = query.order_by(None).count()
+    logs = (
+        query.order_by(OperationLog.operation_time.desc(), OperationLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    user_ids = {log.user_id for log in logs if log.user_id is not None}
+    users_by_id = {
+        user.id: user
+        for user in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
 
     return {
         "code": 0,
         "message": "success",
-        "data": [operation_log_to_dict(log, db) for log in logs],
+        "data": [operation_log_to_dict(log, db, users_by_id) for log in logs],
         "total": total,
         "page": page,
         "page_size": page_size,

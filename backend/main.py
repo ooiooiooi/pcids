@@ -46,8 +46,9 @@ from backend.utils.runtime_dependencies import (
 from backend.utils.app_paths import get_app_data_root, get_upload_root
 from backend.utils.key_management import MasterKeyError, describe_artifact_master_key_source
 from backend.models.log import OperationLog
-from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, business_sync, messages, dashboard
+from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, business_sync, messages, dashboard, license
 from backend.routers.auth import SECRET_KEY, ALGORITHM
+from backend.utils.license_manager import get_license_status, is_license_enforcement_enabled
 from jose import jwt, JWTError
 
 class _CodeArtsDiagnosticFilter(logging.Filter):
@@ -480,6 +481,34 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
 
         return response
 
+
+class LicenseEnforcementMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if (
+            request.method.upper() == "OPTIONS"
+            or not is_license_enforcement_enabled()
+            or not path.startswith("/api/")
+            or path.startswith("/api/license/")
+        ):
+            return await call_next(request)
+
+        status = get_license_status()
+        if status["valid"]:
+            return await call_next(request)
+
+        return JSONResponse(
+            status_code=403,
+            content={
+                "code": "LICENSE_REQUIRED",
+                "detail": status["message"],
+                "license": {
+                    "state": status["state"],
+                    "machine_code": status["machine_code"],
+                },
+            },
+        )
+
 def _run_startup_diagnostics() -> None:
     """Run non-critical workstation probes without delaying API readiness."""
     started_at = time.monotonic()
@@ -579,6 +608,7 @@ app = FastAPI(
 )
 
 app.add_middleware(OperationLogMiddleware)
+app.add_middleware(LicenseEnforcementMiddleware)
 
 # 配置 CORS（允许 Electron 访问）
 app.add_middleware(
@@ -591,6 +621,7 @@ app.add_middleware(
 )
 
 # 注册路由
+app.include_router(license.router, prefix="/api/license", tags=["软件授权"])
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(users.router, prefix="/api/users", tags=["用户管理"])
 app.include_router(roles.router, prefix="/api/roles", tags=["角色管理"])
@@ -615,6 +646,7 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
 @app.get("/health")
 async def health_check():
     """健康检查接口"""
+    license_status = get_license_status()
     if not getattr(app.state, "startup_diagnostics_complete", False):
         return JSONResponse(
             status_code=503,
@@ -622,12 +654,14 @@ async def health_check():
                 "status": "starting",
                 "version": "1.0.0",
                 "service": "pcids-backend",
+                "license": {"valid": license_status["valid"], "state": license_status["state"]},
             },
         )
     return {
         "status": "ok",
         "version": "1.0.0",
         "service": "pcids-backend",
+        "license": {"valid": license_status["valid"], "state": license_status["state"]},
     }
 
 

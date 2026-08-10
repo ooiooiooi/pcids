@@ -75,6 +75,7 @@ try {
       env: {
         ...process.env,
         PCIDS_DATA_DIR: resolvedTestDataRoot,
+        PCIDS_LICENSE_ENFORCEMENT: '0',
         DB_PATH: path.join(resolvedTestDataRoot, 'app_data.db'),
       },
     },

@@ -19,6 +19,7 @@ import OperationLog from './pages/OperationLog'
 import User from './pages/User'
 import Role from './pages/Role'
 import BackendServiceErrorNotice from './components/BackendServiceErrorNotice'
+import LicenseGate from './components/LicenseGate'
 import { installGlobalBackendFetchGuard, installGlobalBackendMessageGuard } from './services/backendErrorCenter'
 import './styles/index.css'
 
@@ -71,27 +72,29 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <ConfigProvider locale={zhCN} theme={theme}>
       <AntdApp style={{ height: '100%' }}>
         <BackendServiceErrorNotice />
-        <HashRouter>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/" element={<App />}>
-              <Route index element={<Navigate to="/workbench" replace />} />
-              <Route path="workbench" element={<WorkbenchWrapper />} />
-              <Route path="repository" element={<Repository />} />
-              <Route path="burning" element={<Burning />} />
-              <Route path="injection" element={<Injection />} />
-              <Route path="protocol" element={<Protocol />} />
-              <Route path="record" element={<Record />} />
-              <Route path="product" element={<Product />} />
-              <Route path="burner" element={<Burner />} />
-              <Route path="script" element={<Script />} />
-              <Route path="log/login" element={<LoginLog />} />
-              <Route path="log/operation" element={<OperationLog />} />
-              <Route path="user" element={<User />} />
-              <Route path="role" element={<Role />} />
-            </Route>
-          </Routes>
-        </HashRouter>
+        <LicenseGate>
+          <HashRouter>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route path="/" element={<App />}>
+                <Route index element={<Navigate to="/workbench" replace />} />
+                <Route path="workbench" element={<WorkbenchWrapper />} />
+                <Route path="repository" element={<Repository />} />
+                <Route path="burning" element={<Burning />} />
+                <Route path="injection" element={<Injection />} />
+                <Route path="protocol" element={<Protocol />} />
+                <Route path="record" element={<Record />} />
+                <Route path="product" element={<Product />} />
+                <Route path="burner" element={<Burner />} />
+                <Route path="script" element={<Script />} />
+                <Route path="log/login" element={<LoginLog />} />
+                <Route path="log/operation" element={<OperationLog />} />
+                <Route path="user" element={<User />} />
+                <Route path="role" element={<Role />} />
+              </Route>
+            </Routes>
+          </HashRouter>
+        </LicenseGate>
       </AntdApp>
     </ConfigProvider>
   </React.StrictMode>,

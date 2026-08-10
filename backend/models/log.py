@@ -1,7 +1,7 @@
 """
 日志和记录模型定义
 """
-from sqlalchemy import String, Text, Integer, DateTime, ForeignKey
+from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from typing import Optional
 from datetime import datetime
@@ -99,6 +99,12 @@ class ProtocolLog(Base):
 class LoginLog(Base, TimestampMixin):
     """登录日志表"""
     __tablename__ = "login_logs"
+    __table_args__ = (
+        Index("ix_login_logs_login_time_id", "login_time", "id"),
+        Index("ix_login_logs_user_time_id", "user_id", "login_time", "id"),
+        Index("ix_login_logs_type_time_id", "log_type", "login_time", "id"),
+        Index("ix_login_logs_result_time_id", "result", "login_time", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
@@ -111,6 +117,11 @@ class LoginLog(Base, TimestampMixin):
 class OperationLog(Base, TimestampMixin):
     """操作日志表"""
     __tablename__ = "operation_logs"
+    __table_args__ = (
+        Index("ix_operation_logs_operation_time_id", "operation_time", "id"),
+        Index("ix_operation_logs_user_time_id", "user_id", "operation_time", "id"),
+        Index("ix_operation_logs_result_time_id", "result", "operation_time", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))

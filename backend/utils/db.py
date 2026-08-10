@@ -37,7 +37,9 @@ def create_sqlite_engine(db_path: Path):
         f'sqlite:///{db_path}',
         connect_args={"check_same_thread": False, "timeout": 30},
         poolclass=QueuePool,  # B/S架构：连接池
-        pool_pre_ping=True,
+        # SQLite is an in-process database; network-style connection pings add
+        # one redundant statement to every request without improving recovery.
+        pool_pre_ping=False,
         echo=False,
     )
 
@@ -51,6 +53,8 @@ def create_sqlite_engine(db_path: Path):
         cursor.execute("PRAGMA synchronous=NORMAL;")
         cursor.execute("PRAGMA busy_timeout=30000;")
         cursor.execute("PRAGMA cache_size=-20000;")
+        cursor.execute("PRAGMA temp_store=MEMORY;")
+        cursor.execute("PRAGMA mmap_size=268435456;")
         cursor.execute("PRAGMA foreign_keys=ON;")
         cursor.close()
 
@@ -2811,6 +2815,55 @@ def _ensure_schema_uncached():
     ensure_column("tasks", "termination_requested_at", "DATETIME")
     ensure_column("tasks", "terminated_by_user_id", "INTEGER")
     ensure_table("CREATE INDEX IF NOT EXISTS ix_tasks_created_at ON tasks (created_at)")
+    ensure_table("CREATE INDEX IF NOT EXISTS ix_tasks_task_no ON tasks (task_no)")
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_tasks_status_burner_id "
+        "ON tasks (status, burner_id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_tasks_status_created_at_id "
+        "ON tasks (status, created_at, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_tasks_creator_created_at_id "
+        "ON tasks (created_by_user_id, created_at, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_tasks_creator_updated_at_id "
+        "ON tasks (created_by_user_id, updated_at, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_tasks_repository_status_updated_at_id "
+        "ON tasks (repository_id, status, updated_at, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_operation_logs_operation_time_id "
+        "ON operation_logs (operation_time, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_operation_logs_user_time_id "
+        "ON operation_logs (user_id, operation_time, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_operation_logs_result_time_id "
+        "ON operation_logs (result, operation_time, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_login_logs_login_time_id "
+        "ON login_logs (login_time, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_login_logs_user_time_id "
+        "ON login_logs (user_id, login_time, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_login_logs_type_time_id "
+        "ON login_logs (log_type, login_time, id)"
+    )
+    ensure_table(
+        "CREATE INDEX IF NOT EXISTS ix_login_logs_result_time_id "
+        "ON login_logs (result, login_time, id)"
+    )
     ensure_table(
         "CREATE INDEX IF NOT EXISTS ix_messages_user_created_id "
         "ON messages (user_id, created_at, id)"
@@ -3072,6 +3125,8 @@ def _ensure_schema_uncached():
         "ON repository_sync_leases (lease_until, project_key)"
     )
     _migrate_legacy_message_times_to_utc()
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA optimize")
 
 
 def ensure_schema():

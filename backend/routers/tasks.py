@@ -26,6 +26,7 @@ import time
 import traceback
 import uuid
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, Response as FastAPIResponse, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -68,6 +69,7 @@ from backend.routers.repositories import (
     _encrypt_remote_artifact_to_storage,
     _get_repository_download_config,
     _get_project_codearts_config,
+    _repository_allowed_roots,
     _get_repository_download_root,
     _get_repository_location_state,
     _get_repository_server_storage_root,
@@ -7529,7 +7531,11 @@ async def agent_run_script(request: Request, run_request: Optional[dict] = Body(
     }
 
 
-def _resolve_repository_project_name(db: Optional[Session], repo: Optional[Repository]) -> Optional[str]:
+def _resolve_repository_project_name(
+    db: Optional[Session],
+    repo: Optional[Repository],
+    repository_by_project_key: Optional[dict[str, Repository]] = None,
+) -> Optional[str]:
     if not repo:
         return None
     repo_detail = _safe_json_loads(getattr(repo, "repo_detail_json", None))
@@ -7537,6 +7543,12 @@ def _resolve_repository_project_name(db: Optional[Session], repo: Optional[Repos
     if resolved_name:
         return resolved_name
     project_key = str(getattr(repo, "project_key", None) or "").strip()
+    if project_key and repository_by_project_key is not None:
+        sibling_repo = repository_by_project_key.get(project_key)
+        if sibling_repo:
+            sibling_detail = _safe_json_loads(getattr(sibling_repo, "repo_detail_json", None))
+            return str(sibling_detail.get("name") or sibling_detail.get("project_name") or "").strip() or None
+        return None
     if db is not None and project_key:
         sibling_repos = (
             db.query(Repository)
@@ -7571,17 +7583,118 @@ def _redact_task_config_json(config_json: Optional[str]) -> Optional[str]:
     return json.dumps(normalize_text_payload(config), ensure_ascii=False)
 
 
-def task_to_dict(db: Session, t):
-    repo = db.query(Repository).filter(Repository.id == t.repository_id).first() if getattr(t, "repository_id", None) else None
-    creator = db.query(User).filter(User.id == t.created_by_user_id).first() if getattr(t, "created_by_user_id", None) else None
-    terminated_by_user = db.query(User).filter(User.id == t.terminated_by_user_id).first() if getattr(t, "terminated_by_user_id", None) else None
-    burner = db.query(Burner).filter(Burner.id == t.burner_id).first() if getattr(t, "burner_id", None) else None
-    script = db.query(Script).filter(Script.id == t.script_id).first() if getattr(t, "script_id", None) else None
-    product = db.query(Product).filter(Product.id == t.product_id).first() if getattr(t, "product_id", None) else None
+@dataclass(frozen=True)
+class _TaskSerializationContext:
+    repositories_by_id: dict[int, Repository]
+    repository_payloads_by_id: dict[int, dict]
+    users_by_id: dict[int, User]
+    burners_by_id: dict[int, Burner]
+    scripts_by_id: dict[int, Script]
+    products_by_id: dict[int, Product]
+    repository_by_project_key: dict[str, Repository]
+
+
+def _load_task_serialization_context(
+    db: Session,
+    tasks: list[BurningTask],
+) -> _TaskSerializationContext:
+    repository_ids = {item.repository_id for item in tasks if item.repository_id is not None}
+    user_ids = {
+        user_id
+        for item in tasks
+        for user_id in (item.created_by_user_id, item.terminated_by_user_id)
+        if user_id is not None
+    }
+    burner_ids = {item.burner_id for item in tasks if item.burner_id is not None}
+    script_ids = {item.script_id for item in tasks if item.script_id is not None}
+    product_ids = {item.product_id for item in tasks if item.product_id is not None}
+
+    repositories_by_id = {
+        item.id: item
+        for item in db.query(Repository).filter(Repository.id.in_(repository_ids)).all()
+    } if repository_ids else {}
+    users_by_id = {
+        item.id: item
+        for item in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
+    burners_by_id = {
+        item.id: item
+        for item in db.query(Burner).filter(Burner.id.in_(burner_ids)).all()
+    } if burner_ids else {}
+    scripts_by_id = {
+        item.id: item
+        for item in db.query(Script).filter(Script.id.in_(script_ids)).all()
+    } if script_ids else {}
+    products_by_id = {
+        item.id: item
+        for item in db.query(Product).filter(Product.id.in_(product_ids)).all()
+    } if product_ids else {}
+
+    project_keys = {
+        str(getattr(item, "project_key", None) or "").strip()
+        for item in repositories_by_id.values()
+        if str(getattr(item, "project_key", None) or "").strip()
+    }
+    repository_by_project_key: dict[str, Repository] = {}
+    if project_keys:
+        project_repositories = (
+            db.query(Repository)
+            .filter(Repository.project_key.in_(project_keys))
+            .order_by(Repository.id.asc())
+            .all()
+        )
+        for item in project_repositories:
+            project_key = str(getattr(item, "project_key", None) or "").strip()
+            if not project_key or project_key in repository_by_project_key:
+                continue
+            detail = _safe_json_loads(getattr(item, "repo_detail_json", None))
+            if str(detail.get("name") or detail.get("project_name") or "").strip():
+                repository_by_project_key[project_key] = item
+
+    allowed_roots = _repository_allowed_roots()
+    return _TaskSerializationContext(
+        repositories_by_id=repositories_by_id,
+        repository_payloads_by_id={
+            repository_id: repository_to_dict(repository, allowed_roots=allowed_roots)
+            for repository_id, repository in repositories_by_id.items()
+        },
+        users_by_id=users_by_id,
+        burners_by_id=burners_by_id,
+        scripts_by_id=scripts_by_id,
+        products_by_id=products_by_id,
+        repository_by_project_key=repository_by_project_key,
+    )
+
+
+def task_to_dict(
+    db: Session,
+    t: BurningTask,
+    context: Optional[_TaskSerializationContext] = None,
+):
+    if context is None:
+        repo = db.query(Repository).filter(Repository.id == t.repository_id).first() if getattr(t, "repository_id", None) else None
+        creator = db.query(User).filter(User.id == t.created_by_user_id).first() if getattr(t, "created_by_user_id", None) else None
+        terminated_by_user = db.query(User).filter(User.id == t.terminated_by_user_id).first() if getattr(t, "terminated_by_user_id", None) else None
+        burner = db.query(Burner).filter(Burner.id == t.burner_id).first() if getattr(t, "burner_id", None) else None
+        script = db.query(Script).filter(Script.id == t.script_id).first() if getattr(t, "script_id", None) else None
+        product = db.query(Product).filter(Product.id == t.product_id).first() if getattr(t, "product_id", None) else None
+        repository_by_project_key = None
+    else:
+        repo = context.repositories_by_id.get(t.repository_id)
+        creator = context.users_by_id.get(t.created_by_user_id)
+        terminated_by_user = context.users_by_id.get(t.terminated_by_user_id)
+        burner = context.burners_by_id.get(t.burner_id)
+        script = context.scripts_by_id.get(t.script_id)
+        product = context.products_by_id.get(t.product_id)
+        repository_by_project_key = context.repository_by_project_key
     executor_name = None
     if creator:
         executor_name = getattr(creator, "display_name", None) or getattr(creator, "username", None)
-    repository_detail = repository_to_dict(repo) if repo else None
+    repository_detail = (
+        context.repository_payloads_by_id.get(repo.id)
+        if context is not None and repo is not None
+        else repository_to_dict(repo) if repo else None
+    )
     return {
         "id": t.id,
         "task_no": getattr(t, "task_no", None),
@@ -7591,7 +7704,9 @@ def task_to_dict(db: Session, t):
         "repository_id": t.repository_id,
         "repository_name": normalize_text(getattr(repo, "name", None) if repo else None),
         "project_key": getattr(repo, "project_key", None) if repo else None,
-        "project_name": normalize_text(_resolve_repository_project_name(db, repo)),
+        "project_name": normalize_text(
+            _resolve_repository_project_name(db, repo, repository_by_project_key)
+        ),
         "tenant": getattr(repo, "tenant", None) if repo else None,
         "file_url": normalize_text(getattr(repo, "file_url", None) if repo else None),
         "display_path": normalize_text(getattr(repo, "display_path", None) if repo else None),
@@ -7833,7 +7948,7 @@ def _get_scoped_task_or_404(db: Session, current_user: User, task_id: int) -> Bu
 
 
 @router.get("", response_model=PaginatedResponse)
-async def get_tasks(
+def get_tasks(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     status: Optional[int] = None,
@@ -7869,6 +7984,8 @@ async def get_tasks(
             )
         )
 
+    total = query.order_by(None).count()
+
     # 排序处理
     if sort_field and hasattr(BurningTask, sort_field):
         order_func = desc if sort_order == "desc" else asc
@@ -7877,13 +7994,13 @@ async def get_tasks(
         # 默认按创建时间倒序
         query = query.order_by(desc(BurningTask.created_at))
 
-    total = query.count()
     tasks = query.offset((page - 1) * page_size).limit(page_size).all()
+    serialization_context = _load_task_serialization_context(db, tasks)
 
     return {
         "code": 0,
         "message": "success",
-        "data": [task_to_dict(db, t) for t in tasks],
+        "data": [task_to_dict(db, t, serialization_context) for t in tasks],
         "total": total,
         "page": page,
         "page_size": page_size,

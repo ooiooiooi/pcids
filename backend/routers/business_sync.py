@@ -32,6 +32,7 @@ from backend.utils.business_data_sync import (
     state_wire_payload,
 )
 from backend.utils.db import SessionLocal, get_db
+from backend.utils.license_manager import get_license_status
 from backend.utils.repository_data_sync import (
     get_repository_sync_node_id,
     require_repository_sync_request,
@@ -328,6 +329,14 @@ async def run_business_sync_coordinator() -> None:
     _wake_event = wake
     try:
         while True:
+            license_status = await asyncio.to_thread(get_license_status)
+            if not license_status["valid"]:
+                wake.clear()
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
             config = await asyncio.to_thread(_get_repository_data_sync_config)
             interval = max(float(config.get("interval_seconds") or 30), 5.0)
             try:

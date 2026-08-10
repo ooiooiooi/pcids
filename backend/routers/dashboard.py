@@ -26,7 +26,7 @@ from backend.routers.messages import (
     resolve_message_local_datetime,
 )
 from backend.schemas import Response
-from backend.routers.burners import _compute_burner_runtime_statuses
+from backend.routers.burners import _compute_burner_cached_status
 from backend.utils.datetime_utils import database_time_to_local, local_time_to_database
 from backend.utils.text_normalization import normalize_text_payload
 from backend.utils.permission import require_permission
@@ -258,6 +258,68 @@ def _query_task_window_metrics(
     }
 
 
+def _query_task_windows_metrics(
+    db: Session,
+    current_user: User,
+    windows: list[_TimeWindow],
+) -> list[dict[str, int]]:
+    if not windows:
+        return []
+    expressions = []
+    for window in windows:
+        window_filter = _window_condition(window)
+        expressions.extend(
+            [
+                func.coalesce(func.sum(case((window_filter, 1), else_=0)), 0),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    window_filter,
+                                    BurningTask.status.in_([int(TaskStatus.SUCCESS), int(TaskStatus.FAILED)]),
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(window_filter, BurningTask.status == int(TaskStatus.SUCCESS)),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            ]
+        )
+    row = (
+        _scoped_task_query(db, current_user)
+        .filter(
+            BurningTask.created_at >= min(window.start_time for window in windows),
+            BurningTask.created_at < max(window.end_time for window in windows),
+        )
+        .with_entities(*expressions)
+        .one()
+    )
+    values = list(row)
+    return [
+        {
+            "total": int(values[index * 3] or 0),
+            "completed": int(values[index * 3 + 1] or 0),
+            "success": int(values[index * 3 + 2] or 0),
+        }
+        for index in range(len(windows))
+    ]
+
+
 def _query_monthly_success_trend(
     db: Session,
     current_user: User,
@@ -464,7 +526,7 @@ def _build_protocol_preview(item: ProtocolSession) -> dict:
     }
 
 @router.get("/stats", response_model=Response)
-async def get_dashboard_stats(
+def get_dashboard_stats(
     trend_months: int = Query(6, ge=6, le=12),
     target_months: int = Query(6, ge=6, le=12),
     db: Session = Depends(get_db),
@@ -486,8 +548,11 @@ async def get_dashboard_stats(
     )
 
     # 1. 今日任务量统计全部可见任务；成功率仅统计已完成（成功/失败）任务。
-    today_metrics = _query_task_window_metrics(db, current_user, today_window)
-    yesterday_metrics = _query_task_window_metrics(db, current_user, yesterday_window)
+    yesterday_metrics, today_metrics = _query_task_windows_metrics(
+        db,
+        current_user,
+        [yesterday_window, today_window],
+    )
     today_count = today_metrics["total"]
     yesterday_count = yesterday_metrics["total"]
     task_growth, task_growth_available = _calculate_task_growth(
@@ -524,7 +589,7 @@ async def get_dashboard_stats(
         database_now,
     )
 
-    # 3. 先读取设备及占用快照，硬件/远程探测在结束数据库事务后异步执行。
+    # 3. 工作台只读取最近持久化的设备状态；真实硬件探测由设备页与扫描操作负责。
     burners = db.query(Burner).all()
     occupied_burner_ids = {
         burner_id
@@ -604,16 +669,14 @@ async def get_dashboard_stats(
     }
     shortcuts = _build_shortcuts(db, current_user)
 
-    # Do not retain a SQLite transaction or session-bound lazy attributes while
-    # local USB and remote Agent probes are running in worker threads.
+    # Release the dashboard read transaction before rendering the response.
     for burner in burners:
         db.expunge(burner)
     db.rollback()
-    runtime_status_by_id, _usb_device_count = await _compute_burner_runtime_statuses(
-        burners,
-        occupied_burner_ids,
-    )
-    burner_statuses = [runtime_status_by_id.get(burner.id, 1) for burner in burners]
+    burner_statuses = [
+        _compute_burner_cached_status(burner, occupied_burner_ids)
+        for burner in burners
+    ]
     burner_idle = sum(1 for status in burner_statuses if status == 0)
     burner_in_use = sum(1 for status in burner_statuses if status == 2)
     burner_offline = sum(1 for status in burner_statuses if status in (1, 3))

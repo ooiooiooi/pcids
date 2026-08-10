@@ -184,7 +184,7 @@ async def kick_user(
     
     return {
         "code": 0,
-        "message": "已成功将该用户踢出，释放许可"
+        "message": "已成功将该用户强制下线"
     }
 
 @router.get("", response_model=PaginatedResponse)
