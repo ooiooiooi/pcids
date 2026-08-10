@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -312,6 +312,48 @@ class BusinessDataSyncTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(self.server.query(ProtocolLog).count(), 0)
         self.assertEqual(self.server.query(ProtocolSession).count(), 0)
+
+    def test_unchanged_large_task_capture_uses_bounded_selects(self):
+        role = Role(name="性能测试角色", status=1, data_scope="all")
+        product = Product(name="性能测试板", chip_type="ARM", serial_number="PERF-BOARD")
+        burner = Burner(name="性能测试烧录器", type="ST-LINK", sn="PERF-BURNER")
+        script = Script(name="性能测试脚本", type="python", content="print('ok')")
+        self.server.add_all([role, product, burner, script])
+        self.server.flush()
+        user = User(username="perf-user", password_hash="unused", role_id=role.id, status=1)
+        self.server.add(user)
+        self.server.flush()
+        self.server.add_all(
+            [
+                BurningTask(
+                    task_no=f"PERF-{index:04d}",
+                    created_by_user_id=user.id,
+                    software_name=f"firmware-{index}.bin",
+                    status=2,
+                    product_id=product.id,
+                    burner_id=burner.id,
+                    script_id=script.id,
+                )
+                for index in range(120)
+            ]
+        )
+        self.server.commit()
+        sync.capture_local_business_changes(self.server)
+
+        statements = []
+
+        def capture_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(self.engines[0], "before_cursor_execute", capture_statement)
+        try:
+            created = sync.capture_local_business_changes(self.server)
+        finally:
+            event.remove(self.engines[0], "before_cursor_execute", capture_statement)
+
+        self.assertEqual(created, 0)
+        self.assertLessEqual(len(statements), 24)
 
 
 if __name__ == "__main__":

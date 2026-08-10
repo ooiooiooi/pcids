@@ -60,7 +60,8 @@ const LicenseGate = ({ children }: { children: ReactNode }) => {
     }
   }, [loadStatus])
 
-  const showGate = loading || serviceError || !status?.valid
+  const initialChecking = loading && !status && !serviceError
+  const showGate = Boolean(serviceError || (status && !status.valid) || (!loading && !status))
   const isDesktopRuntime = Boolean(window.electronAPI?.windowControls)
 
   useEffect(() => {
@@ -71,6 +72,10 @@ const LicenseGate = ({ children }: { children: ReactNode }) => {
     return () => viewportElements.forEach((element) => element.classList.remove('pcids-license-viewport'))
   }, [isDesktopRuntime, showGate])
 
+  // Keep the current desktop window mode while the fast local check runs.
+  // Rendering the gate here would briefly resize a refreshed main window to
+  // the login dimensions before the valid response arrives.
+  if (initialChecking) return null
   if (!showGate) return <>{children}</>
 
   const copyMachineCode = async () => {

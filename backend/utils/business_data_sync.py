@@ -56,6 +56,14 @@ class EntityPolicy:
     foreign_entities: tuple[tuple[str, str], ...] = ()
 
 
+@dataclass
+class _CaptureContext:
+    rows_by_type: dict[str, list[Any]]
+    mappings_by_type: dict[str, dict[int, BusinessSyncEntity]]
+    uuid_owners_by_type: dict[str, dict[str, int]]
+    repository_uuids: dict[int, str]
+
+
 # Dependency order is also capture/apply order.
 ENTITY_POLICIES: tuple[EntityPolicy, ...] = (
     EntityPolicy("role", Role, ("name",)),
@@ -173,24 +181,40 @@ def _mapping_by_uuid(db: Session, entity_type: str, entity_uuid: str) -> Busines
     )
 
 
-def _reference_uuid(db: Session, entity_type: str, local_id: Any) -> str | None:
+def _reference_uuid(
+    db: Session,
+    entity_type: str,
+    local_id: Any,
+    context: _CaptureContext | None = None,
+) -> str | None:
     if local_id is None:
         return None
+    normalized_id = int(local_id)
+    if context is not None:
+        if entity_type == "repository":
+            return context.repository_uuids.get(normalized_id)
+        mapping = context.mappings_by_type.get(entity_type, {}).get(normalized_id)
+        return str(mapping.entity_uuid) if mapping else None
     if entity_type == "repository":
-        row = db.query(Repository.sync_uuid).filter(Repository.id == int(local_id)).first()
+        row = db.query(Repository.sync_uuid).filter(Repository.id == normalized_id).first()
         return str(row[0] or "").strip() if row else None
-    mapping = _mapping(db, entity_type, int(local_id))
+    mapping = _mapping(db, entity_type, normalized_id)
     return str(mapping.entity_uuid) if mapping else None
 
 
-def _identity_seed(db: Session, policy: EntityPolicy, row: Any) -> str:
+def _identity_seed(
+    db: Session,
+    policy: EntityPolicy,
+    row: Any,
+    context: _CaptureContext | None = None,
+) -> str:
     parts: list[str] = []
     for field in policy.identity_fields:
         value = str(getattr(row, field, "") or "").strip().lower()
         if value:
             parts.append(f"{field}={value}")
     for field, target_type in policy.foreign_entities:
-        value = _reference_uuid(db, target_type, getattr(row, field, None))
+        value = _reference_uuid(db, target_type, getattr(row, field, None), context)
         if value:
             parts.append(f"{field}={value}")
     if parts:
@@ -198,40 +222,73 @@ def _identity_seed(db: Session, policy: EntityPolicy, row: Any) -> str:
     return f"{policy.name}|{get_repository_sync_node_id()}|{int(row.id)}"
 
 
-def ensure_entity_mappings(db: Session) -> int:
+def _load_capture_context(db: Session) -> _CaptureContext:
+    rows_by_type = {
+        policy.name: db.query(policy.model).order_by(policy.model.id.asc()).all()
+        for policy in ENTITY_POLICIES
+    }
+    mappings_by_type = {policy.name: {} for policy in ENTITY_POLICIES}
+    uuid_owners_by_type = {policy.name: {} for policy in ENTITY_POLICIES}
+    for mapping in db.query(BusinessSyncEntity).all():
+        entity_type = str(mapping.entity_type)
+        mappings_by_type.setdefault(entity_type, {})[int(mapping.local_id)] = mapping
+        uuid_owners_by_type.setdefault(entity_type, {})[str(mapping.entity_uuid)] = int(mapping.local_id)
+    repository_uuids = {
+        int(repository_id): str(sync_uuid or "").strip()
+        for repository_id, sync_uuid in db.query(Repository.id, Repository.sync_uuid).all()
+        if str(sync_uuid or "").strip()
+    }
+    return _CaptureContext(
+        rows_by_type=rows_by_type,
+        mappings_by_type=mappings_by_type,
+        uuid_owners_by_type=uuid_owners_by_type,
+        repository_uuids=repository_uuids,
+    )
+
+
+def _ensure_entity_mappings(db: Session, context: _CaptureContext) -> int:
     created = 0
+    node_id = get_repository_sync_node_id()
     for policy in ENTITY_POLICIES:
-        mapped_ids = {
-            int(item[0])
-            for item in db.query(BusinessSyncEntity.local_id)
-            .filter(BusinessSyncEntity.entity_type == policy.name)
-            .all()
-        }
-        for row in db.query(policy.model).order_by(policy.model.id.asc()).all():
-            if int(row.id) in mapped_ids:
+        mappings = context.mappings_by_type.setdefault(policy.name, {})
+        uuid_owners = context.uuid_owners_by_type.setdefault(policy.name, {})
+        for row in context.rows_by_type.get(policy.name, []):
+            local_id = int(row.id)
+            if local_id in mappings:
                 continue
-            entity_uuid = uuid.uuid5(SYNC_NAMESPACE, _identity_seed(db, policy, row)).hex
-            existing_uuid = _mapping_by_uuid(db, policy.name, entity_uuid)
-            if existing_uuid and int(existing_uuid.local_id) != int(row.id):
+            identity_seed = _identity_seed(db, policy, row, context)
+            entity_uuid = uuid.uuid5(SYNC_NAMESPACE, identity_seed).hex
+            existing_local_id = uuid_owners.get(entity_uuid)
+            if existing_local_id is not None and existing_local_id != local_id:
                 # Duplicate natural identities are still distinct local rows.
                 entity_uuid = uuid.uuid5(
                     SYNC_NAMESPACE,
-                    f"{_identity_seed(db, policy, row)}|local={get_repository_sync_node_id()}:{row.id}",
+                    f"{identity_seed}|local={node_id}:{local_id}",
                 ).hex
-            db.add(
-                BusinessSyncEntity(
-                    entity_type=policy.name,
-                    local_id=int(row.id),
-                    entity_uuid=entity_uuid,
-                )
+            mapping = BusinessSyncEntity(
+                entity_type=policy.name,
+                local_id=local_id,
+                entity_uuid=entity_uuid,
             )
-            db.flush()
-            mapped_ids.add(int(row.id))
+            db.add(mapping)
+            mappings[local_id] = mapping
+            uuid_owners[entity_uuid] = local_id
             created += 1
+    if created:
+        db.flush()
     return created
 
 
-def _serialize_row(db: Session, policy: EntityPolicy, row: Any) -> dict[str, Any]:
+def ensure_entity_mappings(db: Session) -> int:
+    return _ensure_entity_mappings(db, _load_capture_context(db))
+
+
+def _serialize_row(
+    db: Session,
+    policy: EntityPolicy,
+    row: Any,
+    context: _CaptureContext | None = None,
+) -> dict[str, Any]:
     foreign = dict(policy.foreign_entities)
     fields: dict[str, Any] = {}
     refs: dict[str, Any] = {}
@@ -243,7 +300,7 @@ def _serialize_row(db: Session, policy: EntityPolicy, row: Any) -> dict[str, Any
         if name in foreign:
             refs[name] = {
                 "entity_type": foreign[name],
-                "entity_uuid": _reference_uuid(db, foreign[name], value),
+                "entity_uuid": _reference_uuid(db, foreign[name], value, context),
             }
         else:
             fields[name] = _json_value(value)
@@ -253,54 +310,53 @@ def _serialize_row(db: Session, policy: EntityPolicy, row: Any) -> dict[str, Any
 def capture_local_business_changes(db: Session) -> int:
     """Snapshot selected tables and append durable outbox rows for differences."""
 
-    ensure_entity_mappings(db)
+    context = _load_capture_context(db)
+    _ensure_entity_mappings(db, context)
+    snapshots_by_key = {
+        (str(item.entity_type), str(item.entity_uuid)): item
+        for item in db.query(BusinessSyncSnapshot).all()
+    }
+    state_revisions = {
+        (str(entity_type), str(entity_uuid)): int(revision or 0)
+        for entity_type, entity_uuid, revision in db.query(
+            BusinessSyncState.entity_type,
+            BusinessSyncState.entity_uuid,
+            BusinessSyncState.revision,
+        ).all()
+    }
+    pending_hashes = {
+        (str(entity_type), str(entity_uuid), str(payload_hash or ""))
+        for entity_type, entity_uuid, payload_hash in db.query(
+            BusinessSyncChange.entity_type,
+            BusinessSyncChange.entity_uuid,
+            BusinessSyncChange.payload_hash,
+        ).filter(BusinessSyncChange.status == "pending").all()
+    }
     created = 0
     node_id = get_repository_sync_node_id()
     for policy in ENTITY_POLICIES:
         current_local_ids: set[int] = set()
-        for row in db.query(policy.model).order_by(policy.model.id.asc()).all():
+        mappings = context.mappings_by_type.get(policy.name, {})
+        for row in context.rows_by_type.get(policy.name, []):
             local_id = int(row.id)
             current_local_ids.add(local_id)
-            entity = _mapping(db, policy.name, local_id)
+            entity = mappings.get(local_id)
             if not entity:
                 continue
-            payload = _serialize_row(db, policy, row)
+            payload = _serialize_row(db, policy, row, context)
             payload_hash = _payload_hash(payload)
-            snapshot = (
-                db.query(BusinessSyncSnapshot)
-                .filter(
-                    BusinessSyncSnapshot.entity_type == policy.name,
-                    BusinessSyncSnapshot.entity_uuid == entity.entity_uuid,
-                )
-                .first()
-            )
+            key = (policy.name, str(entity.entity_uuid))
+            snapshot = snapshots_by_key.get(key)
             if snapshot and not snapshot.deleted and snapshot.payload_hash == payload_hash:
                 continue
-            state = (
-                db.query(BusinessSyncState)
-                .filter(
-                    BusinessSyncState.entity_type == policy.name,
-                    BusinessSyncState.entity_uuid == entity.entity_uuid,
-                )
-                .first()
-            )
-            pending_same = (
-                db.query(BusinessSyncChange.id)
-                .filter(
-                    BusinessSyncChange.entity_type == policy.name,
-                    BusinessSyncChange.entity_uuid == entity.entity_uuid,
-                    BusinessSyncChange.status == "pending",
-                    BusinessSyncChange.payload_hash == payload_hash,
-                )
-                .first()
-            )
-            if not pending_same:
+            pending_key = (policy.name, str(entity.entity_uuid), payload_hash)
+            if pending_key not in pending_hashes:
                 db.add(
                     BusinessSyncChange(
                         entity_type=policy.name,
                         entity_uuid=entity.entity_uuid,
                         operation="upsert",
-                        base_revision=int(getattr(state, "revision", 0) or 0),
+                        base_revision=state_revisions.get(key, 0),
                         status="pending",
                         payload_json=json.dumps(payload, ensure_ascii=False),
                         payload_hash=payload_hash,
@@ -308,44 +364,27 @@ def capture_local_business_changes(db: Session) -> int:
                     )
                 )
                 created += 1
+                pending_hashes.add(pending_key)
             if not snapshot:
                 snapshot = BusinessSyncSnapshot(entity_type=policy.name, entity_uuid=entity.entity_uuid)
+                snapshots_by_key[key] = snapshot
             snapshot.payload_hash = payload_hash
             snapshot.deleted = False
             db.add(snapshot)
 
-        mappings = (
-            db.query(BusinessSyncEntity)
-            .filter(BusinessSyncEntity.entity_type == policy.name)
-            .all()
-        )
-        for entity in mappings:
+        for entity in mappings.values():
             if int(entity.local_id) in current_local_ids:
                 continue
-            snapshot = (
-                db.query(BusinessSyncSnapshot)
-                .filter(
-                    BusinessSyncSnapshot.entity_type == policy.name,
-                    BusinessSyncSnapshot.entity_uuid == entity.entity_uuid,
-                )
-                .first()
-            )
+            key = (policy.name, str(entity.entity_uuid))
+            snapshot = snapshots_by_key.get(key)
             if not snapshot or snapshot.deleted:
                 continue
-            state = (
-                db.query(BusinessSyncState)
-                .filter(
-                    BusinessSyncState.entity_type == policy.name,
-                    BusinessSyncState.entity_uuid == entity.entity_uuid,
-                )
-                .first()
-            )
             db.add(
                 BusinessSyncChange(
                     entity_type=policy.name,
                     entity_uuid=entity.entity_uuid,
                     operation="delete",
-                    base_revision=int(getattr(state, "revision", 0) or 0),
+                    base_revision=state_revisions.get(key, 0),
                     status="pending",
                     payload_json="{}",
                     payload_hash=_payload_hash({}),
