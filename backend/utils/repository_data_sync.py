@@ -182,7 +182,14 @@ def normalize_repository_data_sync_config(raw: Mapping[str, Any] | None) -> dict
         minimum=1,
         maximum=65535,
     )
-    is_self_target = _is_self_target(server_host)
+    try:
+        local_backend_port = int(str(os.environ.get("PCIDS_BACKEND_PORT") or _DEFAULT_SERVER_PORT).strip())
+    except (TypeError, ValueError):
+        local_backend_port = _DEFAULT_SERVER_PORT
+    # Multiple PCIDS instances can legitimately run on one Windows host (and
+    # the integration simulator does exactly that).  A local address is only a
+    # self target when it also points at this process's listening port.
+    is_self_target = _is_self_target(server_host) and server_port == local_backend_port
 
     if not enabled or configured_role == "standalone":
         role = "standalone"

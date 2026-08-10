@@ -73,6 +73,21 @@ class RepositoryDataSyncConfigTests(unittest.TestCase):
         self.assertEqual(config["configured_role"], "client")
         self.assertEqual(config["role"], "server")
 
+    def test_same_host_different_backend_port_can_be_a_client(self):
+        with (
+            patch("backend.utils.repository_data_sync._is_self_target", return_value=True),
+            patch.dict(os.environ, {"PCIDS_BACKEND_PORT": "18001"}, clear=False),
+        ):
+            config = normalize_repository_data_sync_config(
+                {
+                    "server_ip": "127.0.0.1",
+                    "server_port": 18000,
+                    "repository_data_sync_role": "client",
+                }
+            )
+        self.assertEqual(config["role"], "client")
+        self.assertFalse(config["is_self_target"])
+
     def test_explicit_server_and_disabled_roles_are_safe(self):
         server = normalize_repository_data_sync_config(
             {"repository_data_sync_role": "server"}

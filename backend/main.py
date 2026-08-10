@@ -46,7 +46,7 @@ from backend.utils.runtime_dependencies import (
 from backend.utils.app_paths import get_app_data_root, get_upload_root
 from backend.utils.key_management import MasterKeyError, describe_artifact_master_key_source
 from backend.models.log import OperationLog
-from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, messages, dashboard
+from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, business_sync, messages, dashboard
 from backend.routers.auth import SECRET_KEY, ALGORITHM
 from jose import jwt, JWTError
 
@@ -538,11 +538,23 @@ async def lifespan(app: FastAPI):
         repositories.run_repository_data_sync_coordinator(),
         name="pcids-repository-data-sync-coordinator",
     )
+    business_sync_task = asyncio.create_task(
+        business_sync.run_business_sync_coordinator(),
+        name="pcids-business-data-sync-coordinator",
+    )
     app.state.startup_diagnostics_task = diagnostics_task
     app.state.repository_data_sync_task = repository_sync_task
+    app.state.business_data_sync_task = business_sync_task
     try:
         yield
     finally:
+        business_sync_task.cancel()
+        try:
+            await business_sync_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("business.data_sync.coordinator_shutdown_failed")
         repository_sync_task.cancel()
         try:
             await repository_sync_task
@@ -592,6 +604,7 @@ app.include_router(records.router, prefix="/api/records", tags=["履历记录"])
 app.include_router(injections.router, prefix="/api/injections", tags=["异常注入"])
 app.include_router(protocol_tests.router, prefix="/api/protocol-tests", tags=["通信协议测试"])
 app.include_router(repositories.router, prefix="/api/repositories", tags=["制品仓库"])
+app.include_router(business_sync.router, prefix="/api/business-sync", tags=["业务数据同步"])
 app.include_router(messages.router, prefix="/api/messages", tags=["消息中心"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["工作台"])
 

@@ -30,11 +30,50 @@ export const getIpValidationError = (value: unknown) => {
   return ''
 }
 
+export const getTargetIpValidationError = (value: unknown) => {
+  const baseError = getIpValidationError(value)
+  if (baseError) return baseError
+  const text = String(value || '').trim()
+  const firstOctet = Number(text.split('.')[0])
+  if (text === '0.0.0.0' || text === '255.255.255.255' || (firstOctet >= 224 && firstOctet <= 239)) {
+    return '目标IP不能使用 0.0.0.0、广播或组播地址'
+  }
+  return ''
+}
+
 export const ipValidator = async (_: unknown, value: unknown) => {
   const error = getIpValidationError(value)
   if (error) {
     throw new Error(error)
   }
+}
+
+export const targetIpValidator = async (_: unknown, value: unknown) => {
+  const error = getTargetIpValidationError(value)
+  if (error) {
+    throw new Error(error)
+  }
+}
+
+export const getEthernetConfigurationError = (
+  modeInput: unknown,
+  values: Record<string, unknown>,
+) => {
+  const mode = normalizeEthernetTransportMode(modeInput)
+  const timeout = Number(values.timeout)
+  if (!Number.isInteger(timeout) || timeout < 100 || timeout > 120000) {
+    return '超时时间必须在 100-120000ms 范围内'
+  }
+  if (mode === 'UDP') {
+    const localIp = String(values.local_ip || '').trim()
+    const targetIp = String(values.target_ip || '').trim()
+    const localPort = Number(values.local_port)
+    const targetPort = Number(values.target_port)
+    if (localIp === targetIp && localPort === targetPort) {
+      return 'UDP 本地地址与目标地址不能完全相同，否则会形成本机回环并造成误判'
+    }
+  }
+  return ''
 }
 
 export const shouldHydrateProtocolFormFromSession = ({
@@ -147,11 +186,11 @@ export const mergeProtocolConnectionConfig = ({
 
   if (protocol === 'ethernet') {
     const merged = {
-      ...responseConfig,
       ...Object.fromEntries(Object.entries(requestedConfig).filter(([, value]) => value !== null && value !== undefined && value !== '')),
+      ...responseConfig,
     }
     const protocolMode = normalizeEthernetTransportMode(
-      requestedConfig.transport_protocol || requestedConfig.protocol || responseConfig.transport_protocol || responseConfig.protocol,
+      responseConfig.transport_protocol || responseConfig.protocol || requestedConfig.transport_protocol || requestedConfig.protocol,
     )
     const localIpValues = ethernetLocalIpOptions.map((item) => item.value)
     const localIpOptions = Array.isArray(responseConfig.local_ip_options) && responseConfig.local_ip_options.length
@@ -227,6 +266,13 @@ export const parseProtocolPayloadLength = (value: unknown, dataType: 'HEX' | 'AS
     }
   }
   return tokens.length
+}
+
+export const ethernetPayloadValidator = (dataType: 'HEX' | 'ASCII') => async (_: unknown, value: unknown) => {
+  const payloadLength = parseProtocolPayloadLength(value, dataType)
+  if (payloadLength <= 0) {
+    throw new Error('请输入要发送的数据')
+  }
 }
 
 export const validateCanPayloadConsistency = ({

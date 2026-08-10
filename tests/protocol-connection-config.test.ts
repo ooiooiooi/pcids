@@ -3,6 +3,34 @@ import assert from 'node:assert/strict'
 
 import { mergeProtocolConnectionConfig } from '../src/pages/Protocol/formUtils.ts'
 
+test('以太网连接后的实际端点和状态以后端 socket 结果为准', () => {
+  const merged = mergeProtocolConnectionConfig({
+    protocol: 'ethernet',
+    responseConfigInput: {
+      transport_protocol: 'TCP Client',
+      target_ip: '127.0.0.1',
+      target_port: 9000,
+      local_ip: '127.0.0.1',
+      local_port: 53124,
+      remote_ip: '127.0.0.1',
+      remote_port: 9000,
+      channel_state: 'connected',
+      peer_connected: true,
+    },
+    requestedConfigInput: {
+      protocol: 'TCP Client',
+      target_ip: '127.0.0.1',
+      target_port: 9000,
+      local_port: 8080,
+    },
+  })
+
+  assert.equal(merged.local_port, 53124)
+  assert.equal(merged.remote_port, 9000)
+  assert.equal(merged.channel_state, 'connected')
+  assert.equal(merged.peer_connected, true)
+})
+
 test('经典 CAN 设备身份字段以后端扫描结果为准，但保留用户波特率等配置', () => {
   const merged = mergeProtocolConnectionConfig({
     protocol: 'can',

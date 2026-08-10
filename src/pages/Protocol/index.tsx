@@ -44,9 +44,12 @@ import {
   canFrameIdValidator,
   canLengthValidator,
   filterProtocolTrafficLogs,
+  getEthernetConfigurationError,
   getProtocolFormSyncKey,
+  ethernetPayloadValidator,
   ipValidator,
   mergeProtocolConnectionConfig,
+  targetIpValidator,
   validateCanPayloadConsistency,
   shouldHydrateProtocolFormFromSession,
 } from './formUtils'
@@ -256,8 +259,8 @@ const getConnectionValidationFields = (protocol: ModuleKind, ethernetMode?: stri
   }
   if (protocol === 'ethernet') {
     const mode = normalizeEthernetMode(ethernetMode)
-    if (mode === 'TCP Server') return ['protocol', 'local_ip', 'listen_port']
-    if (mode === 'UDP') return ['protocol', 'local_ip', 'local_port', 'target_ip', 'target_port']
+    if (mode === 'TCP Server') return ['protocol', 'local_ip', 'listen_port', 'timeout']
+    if (mode === 'UDP') return ['protocol', 'local_ip', 'local_port', 'target_ip', 'target_port', 'timeout']
     return ['protocol', 'target_ip', 'target_port', 'timeout']
   }
   if (protocol === gpioModuleKey) {
@@ -347,6 +350,12 @@ const positiveIntegerValidator = (label: string) => (_: any, value: any) => {
 const portValidator = (_: any, value: any) => {
   if (value === undefined || value === null || value === '') return Promise.reject(new Error('请输入端口'))
   if (!Number.isInteger(Number(value)) || Number(value) < 1 || Number(value) > 65535) return Promise.reject(new Error('端口范围必须为 1-65535'))
+  return Promise.resolve()
+}
+const ethernetTimeoutValidator = (_: any, value: any) => {
+  if (!Number.isInteger(Number(value)) || Number(value) < 100 || Number(value) > 120000) {
+    return Promise.reject(new Error('超时时间必须在 100-120000ms 范围内'))
+  }
   return Promise.resolve()
 }
 const protocolStyleText = `
@@ -461,6 +470,9 @@ const protocolStyleText = `
   min-height: 0;
   flex: 1;
 }
+.pcids-protocol-workspace--gpio {
+  grid-template-columns: minmax(560px, .9fr) minmax(520px, 1.1fr);
+}
 .pcids-protocol-panel {
   min-width: 0;
   min-height: 0;
@@ -476,6 +488,18 @@ const protocolStyleText = `
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+@media (max-width: 1500px) {
+  .pcids-protocol-workspace {
+    grid-template-columns: 160px minmax(360px, .95fr) minmax(400px, 1.05fr);
+    gap: 12px;
+  }
+  .pcids-protocol-workspace--gpio {
+    grid-template-columns: minmax(500px, 1fr) minmax(400px, 1fr);
+  }
+  .pcids-protocol-panel--config {
+    padding: 12px;
+  }
 }
 .pcids-protocol-config-head {
   display: flex;
@@ -1402,6 +1426,9 @@ const Protocol: React.FC = () => {
   const isChannelConnected = currentSession?.status === 1
   const currentModuleKind: ModuleKind = activeModule === 'gpio' ? gpioModuleKey : protocolSubTab
   const connectedModuleKind = normalizeModuleKind(currentSession?.protocol)
+  const connectedEthernetMode = normalizeEthernetMode(sessionConfig.transport_protocol || sessionConfig.protocol)
+  const ethernetChannelState = String(sessionConfig.channel_state || '').trim().toLowerCase()
+  const isEthernetServerPeerReady = connectedEthernetMode !== 'TCP Server' || Boolean(sessionConfig.peer_connected)
   const isCurrentProtocolConfigLocked = isChannelConnected && connectedModuleKind === currentModuleKind
   const isEthernetConnectionLocked =
     currentModuleKind === 'ethernet' && isCurrentProtocolConfigLocked
@@ -1531,6 +1558,18 @@ const Protocol: React.FC = () => {
   }, [currentModuleChannelConfig.channel, currentModuleChannelConfig.physical_channel, currentModuleChannelConfig.physical_channel_options, selectedCanAdapterKey, selectedCanDeviceMeta])
   const activeChannelText = useMemo(() => {
     if (!(isChannelConnected && connectedModuleKind === currentModuleKind)) return '未建立通道'
+    if (currentModuleKind === 'ethernet') {
+      if (connectedEthernetMode === 'TCP Server') {
+        const listenAddress = `${sessionConfig.local_ip || '-'}:${sessionConfig.listen_port || '-'}`
+        return sessionConfig.peer_connected
+          ? `客户端已接入 ${sessionConfig.remote_ip || '-'}:${sessionConfig.remote_port || '-'}`
+          : `监听中 ${listenAddress}`
+      }
+      if (connectedEthernetMode === 'UDP') {
+        return `已绑定 ${sessionConfig.local_ip || '-'}:${sessionConfig.local_port || '-'}`
+      }
+      return `已连接 ${sessionConfig.remote_ip || sessionConfig.target_ip || '-'}:${sessionConfig.remote_port || sessionConfig.target_port || '-'}`
+    }
     return String(
       sessionConfig.physical_channel ||
       sessionConfig.channel ||
@@ -1540,7 +1579,13 @@ const Protocol: React.FC = () => {
       sessionConfig.pin ||
       '已连接',
     )
-  }, [connectedModuleKind, currentModuleKind, isChannelConnected, sessionConfig])
+  }, [connectedEthernetMode, connectedModuleKind, currentModuleKind, isChannelConnected, sessionConfig])
+  const activeChannelColor = useMemo(() => {
+    if (!(isChannelConnected && connectedModuleKind === currentModuleKind)) return '#d9d9d9'
+    if (currentModuleKind === 'ethernet' && ethernetChannelState === 'listening') return '#faad14'
+    if (currentModuleKind === 'ethernet' && ethernetChannelState === 'disconnected') return '#ff4d4f'
+    return '#52c41a'
+  }, [connectedModuleKind, currentModuleKind, ethernetChannelState, isChannelConnected])
   const getLogColumns = () => {
     switch (currentModuleKind) {
       case 'can':
@@ -2065,6 +2110,13 @@ const extractPayloadDisplayText = (value: any) => {
     try {
       await cleanupPersistedProtocolSession()
       const values = await protocolForm.validateFields(getConnectionValidationFields(currentModuleKind, protocolForm.getFieldValue('protocol')))
+      if (currentModuleKind === 'ethernet') {
+        const configurationError = getEthernetConfigurationError(values.protocol, values)
+        if (configurationError) {
+          message.warning(configurationError)
+          return
+        }
+      }
       const requestedConfig = {
         ...pickConnectionConfig(currentModuleKind, values),
         ...(currentModuleKind !== gpioModuleKey ? { data_type: dataType } : {}),
@@ -2423,7 +2475,7 @@ const extractPayloadDisplayText = (value: any) => {
       )}
       <span className="pcids-channel-toolbar__status">
         <Badge
-          color={isChannelConnected && connectedModuleKind === currentModuleKind ? '#52c41a' : '#d9d9d9'}
+          color={activeChannelColor}
           text={isChannelConnected && connectedModuleKind === currentModuleKind ? activeChannelText : '未建立'}
         />
       </span>
@@ -3259,18 +3311,13 @@ const extractPayloadDisplayText = (value: any) => {
               {ethernetProtocolMode === 'TCP Client' && (
                 <>
                   <Col span={12}>
-                    <Form.Item label="目标IP" name="target_ip" style={compactFormItemStyle} rules={[{ validator: ipValidator }]} validateTrigger="onBlur">
+                    <Form.Item label="目标IP" name="target_ip" style={compactFormItemStyle} rules={[{ validator: targetIpValidator }]} validateTrigger="onBlur">
                       <Input name="target_ip" autoComplete="off" placeholder="例如：192.168.0.10" disabled={isEthernetConnectionLocked} />
                     </Form.Item>
                   </Col>
                   <Col span={12}>
                     <Form.Item label="目标端口" name="target_port" style={compactFormItemStyle} rules={[{ validator: portValidator }]}>
                       <InputNumber min={1} max={65535} precision={0} style={fullWidthStyle} placeholder="1-65535" disabled={isEthernetConnectionLocked} />
-                    </Form.Item>
-                  </Col>
-                  <Col span={24}>
-                    <Form.Item label="超时时间(ms)" name="timeout" style={compactFormItemStyle} rules={[{ validator: positiveIntegerValidator('超时时间') }]}>
-                      <InputNumber min={1} precision={0} style={fullWidthStyle} placeholder="请输入正整数" disabled={isEthernetConnectionLocked} />
                     </Form.Item>
                   </Col>
                 </>
@@ -3302,7 +3349,7 @@ const extractPayloadDisplayText = (value: any) => {
                     </Form.Item>
                   </Col>
                   <Col span={12}>
-                    <Form.Item label="目标IP" name="target_ip" style={compactFormItemStyle} rules={[{ validator: ipValidator }]} validateTrigger="onBlur">
+                    <Form.Item label="目标IP" name="target_ip" style={compactFormItemStyle} rules={[{ validator: targetIpValidator }]} validateTrigger="onBlur">
                       <Input name="target_ip" autoComplete="off" placeholder="例如：192.168.0.10" disabled={isEthernetConnectionLocked} />
                     </Form.Item>
                   </Col>
@@ -3313,11 +3360,24 @@ const extractPayloadDisplayText = (value: any) => {
                   </Col>
                 </>
               )}
+              <Col span={24}>
+                <Form.Item label="操作超时(ms)" name="timeout" style={compactFormItemStyle} rules={[{ validator: ethernetTimeoutValidator }]}>
+                  <InputNumber min={100} max={120000} precision={0} style={fullWidthStyle} placeholder="100-120000" disabled={isEthernetConnectionLocked} />
+                </Form.Item>
+              </Col>
             </Row>
-            <Form.Item label={renderPayloadLabel} name="data" style={compactFormItemStyle}>
+            <Form.Item label={renderPayloadLabel} name="data" style={compactFormItemStyle} rules={[{ validator: ethernetPayloadValidator(dataType) }]}>
               <Input.TextArea name="data" autoComplete="off" rows={3} placeholder={dataType === 'HEX' ? '0x' : '输入ASCII数据'} />
             </Form.Item>
-            <Button type="primary" block icon={<SendOutlined />} onClick={handleSend} disabled={!currentSession?.id || currentSession?.status !== 1}>发送</Button>
+            <Button
+              type="primary"
+              block
+              icon={<SendOutlined />}
+              onClick={handleSend}
+              disabled={!currentSession?.id || currentSession?.status !== 1 || !isEthernetServerPeerReady}
+            >
+              发送
+            </Button>
           </Form>
         )
       default:
@@ -3436,17 +3496,17 @@ const extractPayloadDisplayText = (value: any) => {
               <div className="pcids-protocol-target-row__main">
                 {renderTargetSelect()}
                 <Badge
-                  color={isChannelConnected ? '#52c41a' : '#d9d9d9'}
-                  text={isChannelConnected ? `已锁定 ${selectedTargetLabel || '测试对象'}，断开通道后可切换开发板和协议` : '请选择开发板后建立通道'}
+                  color={isChannelConnected ? activeChannelColor : '#d9d9d9'}
+                  text={isChannelConnected ? `${selectedTargetLabel || '测试对象'} · ${activeChannelText}` : '请选择开发板后建立通道'}
                 />
               </div>
               <div className="pcids-protocol-target-row__switch">
                 {renderModuleSwitch()}
               </div>
             </div>
-            <div className="pcids-protocol-workspace">
-              <div className="pcids-protocol-panel" style={{ padding: 12 }}>
-                {activeModule === 'protocol' ? (
+            <div className={`pcids-protocol-workspace ${activeModule === 'gpio' ? 'pcids-protocol-workspace--gpio' : ''}`}>
+              {activeModule === 'protocol' && (
+                <div className="pcids-protocol-panel" style={{ padding: 12 }}>
                   <div className="pcids-protocol-switch">
                     {protocolSubTabs.map((item) => {
                       const disabled = isChannelConnected && connectedModuleKind !== item.key
@@ -3471,15 +3531,8 @@ const extractPayloadDisplayText = (value: any) => {
                       )
                     })}
                   </div>
-                ) : (
-                  <div className="pcids-protocol-switch">
-                    <button type="button" className="pcids-protocol-switch__item pcids-protocol-switch__item--active">
-                      <span>GPIO物理引脚</span>
-                      <span className="pcids-protocol-switch__hint">输出 / 输入读取 / 边沿监听</span>
-                    </button>
-                  </div>
-                )}
-              </div>
+                </div>
+              )}
               <div className="pcids-protocol-panel pcids-protocol-panel--config">
                 {activeModule === 'gpio' ? renderGpioForm() : renderProtocolForm()}
               </div>

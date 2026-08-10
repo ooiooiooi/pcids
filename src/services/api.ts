@@ -290,6 +290,19 @@ export const logApi = {
   clearOperationLogs: () => request.delete('/logs/operation/clear'),
 }
 
+// 终端业务数据同步服务
+export const businessSyncApi = {
+  getStatus: () => request.get('/business-sync/status', {
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+  } as any),
+  trigger: () => request.post('/business-sync/trigger', undefined, {
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+    timeout: 5 * 60 * 1000,
+  } as any),
+}
+
 // 制品仓库服务
 export const repositoryApi = {
   getList: (params?: { page?: number; page_size?: number; keyword?: string; _ts?: number }) =>

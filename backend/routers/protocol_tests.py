@@ -73,6 +73,9 @@ router = APIRouter()
 
 SERIAL_DEFAULT_TIMEOUT_SECONDS = 5.0
 SERIAL_READ_POLL_TIMEOUT_SECONDS = 0.1
+ETHERNET_READ_POLL_TIMEOUT_SECONDS = 0.2
+ETHERNET_TIMEOUT_MIN_MS = 100
+ETHERNET_TIMEOUT_MAX_MS = 120000
 _SERIAL_SESSION_CONNECTIONS: dict[int, Any] = {}
 _SERIAL_SESSION_IO_LOCKS: dict[int, threading.Lock] = {}
 _SERIAL_SESSION_STOP_EVENTS: dict[int, threading.Event] = {}
@@ -84,6 +87,8 @@ _CAN_SESSION_LOCK = threading.Lock()
 _CAN_SESSION_RUNTIMES: dict[int, "CanSessionRuntime"] = {}
 _WCH_GPIO_SESSION_LOCK = threading.Lock()
 _WCH_GPIO_SESSION_CONNECTIONS: dict[int, WchGpioConnection] = {}
+_ETHERNET_SESSION_LOCK = threading.Lock()
+_ETHERNET_SESSION_RUNTIMES: dict[int, "EthernetSessionRuntime"] = {}
 
 
 @dataclass
@@ -96,6 +101,20 @@ class CanSessionRuntime:
     rx_frames: deque[tuple[int, CanFrame]] = field(default_factory=lambda: deque(maxlen=_CAN_RECEIVE_BUFFER_LIMIT))
     rx_sequence: int = 0
     rx_logged_sequences: set[int] = field(default_factory=set)
+
+
+@dataclass
+class EthernetSessionRuntime:
+    transport_mode: str
+    channel_socket: socket.socket
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    worker: Optional[threading.Thread] = None
+    io_lock: threading.Lock = field(default_factory=threading.Lock)
+    audit_lock: threading.RLock = field(default_factory=threading.RLock)
+    state_lock: threading.Lock = field(default_factory=threading.Lock)
+    peer_socket: Optional[socket.socket] = None
+    peer_address: Optional[tuple[str, int]] = None
+    timeout_seconds: float = 5.0
 
 
 def _protocol_label(protocol: str) -> str:
@@ -281,6 +300,14 @@ def _is_valid_ipv4(value: Optional[str]) -> bool:
     return isinstance(ip, ipaddress.IPv4Address)
 
 
+def _is_valid_target_ipv4(value: Optional[str]) -> bool:
+    text = str(value or "").strip()
+    if not _is_valid_ipv4(text):
+        return False
+    ip = ipaddress.ip_address(text)
+    return not (ip.is_unspecified or ip.is_multicast or text == "255.255.255.255")
+
+
 def _parse_non_negative_int(value, default: Optional[int] = None) -> Optional[int]:
     if value is None or str(value).strip() == "":
         return default
@@ -296,18 +323,11 @@ def _timeout_ms_to_seconds(value: object, default_ms: int = 5000) -> float:
     return max(timeout_ms / 1000.0, 0.001)
 
 
-def _is_tcp_port_available(host: str, port: int) -> bool:
-    target_host = str(host or "").strip() or "0.0.0.0"
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((target_host, int(port)))
-            return True
-        finally:
-            sock.close()
-    except Exception:
-        return False
+def _normalize_ethernet_timeout_ms(value: object, default_ms: int = 5000) -> int:
+    timeout_ms = _parse_non_negative_int(value, default_ms)
+    if timeout_ms is None or timeout_ms < ETHERNET_TIMEOUT_MIN_MS or timeout_ms > ETHERNET_TIMEOUT_MAX_MS:
+        raise ValueError(f"超时时间必须在 {ETHERNET_TIMEOUT_MIN_MS}-{ETHERNET_TIMEOUT_MAX_MS}ms 范围内")
+    return timeout_ms
 
 
 def _probe_serial_devices() -> list[dict]:
@@ -551,10 +571,73 @@ def _close_all_wch_gpio_session_connections() -> None:
         close_wch_gpio_connection(connection)
 
 
+def _store_ethernet_session_runtime(session_id: int, runtime: EthernetSessionRuntime) -> None:
+    worker = threading.Thread(
+        target=_ethernet_listener_worker,
+        args=(session_id, runtime),
+        name=f"ethernet-listener-{session_id}",
+        daemon=True,
+    )
+    runtime.worker = worker
+    with _ETHERNET_SESSION_LOCK:
+        old = _ETHERNET_SESSION_RUNTIMES.pop(session_id, None)
+        _ETHERNET_SESSION_RUNTIMES[session_id] = runtime
+    if old is not None:
+        _shutdown_ethernet_runtime(old)
+    worker.start()
+
+
+def _get_ethernet_session_runtime(session_id: int) -> Optional[EthernetSessionRuntime]:
+    with _ETHERNET_SESSION_LOCK:
+        return _ETHERNET_SESSION_RUNTIMES.get(session_id)
+
+
+def _shutdown_socket(sock: Optional[socket.socket]) -> None:
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def _shutdown_ethernet_runtime(runtime: EthernetSessionRuntime) -> None:
+    runtime.stop_event.set()
+    with runtime.state_lock:
+        peer_socket = runtime.peer_socket
+        runtime.peer_socket = None
+        runtime.peer_address = None
+    if peer_socket is not runtime.channel_socket:
+        _shutdown_socket(peer_socket)
+    _shutdown_socket(runtime.channel_socket)
+    if runtime.worker is not None and runtime.worker.is_alive() and runtime.worker is not threading.current_thread():
+        runtime.worker.join(timeout=1.0)
+
+
+def _close_ethernet_session_runtime(session_id: int) -> None:
+    with _ETHERNET_SESSION_LOCK:
+        runtime = _ETHERNET_SESSION_RUNTIMES.pop(session_id, None)
+    if runtime is not None:
+        _shutdown_ethernet_runtime(runtime)
+
+
+def _close_all_ethernet_session_runtimes() -> None:
+    with _ETHERNET_SESSION_LOCK:
+        runtimes = list(_ETHERNET_SESSION_RUNTIMES.values())
+        _ETHERNET_SESSION_RUNTIMES.clear()
+    for runtime in runtimes:
+        _shutdown_ethernet_runtime(runtime)
+
+
 def cleanup_protocol_session_resources() -> None:
     _close_all_serial_session_connections()
     _close_all_can_session_connections()
     _close_all_wch_gpio_session_connections()
+    _close_all_ethernet_session_runtimes()
 
 
 def _shutdown_can_runtime(runtime: CanSessionRuntime) -> None:
@@ -3032,85 +3115,420 @@ def _write_serial_payload(
     return len(payload_bytes) if written is None else int(written)
 
 
-def _run_tcp_client_exchange(host: str, port: int, payload_bytes: bytes, timeout: float, data_type: Optional[str] = None) -> tuple[str, dict]:
-    with socket.create_connection((host, int(port)), timeout=timeout) as sock:
-        sock.settimeout(timeout)
-        sock.sendall(payload_bytes)
-        local_ip, local_port = sock.getsockname()[:2]
-        remote_ip, remote_port = sock.getpeername()[:2]
-        reply = b""
-        sock.settimeout(min(max(timeout, 0.1), 1.0))
+def _format_socket_endpoint(address: tuple[str, int]) -> str:
+    return f"{address[0]}:{int(address[1])}"
+
+
+def _encode_ethernet_log_route(source: tuple[str, int], destination: tuple[str, int]) -> str:
+    return f"{_format_socket_endpoint(source)}>{_format_socket_endpoint(destination)}"
+
+
+def _decode_ethernet_log_route(value: Optional[str]) -> tuple[str, str]:
+    text = str(value or "").strip()
+    if ">" not in text:
+        return "", ""
+    source, destination = text.split(">", 1)
+    return source.strip(), destination.strip()
+
+
+def _set_tcp_keepalive(sock: socket.socket) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    if hasattr(socket, "SIO_KEEPALIVE_VALS") and hasattr(sock, "ioctl"):
         try:
-            reply = sock.recv(4096)
-        except socket.timeout:
-            reply = b""
-        return _decode_protocol_payload(reply, data_type), {
-            "local_ip": local_ip,
-            "local_port": local_port,
-            "remote_ip": remote_ip,
-            "remote_port": remote_port,
-            "reply_received": bool(reply),
-        }
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 10000, 3000))
+        except OSError:
+            pass
 
 
-def _run_tcp_server_exchange(local_ip: str, listen_port: int, payload_bytes: bytes, timeout: float, data_type: Optional[str] = None) -> tuple[str, dict]:
-    bind_ip = str(local_ip or "").strip() or "0.0.0.0"
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.settimeout(timeout)
-        server.bind((bind_ip, int(listen_port)))
-        server.listen(1)
-        conn, remote_addr = server.accept()
-        with conn:
-            actual_local_ip, actual_local_port = conn.getsockname()[:2]
-            remote_ip, remote_port = remote_addr[:2]
-            received = b""
-            send_success = False
-            conn.settimeout(min(max(timeout, 0.1), 1.0))
-            try:
-                received = conn.recv(4096)
-            except socket.timeout:
-                received = b""
-            try:
-                conn.sendall(payload_bytes)
-                send_success = True
-            except OSError:
-                if not received:
-                    raise
-            return _decode_protocol_payload(received, data_type), {
-                "local_ip": actual_local_ip,
-                "local_port": actual_local_port,
-                "remote_ip": remote_ip,
-                "remote_port": remote_port,
-                "client_connected": True,
-                "reply_received": bool(received),
-                "send_success": send_success,
-            }
-
-
-def _run_udp_exchange(local_ip: str, local_port: int, target_ip: str, target_port: int, payload_bytes: bytes, timeout: float, data_type: Optional[str] = None) -> tuple[str, dict]:
-    bind_ip = str(local_ip or "").strip() or "0.0.0.0"
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+def _configure_bound_socket(sock: socket.socket) -> None:
+    if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(timeout)
-        sock.bind((bind_ip, int(local_port)))
-        sock.sendto(payload_bytes, (target_ip, int(target_port)))
-        actual_local_ip, actual_local_port = sock.getsockname()[:2]
-        reply = b""
-        remote_ip, remote_port = target_ip, int(target_port)
-        sock.settimeout(min(max(timeout, 0.1), 1.0))
+
+
+def _validate_ethernet_connection_config(config: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(config or {})
+    transport_mode = _normalize_ethernet_mode(
+        resolved.get("transport_protocol") or resolved.get("protocol") or resolved.get("method")
+    )
+    timeout_ms = _normalize_ethernet_timeout_ms(resolved.get("timeout"), 3000)
+    resolved["transport_protocol"] = transport_mode
+    resolved["protocol"] = transport_mode
+    resolved["timeout"] = timeout_ms
+
+    if transport_mode == "TCP Client":
+        target_ip = str(resolved.get("target_ip") or "").strip()
+        target_port = _parse_non_negative_int(resolved.get("target_port"))
+        if not _is_valid_target_ipv4(target_ip):
+            raise ValueError("目标IP必须是可连接的 IPv4 地址，不能使用 0.0.0.0、广播或组播地址")
+        if not target_port or target_port > 65535:
+            raise ValueError("目标端口必须在 1-65535 范围内")
+        resolved["target_ip"] = target_ip
+        resolved["target_port"] = target_port
+        return resolved
+
+    local_ip = str(resolved.get("local_ip") or "").strip()
+    if not _is_valid_ipv4(local_ip):
+        raise ValueError("本地IP格式不正确")
+    resolved["local_ip"] = local_ip
+
+    if transport_mode == "TCP Server":
+        listen_port = _parse_non_negative_int(resolved.get("listen_port"))
+        if not listen_port or listen_port > 65535:
+            raise ValueError("监听端口必须在 1-65535 范围内")
+        resolved["listen_port"] = listen_port
+        return resolved
+
+    local_port = _parse_non_negative_int(resolved.get("local_port"))
+    target_ip = str(resolved.get("target_ip") or "").strip()
+    target_port = _parse_non_negative_int(resolved.get("target_port"))
+    if not local_port or local_port > 65535:
+        raise ValueError("本地端口必须在 1-65535 范围内")
+    if not _is_valid_target_ipv4(target_ip):
+        raise ValueError("目标IP必须是可连接的 IPv4 地址，不能使用 0.0.0.0、广播或组播地址")
+    if not target_port or target_port > 65535:
+        raise ValueError("目标端口必须在 1-65535 范围内")
+    if local_ip == target_ip and local_port == target_port:
+        raise ValueError("UDP 本地地址与目标地址不能完全相同，否则数据会回送到本机并造成误判")
+    resolved["local_port"] = local_port
+    resolved["target_ip"] = target_ip
+    resolved["target_port"] = target_port
+    return resolved
+
+
+def _open_ethernet_channel(config: dict[str, Any]) -> tuple[EthernetSessionRuntime, dict[str, Any], list[str]]:
+    try:
+        resolved = _validate_ethernet_connection_config(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"以太网连接配置无效：{str(exc)}") from exc
+
+    transport_mode = str(resolved["transport_protocol"])
+    timeout_seconds = _timeout_ms_to_seconds(resolved.get("timeout"), 3000)
+    channel_socket: Optional[socket.socket] = None
+    try:
+        if transport_mode == "TCP Client":
+            target = (str(resolved["target_ip"]), int(resolved["target_port"]))
+            channel_socket = socket.create_connection(target, timeout=timeout_seconds)
+            channel_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            _set_tcp_keepalive(channel_socket)
+            local_address = channel_socket.getsockname()[:2]
+            remote_address = channel_socket.getpeername()[:2]
+            channel_socket.settimeout(ETHERNET_READ_POLL_TIMEOUT_SECONDS)
+            runtime = EthernetSessionRuntime(
+                transport_mode=transport_mode,
+                channel_socket=channel_socket,
+                peer_socket=channel_socket,
+                peer_address=(str(remote_address[0]), int(remote_address[1])),
+                timeout_seconds=timeout_seconds,
+            )
+            resolved.update(
+                {
+                    "local_ip": str(local_address[0]),
+                    "local_port": int(local_address[1]),
+                    "remote_ip": str(remote_address[0]),
+                    "remote_port": int(remote_address[1]),
+                    "channel": _format_socket_endpoint((str(remote_address[0]), int(remote_address[1]))),
+                    "channel_state": "connected",
+                    "peer_connected": True,
+                }
+            )
+            detail = f"TCP Client 已真实连接 {_format_socket_endpoint((str(remote_address[0]), int(remote_address[1])))}"
+            resolved["probe_summary"] = detail
+            return runtime, resolved, [detail]
+
+        if transport_mode == "TCP Server":
+            channel_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _configure_bound_socket(channel_socket)
+            channel_socket.bind((str(resolved["local_ip"]), int(resolved["listen_port"])))
+            channel_socket.listen(5)
+            channel_socket.settimeout(ETHERNET_READ_POLL_TIMEOUT_SECONDS)
+            local_address = channel_socket.getsockname()[:2]
+            runtime = EthernetSessionRuntime(
+                transport_mode=transport_mode,
+                channel_socket=channel_socket,
+                timeout_seconds=timeout_seconds,
+            )
+            resolved.update(
+                {
+                    "local_ip": str(local_address[0]),
+                    "listen_port": int(local_address[1]),
+                    "channel": _format_socket_endpoint((str(local_address[0]), int(local_address[1]))),
+                    "channel_state": "listening",
+                    "peer_connected": False,
+                }
+            )
+            detail = f"TCP Server 已真实监听 {_format_socket_endpoint((str(local_address[0]), int(local_address[1])))}"
+            resolved["probe_summary"] = detail
+            return runtime, resolved, [detail]
+
+        channel_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _configure_bound_socket(channel_socket)
+        channel_socket.bind((str(resolved["local_ip"]), int(resolved["local_port"])))
+        channel_socket.settimeout(ETHERNET_READ_POLL_TIMEOUT_SECONDS)
+        local_address = channel_socket.getsockname()[:2]
+        runtime = EthernetSessionRuntime(
+            transport_mode=transport_mode,
+            channel_socket=channel_socket,
+            timeout_seconds=timeout_seconds,
+        )
+        resolved.update(
+            {
+                "local_ip": str(local_address[0]),
+                "local_port": int(local_address[1]),
+                "remote_ip": str(resolved["target_ip"]),
+                "remote_port": int(resolved["target_port"]),
+                "channel": _format_socket_endpoint((str(local_address[0]), int(local_address[1]))),
+                "channel_state": "bound",
+                "peer_connected": False,
+            }
+        )
+        detail = f"UDP 已真实绑定 {_format_socket_endpoint((str(local_address[0]), int(local_address[1])))}"
+        resolved["probe_summary"] = detail
+        return runtime, resolved, [detail]
+    except HTTPException:
+        _shutdown_socket(channel_socket)
+        raise
+    except (OSError, ValueError) as exc:
+        _shutdown_socket(channel_socket)
+        raise HTTPException(status_code=400, detail=f"{transport_mode} 通道建立失败：{str(exc)}") from exc
+
+
+def _update_ethernet_session_state(
+    session_id: int,
+    updates: dict[str, Any],
+    *,
+    detail: Optional[str] = None,
+    disconnected: bool = False,
+    runtime: Optional[EthernetSessionRuntime] = None,
+) -> None:
+    audit_lock = runtime.audit_lock if runtime is not None else threading.RLock()
+    with audit_lock:
+        db = SessionLocal()
         try:
-            reply, remote_addr = sock.recvfrom(4096)
-            remote_ip, remote_port = remote_addr[:2]
+            session = db.query(ProtocolSession).filter(ProtocolSession.id == session_id).first()
+            if session is None:
+                return
+            if disconnected:
+                session.status = 2
+            config = _load_session_config(session)
+            config.update(updates)
+            session.config_json = json.dumps(config, ensure_ascii=False)
+            if detail:
+                _append_system_log(db, session, detail)
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
+
+def _append_ethernet_rx_log(
+    session_id: int,
+    runtime: EthernetSessionRuntime,
+    payload: bytes,
+    source: tuple[str, int],
+    destination: tuple[str, int],
+) -> None:
+    if not payload:
+        return
+    with runtime.audit_lock:
+        db = SessionLocal()
+        try:
+            session = db.query(ProtocolSession).filter(ProtocolSession.id == session_id).first()
+            if session is None or int(getattr(session, "status", 0) or 0) != 1:
+                return
+            config = _load_session_config(session)
+            config.update(
+                {
+                    "remote_ip": str(source[0]),
+                    "remote_port": int(source[1]),
+                    "local_ip": str(destination[0]),
+                }
+            )
+            session.config_json = json.dumps(config, ensure_ascii=False)
+            db.add(
+                ProtocolLog(
+                    session_id=session.id,
+                    protocol=session.protocol,
+                    timestamp=datetime.now(),
+                    direction="Rx",
+                    frame_id=_encode_ethernet_log_route(source, destination),
+                    dlc=len(payload),
+                    data=_decode_protocol_payload(payload, config.get("data_type")),
+                )
+            )
+            session.rx_count = int(getattr(session, "rx_count", 0) or 0) + 1
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
+
+def _release_tcp_server_peer(session_id: int, runtime: EthernetSessionRuntime, detail: str) -> None:
+    with runtime.state_lock:
+        peer_socket = runtime.peer_socket
+        runtime.peer_socket = None
+        runtime.peer_address = None
+    _shutdown_socket(peer_socket)
+    if not runtime.stop_event.is_set():
+        _update_ethernet_session_state(
+            session_id,
+            {"channel_state": "listening", "peer_connected": False},
+            detail=detail,
+            runtime=runtime,
+        )
+
+
+def _ethernet_listener_worker(session_id: int, runtime: EthernetSessionRuntime) -> None:
+    mode = runtime.transport_mode
+    while not runtime.stop_event.is_set():
+        if mode == "TCP Server":
+            with runtime.state_lock:
+                peer_socket = runtime.peer_socket
+                peer_address = runtime.peer_address
+            if peer_socket is None:
+                try:
+                    accepted, address = runtime.channel_socket.accept()
+                    accepted.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    _set_tcp_keepalive(accepted)
+                    accepted.settimeout(ETHERNET_READ_POLL_TIMEOUT_SECONDS)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if runtime.stop_event.is_set():
+                        break
+                    continue
+                normalized_address = (str(address[0]), int(address[1]))
+                with runtime.state_lock:
+                    runtime.peer_socket = accepted
+                    runtime.peer_address = normalized_address
+                _update_ethernet_session_state(
+                    session_id,
+                    {
+                        "channel_state": "connected",
+                        "peer_connected": True,
+                        "remote_ip": normalized_address[0],
+                        "remote_port": normalized_address[1],
+                    },
+                    detail=f"TCP Server 客户端已接入：{_format_socket_endpoint(normalized_address)}",
+                    runtime=runtime,
+                )
+                continue
+            try:
+                payload = peer_socket.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                if runtime.stop_event.is_set():
+                    break
+                _release_tcp_server_peer(session_id, runtime, "TCP Server 客户端连接异常，已恢复监听")
+                continue
+            if not payload:
+                _release_tcp_server_peer(session_id, runtime, "TCP Server 客户端已断开，已恢复监听")
+                continue
+            local_address = peer_socket.getsockname()[:2]
+            source = peer_address or (str(peer_socket.getpeername()[0]), int(peer_socket.getpeername()[1]))
+            _append_ethernet_rx_log(
+                session_id,
+                runtime,
+                payload,
+                (str(source[0]), int(source[1])),
+                (str(local_address[0]), int(local_address[1])),
+            )
+            continue
+
+        if mode == "UDP":
+            try:
+                payload, source_address = runtime.channel_socket.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                if runtime.stop_event.is_set():
+                    break
+                continue
+            local_address = runtime.channel_socket.getsockname()[:2]
+            _append_ethernet_rx_log(
+                session_id,
+                runtime,
+                payload,
+                (str(source_address[0]), int(source_address[1])),
+                (str(local_address[0]), int(local_address[1])),
+            )
+            continue
+
+        try:
+            payload = runtime.channel_socket.recv(65536)
         except socket.timeout:
-            reply = b""
-        return _decode_protocol_payload(reply, data_type), {
-            "local_ip": actual_local_ip,
-            "local_port": actual_local_port,
-            "remote_ip": remote_ip,
-            "remote_port": remote_port,
-            "reply_received": bool(reply),
-        }
+            continue
+        except OSError:
+            if runtime.stop_event.is_set():
+                break
+            _update_ethernet_session_state(
+                session_id,
+                {"channel_state": "disconnected", "peer_connected": False},
+                detail="TCP Client 连接异常断开",
+                disconnected=True,
+                runtime=runtime,
+            )
+            _close_ethernet_session_runtime(session_id)
+            break
+        if not payload:
+            _update_ethernet_session_state(
+                session_id,
+                {"channel_state": "disconnected", "peer_connected": False},
+                detail="TCP Client 对端已关闭连接",
+                disconnected=True,
+                runtime=runtime,
+            )
+            _close_ethernet_session_runtime(session_id)
+            break
+        local_address = runtime.channel_socket.getsockname()[:2]
+        remote_address = runtime.channel_socket.getpeername()[:2]
+        _append_ethernet_rx_log(
+            session_id,
+            runtime,
+            payload,
+            (str(remote_address[0]), int(remote_address[1])),
+            (str(local_address[0]), int(local_address[1])),
+        )
+
+
+def _send_ethernet_runtime_payload(
+    runtime: EthernetSessionRuntime,
+    payload: bytes,
+    config: dict[str, Any],
+) -> tuple[tuple[str, int], tuple[str, int]]:
+    with runtime.io_lock:
+        if runtime.transport_mode == "TCP Server":
+            with runtime.state_lock:
+                peer_socket = runtime.peer_socket
+            if peer_socket is None:
+                raise RuntimeError("TCP Server 尚无客户端接入")
+            peer_socket.settimeout(runtime.timeout_seconds)
+            try:
+                peer_socket.sendall(payload)
+                local_address = peer_socket.getsockname()[:2]
+                remote_address = peer_socket.getpeername()[:2]
+            finally:
+                peer_socket.settimeout(ETHERNET_READ_POLL_TIMEOUT_SECONDS)
+            return (str(local_address[0]), int(local_address[1])), (str(remote_address[0]), int(remote_address[1]))
+
+        if runtime.transport_mode == "UDP":
+            destination = (str(config.get("target_ip") or ""), int(config.get("target_port") or 0))
+            runtime.channel_socket.sendto(payload, destination)
+            local_address = runtime.channel_socket.getsockname()[:2]
+            return (str(local_address[0]), int(local_address[1])), destination
+
+        runtime.channel_socket.settimeout(runtime.timeout_seconds)
+        try:
+            runtime.channel_socket.sendall(payload)
+            local_address = runtime.channel_socket.getsockname()[:2]
+            remote_address = runtime.channel_socket.getpeername()[:2]
+        finally:
+            runtime.channel_socket.settimeout(ETHERNET_READ_POLL_TIMEOUT_SECONDS)
+        return (str(local_address[0]), int(local_address[1])), (str(remote_address[0]), int(remote_address[1]))
 
 
 def _raise_protocol_validation_error(
@@ -3127,6 +3545,110 @@ def _raise_protocol_validation_error(
     _notify_protocol_result(db, session, passed=False)
     db.commit()
     raise HTTPException(status_code=400, detail=detail)
+
+
+async def _send_ethernet_protocol_payload(
+    *,
+    db: Session,
+    session: ProtocolSession,
+    merged_config: dict[str, Any],
+    payload_data: Optional[str],
+    payload_length: int,
+) -> dict[str, Any]:
+    runtime = _get_ethernet_session_runtime(session.id)
+    if runtime is None:
+        session.status = 2
+        _raise_protocol_validation_error(
+            db,
+            session,
+            "验证未通过：以太网真实通道已失效，请重新连接",
+            config={**merged_config, "channel_state": "disconnected", "peer_connected": False},
+            code="ethernet_channel_error",
+            payload_length=payload_length,
+        )
+    if runtime.transport_mode != _normalize_ethernet_mode(merged_config.get("transport_protocol")):
+        _raise_protocol_validation_error(
+            db,
+            session,
+            "验证未通过：协议模式与已建立通道不一致，请断开后重新连接",
+            config=merged_config,
+            code="ethernet_channel_error",
+            payload_length=payload_length,
+        )
+
+    try:
+        payload_bytes = _encode_protocol_payload(payload_data, merged_config.get("data_type"))
+        source, destination = await asyncio.to_thread(
+            _send_ethernet_runtime_payload,
+            runtime,
+            payload_bytes,
+            merged_config,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        if runtime.transport_mode == "TCP Client":
+            session.status = 2
+            merged_config.update({"channel_state": "disconnected", "peer_connected": False})
+            _close_ethernet_session_runtime(session.id)
+        elif runtime.transport_mode == "TCP Server":
+            _release_tcp_server_peer(session.id, runtime, "TCP Server 客户端发送失败，已恢复监听")
+            merged_config.update({"channel_state": "listening", "peer_connected": False})
+        _raise_protocol_validation_error(
+            db,
+            session,
+            f"验证未通过：{runtime.transport_mode} 真实通道发送失败，{str(exc)}",
+            config=merged_config,
+            code="ethernet_channel_error",
+            payload_length=payload_length,
+        )
+
+    with runtime.audit_lock:
+        db.refresh(session)
+        latest_config = _load_session_config(session)
+        latest_config["data_type"] = merged_config.get("data_type")
+        latest_config.update(
+            {
+                "local_ip": source[0],
+                "local_port": source[1],
+                "remote_ip": destination[0],
+                "remote_port": destination[1],
+            }
+        )
+        merged_config = latest_config
+        db.add(
+            ProtocolLog(
+                session_id=session.id,
+                protocol=session.protocol,
+                timestamp=datetime.now(),
+                direction="Tx",
+                frame_id=_encode_ethernet_log_route(source, destination),
+                dlc=len(payload_bytes),
+                data=payload_data,
+            )
+        )
+        session.tx_count = int(getattr(session, "tx_count", 0) or 0) + 1
+
+        if runtime.transport_mode == "UDP":
+            success_detail = "UDP 数据报已通过真实 socket 发送；该结果仅确认本机发送成功，不代表对端已经接收"
+            result_code = "ethernet_udp_tx_passed"
+        elif runtime.transport_mode == "TCP Server":
+            success_detail = "TCP Server 已通过当前客户端连接发送数据"
+            result_code = "ethernet_connected_passed"
+        else:
+            success_detail = "TCP Client 已通过当前持久连接发送数据"
+            result_code = "ethernet_tx_passed"
+        _persist_validation_result(
+            session,
+            merged_config,
+            passed=True,
+            detail=success_detail,
+            code=result_code,
+            payload_length=payload_length,
+            reply_frame_received=False,
+        )
+        _append_system_log(db, session, success_detail)
+        _notify_protocol_result(db, session, passed=True)
+        db.commit()
+    return {"code": 0, "message": success_detail}
 
 
 def _raise_can_dependency_http_error(exc: Exception, *, prefix: str) -> None:
@@ -3209,7 +3731,16 @@ def _create_protocol_session(
 
     for item in initial_logs or []:
         _append_system_log(db, session, item)
-    _append_system_log(db, session, "通道连接成功")
+    if session.protocol == "ethernet":
+        channel_state = str(config.get("channel_state") or "").strip().lower()
+        state_message = {
+            "connected": "以太网真实通道已连接",
+            "listening": "以太网真实通道已监听，等待客户端接入",
+            "bound": "UDP 本地端口已绑定，接收线程已启动",
+        }.get(channel_state, "以太网通道已建立")
+        _append_system_log(db, session, state_message)
+    else:
+        _append_system_log(db, session, "通道连接成功")
     db.commit()
     return session
 
@@ -3233,7 +3764,7 @@ def session_to_dict(s: ProtocolSession):
 
 
 def log_to_dict(l: ProtocolLog):
-    return {
+    result = {
         "id": l.id,
         "timestamp": l.timestamp,
         "direction": l.direction,
@@ -3241,6 +3772,13 @@ def log_to_dict(l: ProtocolLog):
         "dlc": l.dlc,
         "data": l.data,
     }
+    if _normalize_protocol_kind(l.protocol) == "ethernet" and str(l.direction or "") in {"Tx", "Rx"}:
+        source, destination = _decode_ethernet_log_route(l.frame_id)
+        if source and destination:
+            result["src_addr"] = source
+            result["dst_addr"] = destination
+            result["port"] = destination.rsplit(":", 1)[-1]
+    return result
 
 
 def _normalize_can_identity_value(value: Any) -> str:
@@ -3444,8 +3982,14 @@ async def connect_device(
     serial_connection = None
     can_connection = None
     wch_connection = None
+    ethernet_runtime = None
     config = dict(payload.config or {})
-    serial_connection, can_connection, wch_connection, initial_logs, config = _open_protocol_channel_resources(protocol, config, ["已连接设备"])
+    ethernet_logs: list[str] = []
+    if protocol == "ethernet":
+        ethernet_runtime, config, ethernet_logs = _open_ethernet_channel(config)
+    base_logs = [] if protocol == "ethernet" else ["已连接设备"]
+    serial_connection, can_connection, wch_connection, initial_logs, config = _open_protocol_channel_resources(protocol, config, base_logs)
+    initial_logs = [*ethernet_logs, *initial_logs]
     try:
         session = _create_protocol_session(
             db=db,
@@ -3462,6 +4006,8 @@ async def connect_device(
             _store_can_session_connection(session.id, can_connection)
         if wch_connection is not None:
             _store_wch_gpio_session_connection(session.id, wch_connection)
+        if ethernet_runtime is not None:
+            _store_ethernet_session_runtime(session.id, ethernet_runtime)
     except Exception:
         try:
             if serial_connection is not None:
@@ -3474,6 +4020,8 @@ async def connect_device(
             except Exception:
                 pass
         close_wch_gpio_connection(wch_connection)
+        if ethernet_runtime is not None:
+            _shutdown_ethernet_runtime(ethernet_runtime)
         raise
     return {"code": 0, "message": "连接成功", "data": session_to_dict(session)}
 
@@ -3511,6 +4059,10 @@ async def connect_channel(
     serial_connection = None
     can_connection = None
     wch_connection = None
+    ethernet_runtime = None
+    if protocol == "ethernet":
+        ethernet_runtime, config, ethernet_logs = _open_ethernet_channel(config)
+        logs = [*logs, *ethernet_logs]
     serial_connection, can_connection, wch_connection, logs, config = _open_protocol_channel_resources(protocol, config, logs)
     try:
         session = _create_protocol_session(
@@ -3528,6 +4080,8 @@ async def connect_channel(
             _store_can_session_connection(session.id, can_connection)
         if wch_connection is not None:
             _store_wch_gpio_session_connection(session.id, wch_connection)
+        if ethernet_runtime is not None:
+            _store_ethernet_session_runtime(session.id, ethernet_runtime)
     except Exception:
         try:
             if serial_connection is not None:
@@ -3540,13 +4094,15 @@ async def connect_channel(
             except Exception:
                 pass
         close_wch_gpio_connection(wch_connection)
+        if ethernet_runtime is not None:
+            _shutdown_ethernet_runtime(ethernet_runtime)
         raise
     return {
         "code": 0,
         "message": "通道连接成功",
         "data": {
             **session_to_dict(session),
-            "channel_status": "connected",
+            "channel_status": config.get("channel_state") or "connected",
             "channel_name": config.get("physical_channel") or config.get("channel") or config.get("com_port") or config.get("adapter_name") or payload.protocol,
             "probe_summary": config.get("probe_summary") or "通道连接成功",
         },
@@ -3572,6 +4128,10 @@ async def disconnect_device(
         _close_can_session_connection(session.id)
     if normalized_protocol in {"gpio", "gpio_io"} and gpio_transport_kind in {"wch_gpio", "wch"}:
         _close_wch_gpio_session_connection(session.id)
+    if normalized_protocol == "ethernet":
+        _close_ethernet_session_runtime(session.id)
+        session_config.update({"channel_state": "disconnected", "peer_connected": False})
+        session.config_json = json.dumps(session_config, ensure_ascii=False)
     session.status = 2
     _append_system_log(db, session, "通道已断开")
     db.commit()
@@ -3821,7 +4381,15 @@ async def send_frame(
     protocol = _normalize_protocol_kind(session.protocol)
     session_config = _load_session_config(session)
     runtime_config = payload.config if isinstance(payload.config, dict) else {}
-    merged_config = {**session_config, **runtime_config}
+    if protocol == "ethernet":
+        # Endpoint identity belongs to the live socket created at connect time.
+        # A send request may only change payload encoding, never redirect an
+        # existing session to another address behind the audit log's back.
+        merged_config = dict(session_config)
+        if runtime_config.get("data_type") in {"HEX", "ASCII"}:
+            merged_config["data_type"] = runtime_config["data_type"]
+    else:
+        merged_config = {**session_config, **runtime_config}
     payload_data = payload.data
     if protocol in {"can", "canfd"}:
         # The connection already owns the physical adapter. Re-enumerating it
@@ -3866,6 +4434,14 @@ async def send_frame(
             code="ethernet_channel_error",
             payload_length=payload_length,
         )
+    if protocol == "ethernet":
+        return await _send_ethernet_protocol_payload(
+            db=db,
+            session=session,
+            merged_config=merged_config,
+            payload_data=payload_data,
+            payload_length=payload_length,
+        )
     if protocol == "serial":
         available_ports = [str(item).strip() for item in merged_config.get("serial_ports") or [] if str(item).strip()]
         com_port = str(merged_config.get("com_port") or "").strip()
@@ -3892,53 +4468,6 @@ async def send_frame(
         merged_config["timeout"] = int(SERIAL_DEFAULT_TIMEOUT_SECONDS * 1000)
         session.config_json = json.dumps(merged_config, ensure_ascii=False)
 
-    remote_frame_enabled = False
-
-    if protocol == "ethernet":
-        transport_mode = _normalize_ethernet_mode(merged_config.get("transport_protocol"))
-        if transport_mode == "TCP Client":
-            if not _is_valid_ipv4(merged_config.get("target_ip")):
-                _raise_protocol_validation_error(db, session, "验证未通过：目标IP 格式不正确", config=merged_config, code="ethernet_channel_error")
-            target_port = _parse_non_negative_int(merged_config.get("target_port"))
-            timeout = _parse_non_negative_int(merged_config.get("timeout"))
-            if not target_port or target_port > 65535:
-                _raise_protocol_validation_error(db, session, "验证未通过：目标端口必须在 1-65535 范围内", config=merged_config, code="ethernet_channel_error")
-            if not timeout:
-                _raise_protocol_validation_error(db, session, "验证未通过：超时时间必须为正整数", config=merged_config, code="ethernet_channel_error")
-            merged_config["target_port"] = target_port
-            merged_config["timeout"] = timeout
-        elif transport_mode == "TCP Server":
-            local_ip = str(merged_config.get("local_ip") or "").strip()
-            listen_port = _parse_non_negative_int(merged_config.get("listen_port"))
-            if not _is_valid_ipv4(local_ip):
-                _raise_protocol_validation_error(db, session, "验证未通过：本地IP 格式不正确", config=merged_config, code="ethernet_channel_error")
-            if not listen_port or listen_port > 65535:
-                _raise_protocol_validation_error(db, session, "验证未通过：监听端口必须在 1-65535 范围内", config=merged_config, code="ethernet_channel_error")
-            if not _is_tcp_port_available(local_ip, listen_port):
-                _raise_protocol_validation_error(
-                    db,
-                    session,
-                    f"验证未通过：监听端口 {listen_port} 已被占用，❌（通道异常）",
-                    config=merged_config,
-                    code="ethernet_port_occupied",
-                )
-            merged_config["listen_port"] = listen_port
-        elif transport_mode == "UDP":
-            local_ip = str(merged_config.get("local_ip") or "").strip()
-            local_port = _parse_non_negative_int(merged_config.get("local_port"))
-            target_port = _parse_non_negative_int(merged_config.get("target_port"))
-            if not _is_valid_ipv4(local_ip):
-                _raise_protocol_validation_error(db, session, "验证未通过：本地IP 格式不正确", config=merged_config, code="ethernet_channel_error")
-            if not _is_valid_ipv4(merged_config.get("target_ip")):
-                _raise_protocol_validation_error(db, session, "验证未通过：目标IP 格式不正确", config=merged_config, code="ethernet_channel_error")
-            if not local_port or local_port > 65535:
-                _raise_protocol_validation_error(db, session, "验证未通过：本地端口必须在 1-65535 范围内", config=merged_config, code="ethernet_channel_error")
-            if not target_port or target_port > 65535:
-                _raise_protocol_validation_error(db, session, "验证未通过：目标端口必须在 1-65535 范围内", config=merged_config, code="ethernet_channel_error")
-            merged_config["local_port"] = local_port
-            merged_config["target_port"] = target_port
-        session.config_json = json.dumps(merged_config, ensure_ascii=False)
-
     if protocol in {"gpio", "gpio_io"}:
         pin = str(merged_config.get("pin") or payload.frame_id or "").strip()
         mode = str(merged_config.get("mode") or "输出").strip()
@@ -3959,8 +4488,6 @@ async def send_frame(
         )
 
     tx_dlc = payload.dlc if protocol != "serial" else payload_length
-    rx_dlc = payload.dlc if protocol != "serial" else _parse_non_negative_int(merged_config.get("length_bytes"))
-
     tx = ProtocolLog(
         session_id=session.id,
         protocol=session.protocol,
@@ -3976,8 +4503,6 @@ async def send_frame(
 
     await asyncio.sleep(0.05)
 
-    rx_data: Optional[str] = None
-    endpoint_info: dict[str, Any] = {}
     if protocol == "serial":
         serial_connection = _get_serial_session_connection(session.id)
         serial_io_lock = _get_serial_session_io_lock(session.id)
@@ -4008,94 +4533,9 @@ async def send_frame(
                 code="serial_channel_error",
                 payload_length=payload_length,
             )
-    if protocol == "ethernet":
-        transport_mode = _normalize_ethernet_mode(merged_config.get("transport_protocol"))
-        timeout = _timeout_ms_to_seconds(merged_config.get("timeout"), 5000)
-        try:
-            payload_bytes = _encode_protocol_payload(payload_data, merged_config.get("data_type"))
-            if transport_mode == "TCP Client":
-                rx_data, endpoint_info = await asyncio.to_thread(
-                    _run_tcp_client_exchange,
-                    str(merged_config.get("target_ip") or "").strip(),
-                    int(merged_config.get("target_port") or 0),
-                    payload_bytes,
-                    timeout,
-                    merged_config.get("data_type"),
-                )
-            elif transport_mode == "TCP Server":
-                rx_data, endpoint_info = await asyncio.to_thread(
-                    _run_tcp_server_exchange,
-                    str(merged_config.get("local_ip") or "").strip(),
-                    int(merged_config.get("listen_port") or 0),
-                    payload_bytes,
-                    timeout,
-                    merged_config.get("data_type"),
-                )
-            else:
-                rx_data, endpoint_info = await asyncio.to_thread(
-                    _run_udp_exchange,
-                    str(merged_config.get("local_ip") or "").strip(),
-                    int(merged_config.get("local_port") or 0),
-                    str(merged_config.get("target_ip") or "").strip(),
-                    int(merged_config.get("target_port") or 0),
-                    payload_bytes,
-                    timeout,
-                    merged_config.get("data_type"),
-                )
-            merged_config.update(endpoint_info)
-            session.config_json = json.dumps(merged_config, ensure_ascii=False)
-        except (TimeoutError, socket.timeout):
-            _raise_protocol_validation_error(
-                db,
-                session,
-                f"验证未通过：{transport_mode} 核心等待窗口超时",
-                config=merged_config,
-                code="ethernet_no_response",
-                payload_length=payload_length,
-            )
-        except (OSError, ValueError) as exc:
-            _raise_protocol_validation_error(
-                db,
-                session,
-                f"验证未通过：{transport_mode} 通道异常，{str(exc)}",
-                config=merged_config,
-                code="ethernet_channel_error",
-                payload_length=payload_length,
-            )
-    if rx_data:
-        rx = ProtocolLog(
-            session_id=session.id,
-            protocol=session.protocol,
-            timestamp=datetime.now(),
-            direction="Rx",
-            frame_id=payload.frame_id,
-            dlc=rx_dlc,
-            data=rx_data,
-        )
-        db.add(rx)
-        session.rx_count += 1
     if protocol == "serial":
         success_detail = "验证通过：串口数据写入成功；接收数据由监听线程持续采集，不将终端回显误判为命令回复"
         _persist_validation_result(session, merged_config, passed=True, detail=success_detail, code="serial_tx_passed", payload_length=payload_length)
-        _append_system_log(db, session, success_detail)
-    elif protocol == "ethernet":
-        transport_mode = _normalize_ethernet_mode(merged_config.get("transport_protocol"))
-        if transport_mode == "TCP Server":
-            success_detail = "验证通过：TCP Server 已成功接入客户端，收发数据作为补充证据"
-        elif transport_mode == "UDP":
-            success_detail = (
-                "验证通过：UDP 测试数据发送成功，收到对端回复作为补充证据"
-                if endpoint_info.get("reply_received")
-                else "验证通过：UDP socket 创建/绑定并发送成功，观察窗口未收到回复不影响判定"
-            )
-        else:
-            success_detail = (
-                "验证通过：TCP Client 连接并发送成功，收到对端回复作为补充证据"
-                if endpoint_info.get("reply_received")
-                else "验证通过：TCP Client 连接并发送成功，观察窗口未收到回复不影响判定"
-            )
-        result_code = "ethernet_connected_passed" if transport_mode == "TCP Server" else "ethernet_tx_passed"
-        _persist_validation_result(session, merged_config, passed=True, detail=success_detail, code=result_code, payload_length=payload_length)
         _append_system_log(db, session, success_detail)
     elif protocol in {"gpio", "gpio_io"}:
         success_detail = str(merged_config.get("validation_detail") or "GPIO 操作执行完成")
@@ -4104,8 +4544,6 @@ async def send_frame(
     db.commit()
     if protocol == "serial":
         return {"code": 0, "message": "串口通信验证通过"}
-    if protocol == "ethernet":
-        return {"code": 0, "message": "以太网通信验证通过"}
     if protocol in {"gpio", "gpio_io"}:
         return {"code": 0, "message": "GPIO 操作完成", "data": {"config": merged_config, "current_level": merged_config.get("current_level")}}
     return {"code": 0, "message": "发送成功"}
@@ -4221,6 +4659,8 @@ async def get_record_detail(
     session = db.query(ProtocolSession).filter(ProtocolSession.id == record_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="记录不存在")
+    if _normalize_protocol_kind(session.protocol) == "ethernet":
+        _close_ethernet_session_runtime(session.id)
     return {"code": 0, "message": "success", "data": session_to_dict(session)}
 
 

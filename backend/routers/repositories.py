@@ -36,6 +36,7 @@ from backend.utils.db import SessionLocal, get_db, ensure_schema
 from backend.utils.datetime_utils import database_time_to_local
 from backend.models.user import User
 from backend.models import (
+    BusinessSyncCursor,
     Repository,
     RepositorySyncChange,
     RepositorySyncCursor,
@@ -4198,6 +4199,13 @@ def _get_repository_server_instance_id(db: Session) -> str:
         ).all()
         if str(project_key or "").strip()
     }
+    business_revision = (
+        db.query(BusinessSyncCursor.current_revision)
+        .filter(BusinessSyncCursor.id == 1)
+        .scalar()
+    )
+    if business_revision is not None:
+        project_revisions["__business_data__"] = int(business_revision or 0)
     return get_repository_sync_server_epoch(
         database_instance_id=database_instance_id,
         project_revisions=project_revisions,
