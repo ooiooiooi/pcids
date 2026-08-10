@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, dialog, ipcMain, screen } from 'electron'
 import * as http from 'http'
 import * as net from 'net'
 import * as path from 'path'
@@ -14,6 +14,12 @@ let backendRestarting = false
 const backendOutputTail: string[] = []
 const BACKEND_START_ATTEMPTS = 3
 const BACKEND_START_TIMEOUT_MS = 120000
+const LOGIN_WINDOW_WIDTH_RATIO = 0.56
+const LOGIN_WINDOW_HEIGHT_RATIO = 0.67
+const LOGIN_WINDOW_MIN_WIDTH = 760
+const LOGIN_WINDOW_MIN_HEIGHT = 560
+const MAIN_WINDOW_MIN_WIDTH = 1280
+const MAIN_WINDOW_MIN_HEIGHT = 800
 
 const legacyUserDataRoot = app.getPath('userData')
 
@@ -58,7 +64,7 @@ app.on('second-instance', () => {
 })
 
 function getRuntimeRoot(): string {
-  return app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '../../')
+  return app.isPackaged ? path.dirname(process.execPath) : path.resolve(__dirname, '..')
 }
 
 function getBackendStartupLogPath(): string {
@@ -97,7 +103,7 @@ function resolveBundledToolsDir(): string {
         'C:\\PCIDS\\burner-drivers',
         'C:\\pcids-burner-drivers',
       ]
-    : [configured, path.join(__dirname, '../../tools/burners')]
+    : [configured, path.join(getRuntimeRoot(), 'tools', 'burners')]
 
   const usable = candidates.filter(Boolean)
   const existing = usable.find((candidate) => fs.existsSync(candidate))
@@ -114,7 +120,7 @@ function resolveProtocolAdaptersDir(): string {
         'D:\\PCIDS-Deploy\\protocol_adapters',
         'C:\\PCIDS\\protocol_adapters',
       ]
-    : [configured, path.join(__dirname, '../../tools/protocol_adapters')]
+    : [configured, path.join(getRuntimeRoot(), 'tools', 'protocol_adapters')]
 
   const usable = candidates.filter(Boolean)
   const existing = usable.find((candidate) => fs.existsSync(candidate))
@@ -132,7 +138,7 @@ function resolveCodeArtsWebRuntimeDir(): string {
         'D:\\PCIDS-Deploy\\codearts_browser_runtime',
         'C:\\PCIDS\\codearts_browser_runtime',
       ]
-    : [configured, path.join(__dirname, '../../tools/codearts_release_debugger/browser_runtime')]
+    : [configured, path.join(getRuntimeRoot(), 'tools', 'codearts_release_debugger', 'browser_runtime')]
 
   const usable = candidates.filter(Boolean)
   const existing = usable.find((candidate) => fs.existsSync(candidate))
@@ -215,6 +221,61 @@ function escapeHtml(value: string): string {
   })
 }
 
+function getStandaloneTitlebarMarkup(): string {
+  return `
+  <header class="desktop-titlebar">
+    <span class="desktop-titlebar__title">程控安装部署系统</span>
+    <nav class="desktop-titlebar__controls" aria-label="窗口控制">
+      <button type="button" aria-label="最小化" title="最小化" onclick="window.electronAPI?.windowControls.minimize()">&#8722;</button>
+      <button type="button" aria-label="最大化或还原" title="最大化或还原" onclick="window.electronAPI?.windowControls.toggleMaximize()">&#9633;</button>
+      <button type="button" class="desktop-titlebar__close" aria-label="关闭" title="关闭" onclick="window.electronAPI?.windowControls.close()">&#215;</button>
+    </nav>
+  </header>`
+}
+
+function getStandaloneTitlebarStyles(): string {
+  return `
+    .desktop-titlebar {
+      position: fixed;
+      inset: 0 0 auto;
+      z-index: 100;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-left: 14px;
+      border-bottom: 1px solid #e8ebf0;
+      background: rgba(255, 255, 255, 0.96);
+      color: #4e5969;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    .desktop-titlebar__title {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .desktop-titlebar__controls {
+      align-self: stretch;
+      display: flex;
+      -webkit-app-region: no-drag;
+    }
+    .desktop-titlebar__controls button {
+      width: 46px;
+      height: 40px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: #4e5969;
+      font: 18px/1 "Segoe UI Symbol", "Microsoft YaHei", sans-serif;
+      cursor: default;
+    }
+    .desktop-titlebar__controls button:hover { background: #edf0f5; }
+    .desktop-titlebar__controls .desktop-titlebar__close:hover {
+      background: #c42b1c;
+      color: #fff;
+    }`
+}
+
 function getStartupPageUrl(): string {
   const html = `<!doctype html>
 <html lang="zh-CN">
@@ -230,6 +291,7 @@ function getStartupPageUrl(): string {
       color: #172033;
     }
     * { box-sizing: border-box; }
+    ${getStandaloneTitlebarStyles()}
     body {
       margin: 0;
       min-height: 100vh;
@@ -306,6 +368,7 @@ function getStartupPageUrl(): string {
   </style>
 </head>
 <body>
+  ${getStandaloneTitlebarMarkup()}
   <main>
     <p class="brand">程控安装部署系统</p>
     <div class="row">
@@ -331,6 +394,7 @@ function getErrorPageUrl(detail: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>启动失败</title>
   <style>
+    ${getStandaloneTitlebarStyles()}
     body {
       margin: 0;
       min-height: 100vh;
@@ -374,6 +438,7 @@ function getErrorPageUrl(detail: string): string {
   </style>
 </head>
 <body>
+  ${getStandaloneTitlebarMarkup()}
   <main>
     <h1>本地服务启动失败</h1>
     <p>请关闭程序后重新打开。如果仍然失败，可以把下面的信息发给维护人员排查。</p>
@@ -501,9 +566,9 @@ function startPythonBackend(port: number): childProcess.ChildProcess {
       throw new Error(`Backend executable not found at: ${backendPath}`)
     }
   } else {
-    const scriptPath = path.join(__dirname, '../../backend/run_backend.py')
+    const scriptPath = path.join(runtimeRoot, 'backend', 'run_backend.py')
     pythonProcess = childProcess.spawn(resolvePythonCommand(), [scriptPath], {
-      cwd: path.join(__dirname, '../../'),
+      cwd: runtimeRoot,
       env: { ...backendEnv, PYTHONPATH: '.' },
     })
   }
@@ -614,18 +679,55 @@ async function restartBackendAfterUnexpectedExit(port: number): Promise<void> {
   }
 }
 
+function getLoginWindowBounds() {
+  const display = mainWindow
+    ? screen.getDisplayMatching(mainWindow.getBounds())
+    : screen.getPrimaryDisplay()
+  const { x, y, width: workWidth, height: workHeight } = display.workArea
+  const width = Math.min(workWidth, Math.max(LOGIN_WINDOW_MIN_WIDTH, Math.round(workWidth * LOGIN_WINDOW_WIDTH_RATIO)))
+  const height = Math.min(workHeight, Math.max(LOGIN_WINDOW_MIN_HEIGHT, Math.round(workHeight * LOGIN_WINDOW_HEIGHT_RATIO)))
+
+  return {
+    x: x + Math.round((workWidth - width) / 2),
+    y: y + Math.round((workHeight - height) / 2),
+    width,
+    height,
+  }
+}
+
+function applyLoginWindowMode(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false)
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  mainWindow.setMinimumSize(LOGIN_WINDOW_MIN_WIDTH, LOGIN_WINDOW_MIN_HEIGHT)
+  mainWindow.setBounds(getLoginWindowBounds(), false)
+}
+
+function applyMainWindowMode(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const display = screen.getDisplayMatching(mainWindow.getBounds())
+  mainWindow.setMinimumSize(
+    Math.min(MAIN_WINDOW_MIN_WIDTH, display.workArea.width),
+    Math.min(MAIN_WINDOW_MIN_HEIGHT, display.workArea.height),
+  )
+  mainWindow.maximize()
+}
+
 async function createWindow() {
   Menu.setApplicationMenu(null)
 
+  const loginBounds = getLoginWindowBounds()
+
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1280,
-    minHeight: 800,
+    ...loginBounds,
+    minWidth: LOGIN_WINDOW_MIN_WIDTH,
+    minHeight: LOGIN_WINDOW_MIN_HEIGHT,
     show: false,
-    // Use the native Windows title bar as the single source of window controls.
-    frame: true,
+    frame: false,
     autoHideMenuBar: true,
+    maximizable: true,
+    minimizable: true,
+    resizable: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -635,7 +737,6 @@ async function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
-    mainWindow?.maximize()
   })
   await mainWindow.loadURL(getStartupPageUrl())
 
@@ -668,6 +769,29 @@ ipcMain.on('window-close', () => {
   } else {
     app.quit()
   }
+})
+
+ipcMain.on('window-minimize', () => {
+  mainWindow?.minimize()
+})
+
+ipcMain.handle('window-toggle-maximize', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  else mainWindow.maximize()
+  return mainWindow.isMaximized()
+})
+
+ipcMain.handle('window-is-maximized', () => {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized())
+})
+
+ipcMain.on('window-enter-login', () => {
+  applyLoginWindowMode()
+})
+
+ipcMain.on('window-enter-main', () => {
+  applyMainWindowMode()
 })
 
 function getBackendPath(): string {

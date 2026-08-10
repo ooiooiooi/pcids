@@ -16,6 +16,7 @@ import { authApi, dashboardApi, messageApi } from './services/api'
 import { formatDateTime, getDateTimeSortValue } from './utils/dateTime'
 import { UserAvatar } from './components/UserIdentity'
 import EllipsisText from './components/EllipsisText'
+import DesktopWindowControls from './components/DesktopWindowControls'
 import Workbench from './pages/Workbench'
 import Repository from './pages/Repository'
 import Burning from './pages/Burning'
@@ -504,6 +505,12 @@ const App: React.FC = () => {
   const [expandedMessageIds, setExpandedMessageIds] = useState<Set<string>>(new Set())
   const userStr = localStorage.getItem('user')
   const username = userStr ? JSON.parse(userStr).username : '管理员'
+
+  useEffect(() => {
+    if (localStorage.getItem('token')) {
+      window.electronAPI?.windowControls.setMode('main')
+    }
+  }, [])
 
   const fetchUserInfo = async () => {
     try {
@@ -1110,8 +1117,17 @@ const App: React.FC = () => {
 
   if (isInitializing) {
     return (
-      <div style={{ display: 'flex', height: '100vh', justifyContent: 'center', alignItems: 'center' }}>
-        <Spin size="large" />
+      <div className="desktop-app-loading">
+        <div className="desktop-app-loading__titlebar">
+          <div className="app-header-brand" style={{ display: 'flex', alignItems: 'center', color: 'var(--pcids-brand-color)', fontWeight: 800, fontSize: 18 }}>
+            <img src={SoftwareLogo} alt="软件图标" style={{ width: 24, height: 24, marginRight: 8, objectFit: 'contain' }} />
+            <span>程控安装部署系统</span>
+          </div>
+          <DesktopWindowControls />
+        </div>
+        <div className="desktop-app-loading__content">
+          <Spin size="large" />
+        </div>
       </div>
     )
   }
@@ -1121,7 +1137,7 @@ const App: React.FC = () => {
       <Header
         className="app-header"
         style={{
-          padding: '0 24px',
+          padding: '0 0 0 24px',
           background: '#fff',
           display: 'flex',
           alignItems: 'center',
@@ -1134,32 +1150,35 @@ const App: React.FC = () => {
           <img src={SoftwareLogo} alt="软件图标" style={{ width: 24, height: 24, marginRight: 8, objectFit: 'contain' }} />
           <span>程控安装部署系统</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <Dropdown
-            menu={{
-              items: [
-                { key: 'profile', label: '个人信息' },
-                { key: 'logout', label: '退出登录', danger: true }
-              ],
-              onClick: ({ key }) => {
-                if (key === 'profile') setIsProfileOpen(true)
-                if (key === 'logout') void handleLogout()
-              }
-            }}
-            placement="bottomRight"
-            trigger={['click']}
-          >
-            <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-              <UserAvatar
-                user={{ avatar_url: userInfo.avatar_url, display_name: userInfo.username, username }}
-                fallbackName={userInfo.username || username || '管理'}
-                size={28}
-              />
-            </div>
-          </Dropdown>
-          <Badge dot={unreadCount > 0} offset={[-2, 2]}>
-            <BellOutlined style={{ fontSize: 20, cursor: 'pointer', color: '#86909c' }} onClick={() => setIsMessageOpen(true)} />
-          </Badge>
+        <div className="app-header-actions">
+          <div className="app-header-tools">
+            <Dropdown
+              menu={{
+                items: [
+                  { key: 'profile', label: '个人信息' },
+                  { key: 'logout', label: '退出登录', danger: true }
+                ],
+                onClick: ({ key }) => {
+                  if (key === 'profile') setIsProfileOpen(true)
+                  if (key === 'logout') void handleLogout()
+                }
+              }}
+              placement="bottomRight"
+              trigger={['click']}
+            >
+              <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                <UserAvatar
+                  user={{ avatar_url: userInfo.avatar_url, display_name: userInfo.username, username }}
+                  fallbackName={userInfo.username || username || '管理'}
+                  size={28}
+                />
+              </div>
+            </Dropdown>
+            <Badge dot={unreadCount > 0} offset={[-2, 2]}>
+              <BellOutlined style={{ fontSize: 20, cursor: 'pointer', color: '#86909c' }} onClick={() => setIsMessageOpen(true)} />
+            </Badge>
+          </div>
+          <DesktopWindowControls />
         </div>
       </Header>
       <Layout>

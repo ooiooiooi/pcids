@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Form, Input, Button, Checkbox, App as AntdApp } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
@@ -7,6 +7,7 @@ import { permissionApi } from '../../services/permission'
 import { usePermission } from '../../hooks'
 import LoginIllustration from '../../assets/images/login-illustration.png'
 import SoftwareLogo from '../../assets/images/software-logo.svg'
+import DesktopWindowControls from '../../components/DesktopWindowControls'
 
 interface LoginForm {
   account: string
@@ -19,6 +20,19 @@ const Login: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [remember, setRemember] = useState(false)
   const { setPermissions, setMenus } = usePermission()
+  const isDesktopRuntime = Boolean(window.electronAPI?.windowControls)
+
+  useEffect(() => {
+    if (!isDesktopRuntime) return
+
+    const viewportElements = [document.documentElement, document.body, document.getElementById('root')].filter(Boolean) as HTMLElement[]
+    viewportElements.forEach((element) => element.classList.add('pcids-login-viewport'))
+    window.electronAPI?.windowControls.setMode('login')
+
+    return () => {
+      viewportElements.forEach((element) => element.classList.remove('pcids-login-viewport'))
+    }
+  }, [isDesktopRuntime])
 
   const onFinish = async (values: LoginForm) => {
     setLoading(true)
@@ -54,15 +68,26 @@ const Login: React.FC = () => {
   }
 
   return (
-    <div style={{ 
+    <div className="login-page-shell" style={{
       height: '100vh', 
       width: '100vw', 
       display: 'flex', 
+      flexDirection: 'column',
       background: '#fff', 
       position: 'relative'
     }}>
+      {isDesktopRuntime ? (
+        <div className="login-desktop-titlebar">
+          <div className="login-desktop-titlebar__brand">
+            <img src={SoftwareLogo} alt="" />
+            <span>程控安装部署系统</span>
+          </div>
+          <DesktopWindowControls />
+        </div>
+      ) : null}
+      <div className="login-page-content">
       {/* Left Pane */}
-      <div style={{ 
+      <div className="login-page-pane login-page-pane--visual" style={{
         flex: '0 0 50%', 
         background: '#f7f8fb', 
         display: 'flex', 
@@ -97,7 +122,7 @@ const Login: React.FC = () => {
         </div>
 
         {/* Right Pane */}
-        <div style={{ 
+        <div className="login-page-pane login-page-pane--form" style={{
           flex: '0 0 50%', 
           padding: '60px 80px',
           display: 'flex',
@@ -167,6 +192,7 @@ const Login: React.FC = () => {
             </Form.Item>
           </Form>
         </div>
+      </div>
     </div>
   )
 }

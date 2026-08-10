@@ -2487,6 +2487,120 @@ body {
   --client-control-height: 32px;
 }
 
+html.pcids-login-viewport,
+body.pcids-login-viewport,
+#root.pcids-login-viewport {
+  min-width: 0;
+  min-height: 0;
+}
+
+.desktop-window-controls {
+  align-self: stretch;
+  display: flex;
+  height: 100%;
+  flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+  user-select: none;
+}
+
+.desktop-window-controls > button {
+  width: 46px;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #4e5969;
+  font-size: 14px;
+  line-height: 1;
+  cursor: default;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.desktop-window-controls > button:hover,
+.desktop-window-controls > button:focus-visible {
+  background: #edf0f5;
+  outline: none;
+}
+
+.desktop-window-controls > .desktop-window-controls__close:hover,
+.desktop-window-controls > .desktop-window-controls__close:focus-visible {
+  background: #c42b1c;
+  color: #ffffff;
+}
+
+.login-desktop-titlebar {
+  height: 40px;
+  flex: 0 0 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 14px;
+  border-bottom: 1px solid #e8ebf0;
+  background: #ffffff;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.login-desktop-titlebar__brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #4e5969;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.login-desktop-titlebar__brand img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.login-page-content {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.login-page-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.desktop-app-loading {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.desktop-app-loading__titlebar {
+  height: 56px;
+  flex: 0 0 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 24px;
+  border-bottom: 1px solid #e8e8e8;
+  -webkit-app-region: drag;
+}
+
+.desktop-app-loading__content {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 html,
 body,
 #root {
@@ -2509,6 +2623,21 @@ body {
   height: 56px;
   line-height: 56px;
   flex: 0 0 56px;
+  -webkit-app-region: drag;
+}
+
+.app-header-actions {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+
+.app-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
 }
 
 .app-header-brand {
@@ -2525,6 +2654,41 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .login-page-pane--visual,
+  .login-page-pane--form {
+    padding: 40px 44px !important;
+  }
+
+  .login-page-pane--visual > div:first-child > div:first-child {
+    font-size: 26px !important;
+  }
+}
+
+@media (max-height: 760px) {
+  .login-page-pane--visual,
+  .login-page-pane--form {
+    padding-top: 32px !important;
+    padding-bottom: 32px !important;
+  }
+
+  .login-page-pane--visual img[alt="Login Illustration"] {
+    max-height: 230px;
+  }
+
+  .login-page-pane--form > div:first-child {
+    margin-bottom: 28px !important;
+  }
+
+  .login-page-pane--form .ant-form-item {
+    margin-bottom: 20px !important;
+  }
+
+  .login-page-pane--form .ant-form-item:nth-last-child(2) {
+    margin-bottom: 28px !important;
+  }
 }
 
 .app-sider {
