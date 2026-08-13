@@ -40,6 +40,24 @@ import {
 
 const { Title, Text } = Typography
 
+const DashboardTrendTooltip = ({ active, payload, label }: any) => {
+  if (!active || !Array.isArray(payload) || !payload.length) return null
+  const point = payload[0]?.payload || {}
+  const rateText = point.rateAvailable && Number.isFinite(Number(point.rate))
+    ? `${Number(point.rate)}%`
+    : '暂无数据'
+  return (
+    <div style={{ minWidth: 150, padding: '10px 12px', border: '1px solid #e5e6eb', borderRadius: 6, background: '#fff', boxShadow: '0 6px 18px rgba(0, 0, 0, 0.1)' }}>
+      <div style={{ marginBottom: 8, color: '#1d2129', fontWeight: 600 }}>{label}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '5px 16px', color: '#4e5969', fontSize: 13 }}>
+        <span>成功率</span><span style={{ color: '#4361ee', textAlign: 'right' }}>{rateText}</span>
+        <span>烧录量</span><span style={{ color: '#1d2129', textAlign: 'right' }}>{Number(point.burnCount || 0)}</span>
+        <span>安装量</span><span style={{ color: '#1d2129', textAlign: 'right' }}>{Number(point.installCount || 0)}</span>
+      </div>
+    </div>
+  )
+}
+
 export interface WorkbenchProps {
   onOpenMessage?: () => void;
 }
@@ -491,7 +509,7 @@ const Workbench: React.FC<WorkbenchProps> = ({ onOpenMessage }) => {
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="month" axisLine={false} tickLine={false} />
               <YAxis axisLine={false} tickLine={false} domain={[0, 100]} ticks={[0, 20, 40, 60, 80, 100]} />
-              <Tooltip />
+              <Tooltip content={<DashboardTrendTooltip />} />
               <Area type="monotone" dataKey="rate" stroke="#4361ee" strokeWidth={3} fillOpacity={1} fill="url(#colorRate)" activeDot={{ r: 6 }} />
             </AreaChart>
           </ResponsiveContainer>

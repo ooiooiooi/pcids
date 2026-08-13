@@ -24,10 +24,20 @@ export type DashboardData = {
     dateLabel: string
   }
   stats: DashboardStats
-  trendData: any[]
+  trendData: DashboardTrendItem[]
   targetData: any[]
   notifications: any[]
   shortcuts: ShortcutItem[]
+}
+
+export type DashboardTrendItem = {
+  month: string
+  rate: number | null
+  rateAvailable: boolean
+  completedCount: number
+  successCount: number
+  burnCount: number
+  installCount: number
 }
 
 export type DashboardRefreshParams = {
@@ -155,7 +165,7 @@ export const dashboardLoadReducer = (
 const DASHBOARD_POSITIVE_COLOR = '#00B42A'
 const DASHBOARD_NEGATIVE_COLOR = '#F53F3F'
 const DASHBOARD_NEUTRAL_COLOR = '#86909c'
-export const DASHBOARD_TREND_TITLE = '烧录/安装任务成功率趋势'
+export const DASHBOARD_TREND_TITLE = '烧录/安装成功趋势'
 export const DASHBOARD_TARGET_TITLE = '目标任务数量统计TOP5'
 
 export const getDashboardGrowthPresentation = (

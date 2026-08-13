@@ -12,6 +12,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Pagination,
   Row,
   Select,
   Space,
@@ -53,6 +54,7 @@ import {
   validateCanPayloadConsistency,
   shouldHydrateProtocolFormFromSession,
 } from './formUtils'
+import { getGpioBatchSnapshotItems, getProtocolSnapshotItems } from './recordPresentation'
 import ActionConfirm from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
 
@@ -310,6 +312,7 @@ const protocolSnapshotLabelMap: Record<string, string> = {
   detected_devices: '探测设备',
   probe_summary: '探测摘要',
   com_port: '串口号',
+  wch_serial_port: 'WCH USB串口',
   baud_rate: '波特率',
   auto_append_crlf: '自动追加换行',
   length_bytes: '长度(Bytes)',
@@ -1161,33 +1164,6 @@ const snapshotDateTimeKeys = new Set([
   'operation_time',
 ])
 
-const ethernetSnapshotFieldOrder: Record<string, string[]> = {
-  'TCP Client': ['transport_protocol', 'local_ip', 'target_ip', 'target_port', 'timeout', 'data_type'],
-  UDP: ['transport_protocol', 'local_ip', 'local_port', 'target_ip', 'target_port', 'timeout', 'data_type'],
-  'TCP Server': ['transport_protocol', 'local_ip', 'listen_port', 'timeout', 'data_type'],
-}
-
-const getEthernetSnapshotFieldOrder = (config: Record<string, any>) => {
-  const mode = normalizeEthernetMode(config.transport_protocol || config.protocol || config.method)
-  return ethernetSnapshotFieldOrder[mode] || ethernetSnapshotFieldOrder['TCP Client']
-}
-
-const shouldHideSnapshotField = (config: Record<string, any>, key: string) => {
-  const hasEthernetFields = [
-    'local_ip',
-    'target_ip',
-    'target_port',
-    'listen_port',
-    'local_port',
-    'remote_ip',
-    'remote_port',
-  ].some((field) => field in config)
-
-  if (!hasEthernetFields) return false
-
-  return !getEthernetSnapshotFieldOrder(config).includes(key)
-}
-
 const Protocol: React.FC = () => {
   const { message } = AntdApp.useApp()
   const [isDetailOpen, setIsDetailOpen] = useState(false)
@@ -1197,6 +1173,10 @@ const Protocol: React.FC = () => {
   const [channelActionLoading, setChannelActionLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
   const [detailLogs, setDetailLogs] = useState<any[]>([])
+  const [detailLogPage, setDetailLogPage] = useState(1)
+  const [detailLogPageSize, setDetailLogPageSize] = useState(50)
+  const [detailLogTotal, setDetailLogTotal] = useState(0)
+  const [detailAnomalyCount, setDetailAnomalyCount] = useState(0)
   const [products, setProducts] = useState<any[]>([])
   const [selectedTarget, setSelectedTarget] = useState<string>('')
   const [currentSession, setCurrentSession] = useState<any>(null)
@@ -1235,6 +1215,7 @@ const Protocol: React.FC = () => {
   const selectedWchSerialPort = String(Form.useWatch('wch_serial_port', protocolForm) || '').trim()
   const gpioModeRef = useRef('输出')
   const currentSessionRef = useRef<any>(null)
+  const liveLogClearCutoffRef = useRef<Record<number, number>>({})
   const unloadDisconnectSessionIdRef = useRef<number | null>(null)
 
   const cleanupPersistedProtocolSession = async () => {
@@ -1435,7 +1416,7 @@ const Protocol: React.FC = () => {
   const isCurrentProtocolSession = Boolean(currentSession?.id) && connectedModuleKind === currentModuleKind
   const displayedLogs = isCurrentProtocolSession ? filterProtocolTrafficLogs(dataSource) : []
   const displayedLogsNewestFirst = useMemo(() => sortLogsNewestFirst(displayedLogs), [displayedLogs])
-  const detailLogsNewestFirst = useMemo(() => sortLogsNewestFirst(filterProtocolTrafficLogs(detailLogs)), [detailLogs])
+  const detailLogsNewestFirst = useMemo(() => sortLogsNewestFirst(detailLogs), [detailLogs])
   const displayedTxCount = isCurrentProtocolSession ? txCount : 0
   const displayedRxCount = isCurrentProtocolSession ? rxCount : 0
   const shouldHydrateCurrentProtocolForm = useMemo(
@@ -1709,9 +1690,6 @@ const extractPayloadDisplayText = (value: any) => {
     ].some((item) => text.includes(item))
   }
 
-  const getAnomalyCount = (logs: any[]) =>
-    logs.filter((log: any) => isAnomalyLog(log)).length
-
   const isAnomalyLog = (log: any) => {
     const text = normalizeLogText(log?.data)
     if (!text || isSuccessLog(log)) return false
@@ -1740,47 +1718,46 @@ const extractPayloadDisplayText = (value: any) => {
   const selectedRecordLogMeta = getProtocolLogMeta(selectedRecord?.protocol)
   const currentLogMeta = getProtocolLogMeta(currentModuleKind)
   const selectedRecordConfigEntries = useMemo(() => {
-    const formatSnapshotValue = (key: string, value: any) =>
-      value === null || value === undefined || value === ''
-        ? '-'
-        : snapshotDateTimeKeys.has(key)
-          ? formatDateTime(
-              typeof value === 'string' || typeof value === 'number' || value instanceof Date
-                ? value
-                : String(value),
-            )
-          : typeof value === 'object'
-            ? JSON.stringify(value, null, 2)
-            : String(value)
-    const hasEthernetFields = ['local_ip', 'target_ip', 'target_port', 'listen_port', 'local_port'].some(
-      (field) => field in selectedRecordConfig,
-    )
-    if (hasEthernetFields) {
-      return getEthernetSnapshotFieldOrder(selectedRecordConfig).map((key) => {
-        const value =
-          key === 'transport_protocol'
-            ? selectedRecordConfig.transport_protocol || selectedRecordConfig.protocol || selectedRecordConfig.method
-            : selectedRecordConfig[key]
-        return {
-          key,
-          label: protocolSnapshotLabelMap[key] || key.replace(/_/g, ' '),
-          value: formatSnapshotValue(key, value),
-        }
-      })
+    const formatSnapshotValue = (key: string, value: any) => {
+      if (value === null || value === undefined || value === '') return '-'
+      if (key === 'action') {
+        return ({
+          batch_read: '读取电平',
+          batch_write: '设置电平',
+          read_level: '读取电平',
+          set_level: '设置电平',
+          listen: '边沿监听',
+        } as Record<string, string>)[String(value)] || String(value)
+      }
+      if (key === 'canfd_non_iso') return value ? 'Non-ISO' : 'ISO'
+      if (['remote_frame', 'termination_enabled', 'brs', 'auto_append_crlf'].includes(key)) {
+        return value ? '启用' : '关闭'
+      }
+      if (snapshotDateTimeKeys.has(key)) {
+        return formatDateTime(
+          typeof value === 'string' || typeof value === 'number' || value instanceof Date
+            ? value
+            : String(value),
+        )
+      }
+      return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
     }
-    return Object.entries(selectedRecordConfig)
-      .filter(([key]) => !shouldHideSnapshotField(selectedRecordConfig, key))
-      .map(([key, value]) => ({
+    return getProtocolSnapshotItems(selectedRecord?.protocol, selectedRecordConfig)
+      .map(({ key, value }) => ({
         key,
         label: protocolSnapshotLabelMap[key] || key.replace(/_/g, ' '),
         value: formatSnapshotValue(key, value),
       }))
-  }, [selectedRecordConfig])
+  }, [selectedRecord?.protocol, selectedRecordConfig])
+  const selectedRecordGpioBatchItems = useMemo(
+    () => getGpioBatchSnapshotItems(selectedRecordConfig),
+    [selectedRecordConfig],
+  )
   const selectedRecordEndTime = useMemo(() => {
     return (
       selectedRecordConfig?.validated_at ||
-      detailLogs[detailLogs.length - 1]?.timestamp ||
       selectedRecord?.updated_at ||
+      detailLogs[detailLogs.length - 1]?.timestamp ||
       selectedRecord?.created_at ||
       null
     )
@@ -1792,20 +1769,42 @@ const extractPayloadDisplayText = (value: any) => {
 
   const renderDetailLogTable = (record: any) => {
     const moduleKind = normalizeModuleKind(record?.protocol)
+    const changeDetailLogPage = (nextPage: number, nextPageSize: number) => {
+      void fetchRecordLogs(record.id, nextPage, nextPageSize)
+    }
+    const detailPagination = detailLogTotal > 0 ? (
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+        <Pagination
+          current={detailLogPage}
+          pageSize={detailLogPageSize}
+          total={detailLogTotal}
+          showSizeChanger
+          pageSizeOptions={[20, 50, 100]}
+          showTotal={(count) => `共 ${count} 条`}
+          onChange={changeDetailLogPage}
+        />
+      </div>
+    ) : null
     if (!detailLogsNewestFirst.length) {
-      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无日志" style={{ marginTop: 48 }} />
+      return (
+        <>
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无日志" style={{ marginTop: 48 }} />
+          {detailPagination}
+        </>
+      )
     }
 
     if (moduleKind === gpioModuleKey) {
       return (
-        <div className="pcids-live-log" style={{ minHeight: 420 }}>
-          <div className="pcids-live-log__header">
-            {['时间戳', '方向', '引脚', '模式', '电平', '说明'].map((item) => (
-              <div key={item} className="pcids-live-log__head">{item}</div>
-            ))}
-          </div>
-          <div className="pcids-live-log__body">
-            {detailLogsNewestFirst.map((log: any) => {
+        <>
+          <div className="pcids-live-log" style={{ minHeight: 420 }}>
+            <div className="pcids-live-log__header">
+              {['时间戳', '方向', '引脚', '模式', '电平', '说明'].map((item) => (
+                <div key={item} className="pcids-live-log__head">{item}</div>
+              ))}
+            </div>
+            <div className="pcids-live-log__body">
+              {detailLogsNewestFirst.map((log: any) => {
               const row = getGpioLogPresentation(log, selectedRecordConfig)
               const isAnomaly = isAnomalyLog(log)
               const kindClass =
@@ -1833,9 +1832,11 @@ const extractPayloadDisplayText = (value: any) => {
                   </div>
                 </div>
               )
-            })}
+              })}
+            </div>
           </div>
-        </div>
+          {detailPagination}
+        </>
       )
     }
 
@@ -1875,7 +1876,15 @@ const extractPayloadDisplayText = (value: any) => {
         dataSource={detailDataSource}
         rowKey="id"
         rowClassName={(row: any) => (isAnomalyLog(row) ? 'pcids-detail-log-table__row--anomaly' : '')}
-        pagination={false}
+        pagination={{
+          current: detailLogPage,
+          pageSize: detailLogPageSize,
+          total: detailLogTotal,
+          showSizeChanger: true,
+          pageSizeOptions: [20, 50, 100],
+          showTotal: (count) => `共 ${count} 条`,
+          onChange: changeDetailLogPage,
+        }}
         size="small"
         scroll={{ y: 460, x: 'max-content' }}
         sticky
@@ -1899,7 +1908,12 @@ const extractPayloadDisplayText = (value: any) => {
   const fetchSessionLogs = async (sessionId: number, silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const res: any = await protocolTestApi.getLogs(sessionId, { page: 1, page_size: 200 })
+      const clearCutoff = liveLogClearCutoffRef.current[sessionId]
+      const res: any = await protocolTestApi.getLogs(sessionId, {
+        page: 1,
+        page_size: 200,
+        after_id: clearCutoff > 0 ? clearCutoff : undefined,
+      })
       if (res?.code === 0) {
         setDataSource(res.data || [])
         setTotal(res.total || 0)
@@ -1922,6 +1936,21 @@ const extractPayloadDisplayText = (value: any) => {
       /* interceptor handles it */
     } finally {
       if (!silent) setLoading(false)
+    }
+  }
+
+  const fetchRecordLogs = async (recordId: number, nextPage: number, nextPageSize: number) => {
+    const logRes: any = await protocolTestApi.getLogs(recordId, {
+      page: nextPage,
+      page_size: nextPageSize,
+      include_summary: true,
+    })
+    if (logRes?.code === 0) {
+      setDetailLogs(logRes.data || [])
+      setDetailLogPage(Number(logRes.page || nextPage))
+      setDetailLogPageSize(Number(logRes.page_size || nextPageSize))
+      setDetailLogTotal(Number(logRes.history_total ?? logRes.total ?? 0))
+      setDetailAnomalyCount(Number(logRes.anomaly_count ?? logRes.summary?.anomaly ?? 0))
     }
   }
 
@@ -1951,16 +1980,16 @@ const extractPayloadDisplayText = (value: any) => {
     setIsDetailOpen(true)
     setSelectedRecord(null)
     setDetailLogs([])
+    setDetailLogPage(1)
+    setDetailLogTotal(0)
+    setDetailAnomalyCount(0)
     setDetailTab('summary')
     setDetailLoading(true)
     try {
       const res: any = await protocolTestApi.getRecordDetail(recordId)
       if (res?.code === 0) {
         setSelectedRecord(res.data)
-        const logRes: any = await protocolTestApi.getLogs(recordId, { page: 1, page_size: 200 })
-        if (logRes?.code === 0) {
-          setDetailLogs(logRes.data || [])
-        }
+        await fetchRecordLogs(recordId, 1, detailLogPageSize)
       }
     } catch {
       /* interceptor handles it */
@@ -2366,9 +2395,16 @@ const extractPayloadDisplayText = (value: any) => {
   const handleClearLogs = async () => {
     if (!currentSession?.id) return
     try {
-      await protocolTestApi.clearLogs(currentSession.id)
-      message.success('日志已清空')
-      await fetchSessionLogs(currentSession.id)
+      const res: any = await protocolTestApi.clearLogs(currentSession.id)
+      const responseCutoff = Number(res?.data?.cleared_through_log_id || 0)
+      const localCutoff = dataSource.reduce(
+        (maximum: number, log: any) => Math.max(maximum, Number(log?.id || 0)),
+        0,
+      )
+      liveLogClearCutoffRef.current[currentSession.id] = Math.max(responseCutoff, localCutoff)
+      setDataSource([])
+      setTotal(0)
+      message.success(res?.message || '实时日志已清空，历史记录仍保留')
     } catch (error: any) {
       if (consumeBackendServiceError(error)) return
       message.error('清空失败')
@@ -2847,10 +2883,10 @@ const extractPayloadDisplayText = (value: any) => {
     <div className="pcids-gpio-batch">
       <div className="pcids-gpio-batch__toolbar">
         <Button icon={<SearchOutlined />} onClick={() => runGpioBatchAction('batch_read')} loading={gpioBatchLoading} disabled={!currentSession?.id || currentSession?.status !== 1}>
-          批量读取
+          读取电平
         </Button>
         <Button type="primary" icon={<SendOutlined />} onClick={() => runGpioBatchAction('batch_write')} loading={gpioBatchLoading} disabled={!currentSession?.id || currentSession?.status !== 1}>
-          批量下发
+          设置电平
         </Button>
       </div>
       <div className="pcids-gpio-batch__table">
@@ -3631,6 +3667,9 @@ const extractPayloadDisplayText = (value: any) => {
           setIsDetailOpen(false)
           setSelectedRecord(null)
           setDetailLogs([])
+          setDetailLogPage(1)
+          setDetailLogTotal(0)
+          setDetailAnomalyCount(0)
           setDetailTab('summary')
         }}
         closable
@@ -3711,7 +3750,7 @@ const extractPayloadDisplayText = (value: any) => {
                     </div>
                     <div style={{ border: '1px solid #f0f0f0', borderRadius: 12, padding: 16 }}>
                       <div style={{ color: '#8c8c8c', marginBottom: 10 }}>异常帧数</div>
-                      <div style={{ fontSize: 30, fontWeight: 700, color: '#ff4d4f' }}>{getAnomalyCount(detailLogs)}</div>
+                      <div style={{ fontSize: 30, fontWeight: 700, color: '#ff4d4f' }}>{detailAnomalyCount}</div>
                     </div>
                     <div style={{ border: '1px solid #f0f0f0', borderRadius: 12, padding: 16 }}>
                       <div style={{ color: '#8c8c8c', marginBottom: 10 }}>{selectedRecordLogMeta.countLabels.total}</div>
@@ -3720,8 +3759,8 @@ const extractPayloadDisplayText = (value: any) => {
                   </div>
 
                   <div style={{ marginTop: 28, fontSize: 14, fontWeight: 700, marginBottom: 14 }}>异常记录</div>
-                  {getAnomalyCount(detailLogs) > 0 ? (
-                    <div style={{ color: '#ff4d4f' }}>检测到 {getAnomalyCount(detailLogs)} 条异常相关日志，请切换到日志页签查看。</div>
+                  {detailAnomalyCount > 0 ? (
+                    <div style={{ color: '#ff4d4f' }}>检测到 {detailAnomalyCount} 条异常相关日志，请切换到日志页签查看。</div>
                   ) : (
                     <div style={{ color: '#8c8c8c', textAlign: 'center', padding: '18px 0' }}>本次测试未检测到异常记录</div>
                   )}
@@ -3784,6 +3823,33 @@ const extractPayloadDisplayText = (value: any) => {
                       </div>
                     ))}
                   </div>
+                  {selectedRecordGpioBatchItems.length > 0 ? (
+                    <div style={{ marginTop: 22 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>GPIO 批量验证明细</div>
+                      <Table
+                        rowKey="key"
+                        size="small"
+                        pagination={false}
+                        scroll={{ x: 540 }}
+                        dataSource={selectedRecordGpioBatchItems}
+                        columns={[
+                          { title: '引脚', dataIndex: 'pin', key: 'pin', width: 90 },
+                          { title: '模式', dataIndex: 'mode', key: 'mode', width: 80 },
+                          { title: '目标/期望', dataIndex: 'expectedLevel', key: 'expectedLevel', width: 110 },
+                          { title: '实际电平', dataIndex: 'currentLevel', key: 'currentLevel', width: 100 },
+                          {
+                            title: '结果',
+                            dataIndex: 'result',
+                            key: 'result',
+                            width: 90,
+                            render: (value: string) => (
+                              <span style={{ color: value === '通过' ? '#16a34a' : '#cf1322', fontWeight: 600 }}>{value}</span>
+                            ),
+                          },
+                        ]}
+                      />
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>

@@ -434,7 +434,7 @@ export const protocolTestApi = {
     request.post(`/protocol-tests/${sessionId}/disconnect`),
   send: (sessionId: number, data: { frame_id?: string; dlc?: number; data?: string; config?: Record<string, any> }) =>
     request.post(`/protocol-tests/${sessionId}/send`, data),
-  getLogs: (sessionId: number, params?: { page?: number; page_size?: number }) =>
+  getLogs: (sessionId: number, params?: { page?: number; page_size?: number; after_id?: number; include_summary?: boolean }) =>
     request.get(`/protocol-tests/${sessionId}/logs`, { params }),
   clearLogs: (sessionId: number) =>
     request.post(`/protocol-tests/${sessionId}/logs/clear`),

@@ -330,6 +330,7 @@ def _query_monthly_success_trend(
         return []
 
     expressions = []
+    normalized_task_type = func.lower(func.trim(func.coalesce(BurningTask.task_type, "board")))
     for window in windows:
         window_filter = _window_condition(window)
         completed_filter = and_(
@@ -340,10 +341,14 @@ def _query_monthly_success_trend(
             window_filter,
             BurningTask.status == int(TaskStatus.SUCCESS),
         )
+        burn_filter = and_(window_filter, normalized_task_type == "board")
+        install_filter = and_(window_filter, normalized_task_type != "board")
         expressions.extend(
             [
                 func.coalesce(func.sum(case((completed_filter, 1), else_=0)), 0),
                 func.coalesce(func.sum(case((success_filter, 1), else_=0)), 0),
+                func.coalesce(func.sum(case((burn_filter, 1), else_=0)), 0),
+                func.coalesce(func.sum(case((install_filter, 1), else_=0)), 0),
             ]
         )
 
@@ -360,8 +365,10 @@ def _query_monthly_success_trend(
     values = list(row)
     trend_data = []
     for index, window in enumerate(windows):
-        completed_count = int(values[index * 2] or 0)
-        success_count = int(values[index * 2 + 1] or 0)
+        completed_count = int(values[index * 4] or 0)
+        success_count = int(values[index * 4 + 1] or 0)
+        burn_count = int(values[index * 4 + 2] or 0)
+        install_count = int(values[index * 4 + 3] or 0)
         rate = round(success_count / completed_count * 100, 1) if completed_count else None
         trend_data.append(
             {
@@ -370,6 +377,8 @@ def _query_monthly_success_trend(
                 "rateAvailable": completed_count > 0,
                 "completedCount": completed_count,
                 "successCount": success_count,
+                "burnCount": burn_count,
+                "installCount": install_count,
             }
         )
     return trend_data

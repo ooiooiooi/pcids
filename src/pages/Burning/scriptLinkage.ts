@@ -37,6 +37,16 @@ export type ScriptSelectParameterDescriptor = {
   disabled: boolean
 }
 
+export const filterExecutionOptionsForScript = (
+  options: unknown,
+  supportsWriteVerify: boolean,
+) => {
+  const normalized = Array.isArray(options) ? options.map((item) => String(item)) : []
+  return supportsWriteVerify
+    ? normalized
+    : normalized.filter((item) => item !== 'writeVerify')
+}
+
 // 不同“执行操作”对应侧栏需要显示的烧录参数。
 // 只列需要的字段；不列出的字段在侧栏隐藏，但保留原值不重置。
 // 这里只覆盖 AL321 / 通用 FPGA 烧录脚本里常见的执行操作。

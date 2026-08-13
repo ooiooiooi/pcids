@@ -18,6 +18,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response as FastAPIResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Any, Optional
 
@@ -151,19 +152,19 @@ PROTOCOL_REPORT_META = {
     "can": {
         "label": "CAN",
         "protocol_type": "CAN 2.0A 标准帧",
-        "config_order": ["通道", "波特率", "标识符格式", "远程帧", "数据长度(Bytes)", "帧 ID", "默认数据"],
+        "config_order": ["物理通道", "波特率", "标识符格式", "远程帧", "内部120Ω终端电阻", "数据类型"],
         "log_columns": ["时间戳", "帧 ID", "数据长度(Bytes)", "方向", "数据 (DATA)"],
     },
     "canfd": {
         "label": "CAN FD",
         "protocol_type": "CAN FD",
-        "config_order": ["通道", "仲裁段波特率", "数据段波特率", "比特率切换 BRS", "标识符格式", "数据长度(Bytes)", "帧 ID"],
+        "config_order": ["物理通道", "仲裁段波特率", "数据段波特率", "比特率切换 BRS", "标识符格式", "内部120Ω终端电阻", "CAN FD 标准", "数据类型"],
         "log_columns": ["时间戳", "帧 ID", "数据长度(Bytes)", "方向", "数据 (DATA)"],
     },
     "serial": {
         "label": "串口",
         "protocol_type": "串口",
-        "config_order": ["串口号", "波特率", "自动追加换行符 (CRLF)", "长度(Bytes)", "数据位", "停止位", "校验位", "流控制"],
+        "config_order": ["串口号", "波特率", "数据位", "停止位", "校验位", "流控制", "自动追加换行符 (CRLF)", "数据类型"],
         "log_columns": ["时间戳", "方向", "长度(Bytes)", "数据 (Hex/ASCII)"],
     },
     "ethernet": {
@@ -175,13 +176,13 @@ PROTOCOL_REPORT_META = {
     "gpio_io": {
         "label": "GPIO物理引脚",
         "protocol_type": "GPIO 物理引脚",
-        "config_order": ["引脚选择", "模式", "目标电平", "上下拉", "期望电平", "触发方式", "超时时间 (ms)", "当前电平"],
+        "config_order": ["WCH USB 串口", "动作", "引脚选择", "模式", "目标电平", "上下拉", "期望电平", "触发方式", "超时时间 (ms)", "当前电平"],
         "log_columns": ["时间戳", "方向", "引脚", "模式", "电平", "说明"],
     },
     "gpio": {
         "label": "GPIO物理引脚",
         "protocol_type": "GPIO 物理引脚",
-        "config_order": ["引脚选择", "模式", "目标电平", "上下拉", "期望电平", "触发方式", "超时时间 (ms)", "当前电平"],
+        "config_order": ["WCH USB 串口", "动作", "引脚选择", "模式", "目标电平", "上下拉", "期望电平", "触发方式", "超时时间 (ms)", "当前电平"],
         "log_columns": ["时间戳", "方向", "引脚", "模式", "电平", "说明"],
     },
 }
@@ -1411,16 +1412,14 @@ def _format_timeout_ms(value: object, default: int = 3000) -> str:
 
 def _build_protocol_config(session: ProtocolSession, protocol: str, config: dict, logs: list[ProtocolLog]) -> dict[str, str]:
     normalized = str(protocol or "").strip().lower()
-    first_tx = next((log for log in logs if str(log.direction or "").upper() == "TX"), None)
     if normalized == "can":
         return {
-            "通道": str(config.get("channel") or "CAN1"),
+            "物理通道": str(config.get("physical_channel") or config.get("channel") or "-"),
             "波特率": str(config.get("bitrate") or config.get("baud_rate") or "500kbps"),
-            "标识符格式": str(config.get("frame_format") or "标准帧(11位)"),
+            "标识符格式": str(config.get("id_format") or config.get("frame_format") or "标准帧(11位)"),
             "远程帧": "启用" if bool(config.get("remote_frame")) else "禁用",
-            "数据长度(Bytes)": str(first_tx.dlc if first_tx and first_tx.dlc is not None else config.get("data_length") or config.get("dlc") or 8),
-            "帧 ID": str(first_tx.frame_id or config.get("frame_id") or "-") if first_tx else str(config.get("frame_id") or "-"),
-            "默认数据": str(first_tx.data or config.get("data") or "-") if first_tx else str(config.get("data") or "-"),
+            "内部120Ω终端电阻": "启用" if bool(config.get("termination_enabled")) else "关闭",
+            "数据类型": str(config.get("data_type") or "-"),
         }
     if normalized == "canfd":
         data_bitrate = (
@@ -1429,41 +1428,40 @@ def _build_protocol_config(session: ProtocolSession, protocol: str, config: dict
             else str(config.get("data_bitrate") or config.get("data_baud_rate") or "2Mbps")
         )
         return {
-            "通道": str(config.get("channel") or "CAN1"),
+            "物理通道": str(config.get("physical_channel") or config.get("channel") or "-"),
             "仲裁段波特率": str(config.get("arb_bitrate") or config.get("arb_baud_rate") or config.get("bitrate") or "500kbps"),
             "数据段波特率": data_bitrate,
             "比特率切换 BRS": "启用" if config.get("brs", True) else "关闭",
-            "标识符格式": str(config.get("frame_format") or "标准帧(11位)"),
-            "数据长度(Bytes)": str(first_tx.dlc if first_tx and first_tx.dlc is not None else config.get("data_length") or config.get("dlc") or 8),
-            "帧 ID": str(first_tx.frame_id or config.get("frame_id") or "-") if first_tx else str(config.get("frame_id") or "-"),
+            "标识符格式": str(config.get("id_format") or config.get("frame_format") or "标准帧(11位)"),
+            "内部120Ω终端电阻": "启用" if bool(config.get("termination_enabled")) else "关闭",
+            "CAN FD 标准": "Non-ISO" if bool(config.get("canfd_non_iso")) else "ISO",
+            "数据类型": str(config.get("data_type") or "-"),
         }
     if normalized == "serial":
         return {
-            "串口号": str(config.get("com_port") or "COM3"),
+            "串口号": str(config.get("com_port") or "-"),
             "波特率": str(config.get("baud_rate") or 115200),
-            "自动追加换行符 (CRLF)": "启用" if bool(config.get("auto_append_crlf")) else "关闭",
-            "长度(Bytes)": str(config.get("length_bytes") or first_tx.dlc or 64),
             "数据位": str(config.get("data_bits") or 8),
             "停止位": str(config.get("stop_bits") or 1),
             "校验位": str(config.get("parity") or "None"),
             "流控制": str(config.get("flow_control") or "None"),
+            "自动追加换行符 (CRLF)": "启用" if bool(config.get("auto_append_crlf")) else "关闭",
+            "数据类型": str(config.get("data_type") or "-"),
         }
     if normalized == "ethernet":
         transport_mode = _normalize_ethernet_mode(config.get("transport_protocol") or config.get("protocol") or config.get("method"))
-        common = {
-            "传输协议": transport_mode,
-            "本地 IP": str(config.get("local_ip") or session.ip_address or "-"),
-        }
         if transport_mode == "TCP Server":
             return {
-                **common,
+                "传输协议": transport_mode,
+                "本地 IP": str(config.get("local_ip") or session.ip_address or "-"),
                 "监听端口": str(config.get("listen_port") or "-"),
                 "超时时间 (ms)": str(config.get("timeout") or "-"),
                 "数据类型": str(config.get("data_type") or "-"),
             }
         if transport_mode == "UDP":
             return {
-                **common,
+                "传输协议": transport_mode,
+                "本地 IP": str(config.get("local_ip") or session.ip_address or "-"),
                 "本地端口": str(config.get("local_port") or "-"),
                 "目标 IP": str(config.get("target_ip") or config.get("ip") or "-"),
                 "目标端口": str(config.get("target_port") or config.get("port") or "-"),
@@ -1471,20 +1469,36 @@ def _build_protocol_config(session: ProtocolSession, protocol: str, config: dict
                 "数据类型": str(config.get("data_type") or "-"),
             }
         return {
-            **common,
+            "传输协议": transport_mode,
             "目标 IP": str(config.get("target_ip") or config.get("ip") or "-"),
             "目标端口": str(config.get("target_port") or config.get("port") or "-"),
             "超时时间 (ms)": str(config.get("timeout") or "-"),
             "数据类型": str(config.get("data_type") or "-"),
         }
+    action = str(config.get("action") or "").strip().lower()
+    action_label = {
+        "batch_read": "读取电平",
+        "batch_write": "设置电平",
+        "read_level": "读取电平",
+        "set_level": "设置电平",
+        "listen": "边沿监听",
+    }.get(action, action or "-")
+    if isinstance(config.get("batch_items"), list) and config.get("batch_items"):
+        return {
+            "WCH USB 串口": str(config.get("wch_serial_port") or config.get("com_port") or "-"),
+            "动作": action_label,
+            "模式": str(config.get("mode") or "-"),
+        }
     return {
-        "引脚选择": str(config.get("pin") or "GPIO0"),
+        "WCH USB 串口": str(config.get("wch_serial_port") or config.get("com_port") or "-"),
+        "动作": action_label,
+        "引脚选择": str(config.get("pin") or "-"),
         "模式": str(config.get("mode") or "输出"),
-        "目标电平": str(config.get("target_level") or config.get("level") or "高电平"),
-        "上下拉": str(config.get("pull_mode") or "无 (浮空)"),
-        "期望电平": str(config.get("expected_level") or "高电平"),
-        "触发方式": str(config.get("trigger_type") or config.get("interrupt") or "上升沿"),
-        "超时时间 (ms)": str(config.get("timeout_ms") or 5000),
+        "目标电平": str(config.get("target_level") or config.get("level") or "-"),
+        "上下拉": str(config.get("pull_mode") or "-"),
+        "期望电平": str(config.get("expected_level") or "-"),
+        "触发方式": str(config.get("trigger_type") or config.get("interrupt") or "-"),
+        "超时时间 (ms)": str(config.get("timeout_ms") or "-"),
         "当前电平": str(config.get("current_level") or "-"),
     }
 
@@ -1546,13 +1560,17 @@ def _render_protocol_logs(protocol: str, session: ProtocolSession, config: dict,
                 dst = "-"
                 protocol_label = "-"
             else:
-                if transport_mode == "TCP Server":
+                stored_source, stored_destination = _decode_ethernet_log_route(log.frame_id)
+                if stored_source and stored_destination:
+                    src = stored_source
+                    dst = stored_destination
+                elif transport_mode == "TCP Server":
                     src = f"{remote_ip}:{remote_port}" if direction == "Rx" else f"{local_ip}:{listen_port}"
                     dst = f"{local_ip}:{listen_port}" if direction == "Rx" else f"{remote_ip}:{remote_port}"
                 else:
                     src = f"{local_ip}:{local_port}" if direction == "Tx" else f"{remote_ip}:{remote_port}"
                     dst = f"{remote_ip}:{remote_port}" if direction == "Tx" else f"{local_ip}:{local_port}"
-                protocol_label = transport_mode
+                protocol_label = "UDP" if transport_mode == "UDP" else "TCP"
             cells = [
                 ts,
                 f'<span class="{direction_class}">{_safe_text(direction)}</span>',
@@ -1573,11 +1591,18 @@ def _render_protocol_logs(protocol: str, session: ProtocolSession, config: dict,
                 level_text = "高电平"
             elif "低电平" in message_text:
                 level_text = "低电平"
+            row_mode = gpio_mode
+            if "监听" in message_text:
+                row_mode = "监听"
+            elif "读取" in message_text:
+                row_mode = "输入"
+            elif "设置" in message_text or "下发" in message_text:
+                row_mode = "输出"
             cells = [
                 ts,
                 event_label,
                 log.frame_id or config.get("pin") or "GPIO0",
-                gpio_mode,
+                row_mode,
                 level_text,
                 message_text,
             ]
@@ -1590,15 +1615,52 @@ def _render_protocol_logs(protocol: str, session: ProtocolSession, config: dict,
     return f"<thead><tr>{head_html}</tr></thead><tbody>{''.join(rows)}</tbody>"
 
 
+def _render_gpio_batch_items(config: dict[str, Any]) -> str:
+    raw_items = config.get("batch_items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return ""
+
+    rows: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        expected_level = item.get("target_level") or item.get("expected_level") or "-"
+        passed = item.get("passed") is True or str(item.get("result") or "").strip() == "通过"
+        result_text = str(item.get("result") or ("通过" if passed else "未通过"))
+        rows.append(
+            "<tr>"
+            f"<td>{_safe_text(item.get('pin') or '-')}</td>"
+            f"<td>{_safe_text(item.get('mode') or config.get('mode') or '-')}</td>"
+            f"<td>{_safe_text(expected_level)}</td>"
+            f"<td>{_safe_text(item.get('current_level') or '-')}</td>"
+            f"<td>{_safe_text(result_text)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return ""
+    return (
+        '<div class="section-desc" style="margin-top:12px;">GPIO 批量验证明细</div>'
+        '<table class="log-table" id="gpioBatchItemsTable">'
+        '<thead><tr><th>引脚</th><th>模式</th><th>目标/期望电平</th><th>实际电平</th><th>结果</th></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _is_anomaly_protocol_log_content(content: object) -> bool:
+    keywords = ("error", "fail", "异常", "错误", "超时", "timeout", "nack", "crc", "未通过", "总线错误")
+    normalized = _normalize_protocol_log_text(content)
+    return bool(
+        normalized
+        and not _is_success_protocol_log(content)
+        and any(keyword in normalized for keyword in keywords)
+    )
+
+
 def _detect_protocol_anomalies(logs: list[ProtocolLog]) -> list[dict[str, str]]:
     anomalies: list[dict[str, str]] = []
-    keywords = ("error", "fail", "异常", "错误", "超时", "timeout", "nack", "crc", "未通过", "总线错误")
     for log in logs:
         content = str(log.data or "")
-        normalized = _normalize_protocol_log_text(content)
-        if not normalized or _is_success_protocol_log(content):
-            continue
-        if any(keyword in normalized for keyword in keywords):
+        if _is_anomaly_protocol_log_content(content):
             anomalies.append(
                 {
                     "time": _fmt_time_only(log.timestamp),
@@ -1720,10 +1782,9 @@ def _build_protocol_report_html(session: ProtocolSession, logs: list, print_mode
         if protocol == "ethernet"
         else str(config.get("method") or protocol or "-").upper()
     )
-    test_env_parts = [
-        f"上位机 IP {local_ip}",
-        f"连接方式 {connection_mode}",
-    ]
+    test_env_parts = [f"连接方式 {connection_mode}"]
+    if protocol != "ethernet" or connection_mode != "TCP Client":
+        test_env_parts.insert(0, f"上位机 IP {local_ip}")
     if protocol in {"can", "canfd"}:
         test_env_parts.append(f"通道 {config.get('channel') or 'CAN1'}")
     if protocol == "serial":
@@ -1738,6 +1799,7 @@ def _build_protocol_report_html(session: ProtocolSession, logs: list, print_mode
         test_env_parts.append(f"引脚 {config.get('pin') or 'GPIO0'}")
     test_env_parts.append("系统版本 v1.0.0")
     protocol_config = _build_protocol_config(session, protocol, config, logs)
+    gpio_batch_items_html = _render_gpio_batch_items(config) if protocol in {"gpio", "gpio_io"} else ""
     log_table_html = _render_protocol_logs(protocol, session, config, logs)
     anomalies = _detect_protocol_anomalies(logs)
     pass_result, conclusion_hint, validation_summary = _evaluate_protocol_validation(protocol, session, config, anomalies)
@@ -2014,6 +2076,7 @@ body {{
     <table class="info-table" id="protocolConfigTable">
       {_render_protocol_config_table(protocol, protocol_config)}
     </table>
+    {gpio_batch_items_html}
   </div>
 
   <div class="section">
@@ -2573,7 +2636,7 @@ async def _run_gpio_business_action(
             try:
                 item_config, action_spec = _render_gpio_action_spec(item_config, item_pin, item_action)
                 reply_cfg = action_spec.get("reply") if isinstance(action_spec.get("reply"), dict) else {}
-                tx_text = str(action_spec.get("tx_log") or ("批量读取：读取 {pin} 当前电平" if item_action == "read_level" else "批量下发：设置 {pin} 为{target_level}"))
+                tx_text = str(action_spec.get("tx_log") or ("读取电平：读取 {pin} 当前电平" if item_action == "read_level" else "设置电平：设置 {pin} 为{target_level}"))
                 tx_text = str(render_gpio_template(tx_text, build_gpio_action_context(item_pin, item_config)) or "")
                 reply_text, _ = await _execute_gpio_transport_action(
                     session=session,
@@ -4554,6 +4617,8 @@ async def get_session_logs(
     session_id: int,
     page: int = 1,
     page_size: int = 50,
+    after_id: Optional[int] = None,
+    include_summary: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("protocol:view")),
@@ -4562,7 +4627,13 @@ async def get_session_logs(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    query = db.query(ProtocolLog).filter(ProtocolLog.session_id == session_id)
+    page = max(int(page or 1), 1)
+    page_size = min(max(int(page_size or 50), 1), 500)
+    history_query = db.query(ProtocolLog).filter(ProtocolLog.session_id == session_id)
+    history_total = history_query.count()
+    query = history_query
+    if after_id is not None:
+        query = query.filter(ProtocolLog.id > max(int(after_id), 0))
     total = query.count()
     logs = (
         query.order_by(ProtocolLog.timestamp.desc())
@@ -4572,6 +4643,14 @@ async def get_session_logs(
     )
     logs.reverse()
 
+    anomaly_count: Optional[int] = None
+    if include_summary:
+        anomaly_count = sum(
+            1
+            for (content,) in history_query.with_entities(ProtocolLog.data).all()
+            if _is_anomaly_protocol_log_content(content)
+        )
+
     return {
         "code": 0,
         "message": "success",
@@ -4579,11 +4658,19 @@ async def get_session_logs(
         "config_json": session.config_json,
         "config": _load_session_config(session),
         "total": total,
+        "history_total": history_total,
         "page": page,
         "page_size": page_size,
         "tx": session.tx_count,
         "rx": session.rx_count,
         "status": session.status,
+        "anomaly_count": anomaly_count,
+        "summary": {
+            "tx": int(session.tx_count or 0),
+            "rx": int(session.rx_count or 0),
+            "total": int(session.tx_count or 0) + int(session.rx_count or 0),
+            "anomaly": anomaly_count,
+        },
     }
 
 
@@ -4597,11 +4684,16 @@ async def clear_session_logs(
     session = db.query(ProtocolSession).filter(ProtocolSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
-    db.query(ProtocolLog).filter(ProtocolLog.session_id == session_id).delete()
-    session.tx_count = 0
-    session.rx_count = 0
-    db.commit()
-    return {"code": 0, "message": "清空成功"}
+    latest_log_id = (
+        db.query(func.max(ProtocolLog.id))
+        .filter(ProtocolLog.session_id == session_id)
+        .scalar()
+    )
+    return {
+        "code": 0,
+        "message": "实时日志已清空，历史记录仍保留",
+        "data": {"cleared_through_log_id": int(latest_log_id or 0)},
+    }
 
 
 @router.get("/records", response_model=dict)

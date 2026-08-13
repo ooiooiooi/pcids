@@ -168,7 +168,7 @@ class GpioProtocolBatchTests(unittest.TestCase):
 
         logs = self.db.query(ProtocolLog).filter(ProtocolLog.session_id == session.id).order_by(ProtocolLog.id.asc()).all()
         self.assertEqual([log.direction for log in logs[:4]], ["Tx", "Rx", "Tx", "Rx"])
-        self.assertIn("批量下发", logs[0].data)
+        self.assertIn("设置电平", logs[0].data)
         self.assertIn("回读值", logs[1].data)
 
     def test_gpio_batch_read_can_return_mismatch_result(self):

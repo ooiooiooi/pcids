@@ -297,9 +297,9 @@ test('成功率变化使用百分点且提升为绿色、下降为红色', () =>
   assert.equal(emptyBaseline.text, '昨日无可比数据')
 })
 
-test('更新时间格式稳定，图表标题覆盖全部任务口径', () => {
+test('更新时间格式稳定，图表标题使用验收文案', () => {
   const localTime = new Date(2026, 6, 30, 9, 8, 7).getTime()
   assert.equal(formatDashboardRefreshTime(localTime), '09:08:07')
-  assert.equal(DASHBOARD_TREND_TITLE, '烧录/安装任务成功率趋势')
+  assert.equal(DASHBOARD_TREND_TITLE, '烧录/安装成功趋势')
   assert.equal(DASHBOARD_TARGET_TITLE, '目标任务数量统计TOP5')
 })

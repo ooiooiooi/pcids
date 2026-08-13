@@ -11,7 +11,7 @@ import { API_BASE_URL } from '../../services/backendRuntime'
 import { getRepositoryProjectContext, REPOSITORY_PROJECT_CONTEXT_EVENT } from '../../utils/repositoryProjectContext'
 import BoardDetailPanel from '../../components/BoardDetailPanel'
 import { ActionButtonGroup, ActionLinkButton, PagePrimaryButton, PageSecondaryButton } from '../../components/ActionButton'
-import { buildScriptSelectParameterDescriptors, getCompatibleBoardScripts, getSupportedScriptConfigFields, hasConfiguredAssociation, isFieldVisibleForOperation, matchAssociation, resolveScriptConfigDisplayText } from './scriptLinkage'
+import { buildScriptSelectParameterDescriptors, filterExecutionOptionsForScript, getCompatibleBoardScripts, getSupportedScriptConfigFields, hasConfiguredAssociation, isFieldVisibleForOperation, matchAssociation, resolveScriptConfigDisplayText } from './scriptLinkage'
 import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm, { ActionConfirmDialog } from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
@@ -1187,6 +1187,7 @@ const Burning: React.FC = () => {
     osFieldErrors[field] ? <div style={{ color: '#ff4d4f', fontSize: 12, marginTop: 4 }}>{osFieldErrors[field]}</div> : null
 
   const isSelectedScriptSystem = Number(selectedScript?.is_system || 0) === 1
+  const supportsWriteVerify = platform !== 'board' || !selectedScript?.id || isSelectedScriptSystem
   const selectedScriptDefaultConfig = isSelectedScriptSystem ? parseJsonSafe(selectedScript?.default_config_json) : null
   const requiredScriptConfigFields = Array.isArray(selectedScriptDefaultConfig?.required_fields)
     ? selectedScriptDefaultConfig.required_fields.map((item: any) => String(item))
@@ -1292,11 +1293,11 @@ const Burning: React.FC = () => {
     </span>
   )
   const effectiveWizardOptions = useMemo(() => {
-    let options = Array.isArray(wizardData.options) ? wizardData.options : []
+    let options = filterExecutionOptionsForScript(wizardData.options, supportsWriteVerify)
     if (keepLocalDisabled) options = options.filter((item: string) => item !== 'local')
     if (versionCheckDisabled) options = options.filter((item: string) => item !== 'version')
     return options
-  }, [keepLocalDisabled, versionCheckDisabled, wizardData.options])
+  }, [keepLocalDisabled, supportsWriteVerify, versionCheckDisabled, wizardData.options])
   const getRepositoryVersionText = (repo?: any) =>
     firstFilledText(
       repo?.version,
@@ -2384,12 +2385,12 @@ const Burning: React.FC = () => {
         platform,
         install_source: effectiveInstallSource,
         retries: Number(wizardData.retryCount || 0),
-        keep_local: wizardData.options?.includes('local'),
-        integrity: wizardData.options?.includes('integrity'),
-        version_check: wizardData.options?.includes('version'),
-        write_verify: wizardData.options?.includes('writeVerify'),
+        keep_local: effectiveWizardOptions.includes('local'),
+        integrity: effectiveWizardOptions.includes('integrity'),
+        version_check: effectiveWizardOptions.includes('version'),
+        write_verify: effectiveWizardOptions.includes('writeVerify'),
         expected_checksum: getRepositoryChecksum(selectedRepository) || undefined,
-        history_checksum: wizardData.options?.includes('version') ? versionBaselineChecksum || undefined : undefined,
+        history_checksum: effectiveWizardOptions.includes('version') ? versionBaselineChecksum || undefined : undefined,
         script_id: platform === 'board' || platform === 'hybrid' ? wizardData.scriptId : undefined,
         os_type: platform === 'os' ? osTypeMap[wizardData.osId] : undefined,
         connection_protocol: platform === 'os' ? wizardData.connectionProtocol : undefined,
@@ -3847,7 +3848,7 @@ const Burning: React.FC = () => {
                     <Checkbox value="local" disabled={keepLocalDisabled}>{renderOptionWithTip('保留可执行文件', keepLocalTip)}</Checkbox>
                     <Checkbox value="version" disabled={versionCheckDisabled}>{renderOptionWithTip('版本校验', versionCheckTip)}</Checkbox>
                     <Checkbox value="integrity">完整性校验(MD5|SHA256)</Checkbox>
-                    <Checkbox value="writeVerify">写入后校验</Checkbox>
+                    {supportsWriteVerify ? <Checkbox value="writeVerify">写入后校验</Checkbox> : null}
                   </Checkbox.Group>
                 </div>
                 <div style={{ marginBottom: 24 }}>

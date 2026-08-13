@@ -223,6 +223,7 @@ class DashboardStatsTests(unittest.TestCase):
             "FAILED",
             created_at=before_now + timedelta(minutes=1),
             status=TaskStatus.FAILED,
+            task_type="os",
         )
         self._add_task(
             "PENDING",
@@ -272,6 +273,8 @@ class DashboardStatsTests(unittest.TestCase):
                 "rateAvailable": True,
                 "completedCount": 2,
                 "successCount": 1,
+                "burnCount": 2,
+                "installCount": 1,
             },
         )
 
