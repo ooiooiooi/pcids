@@ -20,6 +20,7 @@ import posixpath
 import re
 import shlex
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -89,6 +90,12 @@ _DEFAULT_CODEARTS_TREE_LIST_PATHS = ["/devreposerver/v5/files/list", "/DevRepoSe
 _DEFAULT_CODEARTS_VERSION_PATHS = [
     "/devreposerver/v5/{project_id}/files/version",
     "/DevRepoServer/v5/{project_id}/files/version",
+]
+_DEFAULT_CODEARTS_RELEASE_FILES_PATHS = [
+    "/v2/{project_id}/release/files?{query}",
+]
+_DEFAULT_CODEARTS_RELEASE_FILE_PATHS = [
+    "/v2/{project_id}/release/file?{query}",
 ]
 _DEFAULT_CODEARTS_FILE_INFO_PATHS = [
     "/devreposerver/v5/files/info?{query}",
@@ -878,8 +885,8 @@ def _get_repository_server_storage_root() -> str:
 def _get_repository_codearts_service_config() -> dict:
     cfg = _get_repository_download_config()
     return {
-        "iam_token_url": str(cfg.get("codearts_iam_token_url") or "https://iam.{region}.myhuaweicloud.com/v3/auth/tokens").strip(),
-        "base_url": str(cfg.get("codearts_base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").strip(),
+        "iam_token_url": str(cfg.get("codearts_iam_token_url") or "https://iam-apigateway-proxy.cqcloud.cwgy.com/v3/auth/tokens").strip(),
+        "base_url": str(cfg.get("codearts_base_url") or "https://codeartsartifact.{region}.cqcloud.cwgy.com").strip(),
         "private_iam_token_url": str(
             cfg.get("codearts_private_iam_token_url")
             or "https://iam-apigateway-proxy.cqcloud.cwgy.com/v3/auth/tokens"
@@ -1760,7 +1767,41 @@ def _urlopen(req, timeout_seconds: int):
     import urllib.request
 
     # Respect the host's DNS and proxy settings so deployments work across networks.
+    request_url = getattr(req, "full_url", None) or getattr(req, "get_full_url", lambda: "")()
+    if _is_codearts_intranet_https_url(request_url):
+        config = _get_repository_download_config()
+        verify_tls = bool(config.get("codearts_tls_verify", False))
+        if verify_tls:
+            ca_bundle = _get_codearts_ca_bundle_path(request_url, config=config)
+            context = ssl.create_default_context(cafile=str(ca_bundle) if ca_bundle else None)
+        else:
+            context = ssl._create_unverified_context()
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+        return opener.open(req, timeout=timeout_seconds)
     return urllib.request.urlopen(req, timeout=timeout_seconds)
+
+
+def _is_codearts_intranet_https_url(request_url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(str(request_url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (host.endswith(".cqcloud.cwgy.com") or host == "cqcloud.cwgy.com")
+
+
+def _get_codearts_ca_bundle_path(request_url: str, config: Optional[dict] = None) -> Optional[Path]:
+    if not _is_codearts_intranet_https_url(request_url):
+        return None
+    configured = str((config or _get_repository_download_config()).get("codearts_ca_bundle") or "").strip()
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = _get_external_repository_config_path().parent / path
+    if not path.is_file():
+        raise RuntimeError(f"CodeArts CA 证书文件不存在：{path}")
+    return path
 
 def _http_get_json(url: str, token: Optional[str] = None, timeout_seconds: int = 10, retries: int = 3):
     import urllib.request
@@ -1851,7 +1892,7 @@ def _get_iam_token(
 ) -> str:
     import urllib.request
     url = _safe_format_path(
-        str(iam_token_url or "https://iam.{region}.myhuaweicloud.com/v3/auth/tokens").strip(),
+        str(iam_token_url or "https://iam-apigateway-proxy.cqcloud.cwgy.com/v3/auth/tokens").strip(),
         region=region,
     )
     payload = {
@@ -1886,7 +1927,7 @@ def _get_private_iam_token_context(
     import urllib.request
 
     url = _safe_format_path(
-        str(iam_token_url or "https://iam.{region}.myhuaweicloud.com/v3/auth/tokens").strip(),
+        str(iam_token_url or "https://iam-apigateway-proxy.cqcloud.cwgy.com/v3/auth/tokens").strip(),
         region=region,
     )
     payload = {
@@ -1938,6 +1979,29 @@ def _codearts_auth_error(exc: Exception, region: str) -> tuple[int, str]:
     if isinstance(reason, TimeoutError) or isinstance(exc, TimeoutError):
         return 504, f"连接华为云 IAM 服务超时，请检查网络连接（区域：{region}）"
     return 502, f"连接华为云 IAM 服务失败：{str(exc)}"
+
+
+def _describe_http_exception(exc: Exception) -> dict:
+    import urllib.error
+
+    detail = {
+        "type": type(exc).__name__,
+        "message": str(exc),
+    }
+    if isinstance(exc, urllib.error.HTTPError):
+        response_text = ""
+        try:
+            response_text = exc.read().decode("utf-8", errors="ignore")
+        except Exception:
+            response_text = ""
+        detail["http_status"] = exc.code
+        detail["reason"] = str(exc.reason or "").strip() or None
+        detail["response_excerpt"] = response_text[:500] or None
+        return detail
+    reason = getattr(exc, "reason", None)
+    if reason is not None:
+        detail["reason"] = str(reason)
+    return detail
 
 
 def _validate_codearts_region(region: str) -> None:
@@ -2990,6 +3054,238 @@ def _get_codearts_project_versions(base_url: str, token: str, project_id: str) -
     raise Exception(f"获取发布库文件失败，已尝试: {', '.join(tried_paths)}；最后错误: {last_error}")
 
 
+def _normalize_codearts_release_parent_path(path_value: Optional[str]) -> str:
+    path_text = str(path_value or "").strip().replace("\\", "/")
+    if not path_text or path_text == "/":
+        return "/"
+    normalized = re.sub(r"/+", "/", f"/{path_text.strip('/')}")
+    return normalized if normalized.endswith("/") else f"{normalized}/"
+
+
+def _extract_codearts_release_filename(item: dict, normalized_download_url: Optional[str], project_id: str) -> str:
+    explicit = str(item.get("name") or item.get("file_name") or "").strip()
+    if explicit:
+        return explicit
+    download_text = str(normalized_download_url or "").strip()
+    if download_text:
+        parsed = urllib.parse.urlsplit(download_text)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
+        for key in ("filename", "file_name"):
+            values = query.get(key) or []
+            for value in values:
+                candidate = urllib.parse.unquote(str(value or "").strip())
+                if not candidate:
+                    continue
+                normalized = candidate.replace("\\", "/").strip("/")
+                project_prefix = str(project_id or "").strip().strip("/")
+                if project_prefix and normalized.startswith(project_prefix + "/"):
+                    normalized = normalized[len(project_prefix) + 1 :]
+                basename = posixpath.basename(normalized)
+                if basename:
+                    return basename
+    return "unknown"
+
+
+def _list_codearts_release_files(
+    base_url: str,
+    token: str,
+    project_id: str,
+    *,
+    file_name: Optional[str] = None,
+) -> list[dict]:
+    limit = 100
+    query_name = str(file_name or "").strip()
+    last_error: Optional[Exception] = None
+    tried_paths: list[str] = []
+    _log_event(
+        "repository.codearts_release_files.begin",
+        project_id=project_id,
+        base_url=base_url,
+        file_name=query_name or None,
+        api_path_templates=list(_DEFAULT_CODEARTS_RELEASE_FILES_PATHS),
+    )
+    for path_template in _DEFAULT_CODEARTS_RELEASE_FILES_PATHS:
+        items: list[dict] = []
+        # Keep the initial offset assumption explicit in logs so intranet
+        # validation can confirm the real paging contract from the PDF API.
+        offset = 1
+        while True:
+            query_variants: list[dict] = []
+            if query_name:
+                query_variants.append({"file_name": query_name, "limit": limit, "offset": offset})
+                query_variants.append({"file_name": query_name, "offset": offset})
+                query_variants.append({"file_name": query_name, "limit": 10, "offset": offset})
+                if offset == 1:
+                    query_variants.append({"file_name": query_name})
+            else:
+                query_variants.append({"limit": limit, "offset": offset})
+                query_variants.append({"offset": offset})
+                query_variants.append({"limit": 10, "offset": offset})
+                if offset == 1:
+                    query_variants.append({})
+
+            page_resp: Optional[dict] = None
+            for attempt_index, query_payload in enumerate(query_variants, start=1):
+                query = urllib.parse.urlencode(query_payload)
+                path = _safe_format_path(path_template, project_id=project_id, query=query)
+                if query:
+                    url = f"{base_url}{path}"
+                else:
+                    url = f"{base_url}/v2/{project_id}/release/files"
+                if url not in tried_paths:
+                    tried_paths.append(url)
+                _log_event(
+                    "repository.codearts_release_files.attempt",
+                    project_id=project_id,
+                    offset=offset,
+                    limit=limit,
+                    attempt_index=attempt_index,
+                    query_payload=query_payload,
+                    requested_url=url,
+                )
+                try:
+                    page_resp = _http_get_json(url, token=token)
+                    _raise_codearts_error("获取发布库文件列表失败", page_resp, url)
+                    _log_event(
+                        "repository.codearts_release_files.attempt_success",
+                        project_id=project_id,
+                        offset=offset,
+                        attempt_index=attempt_index,
+                        query_payload=query_payload,
+                        requested_url=url,
+                        response_item_count=len(_extract_list(page_resp)),
+                        response_keys=sorted(list(_extract_result_dict(page_resp).keys()))[:20],
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    _log_event(
+                        "repository.codearts_release_files.attempt_failed",
+                        level="warning",
+                        project_id=project_id,
+                        offset=offset,
+                        attempt_index=attempt_index,
+                        query_payload=query_payload,
+                        requested_url=url,
+                        error=_describe_http_exception(e),
+                    )
+                    # Keep trying the same PDF endpoint with different optional
+                    # parameter combinations before giving up. Different hosted
+                    # deployments reject different subsets of the documented
+                    # optional query arguments with HTTP 400.
+                    if "404" in str(e):
+                        page_resp = None
+                        break
+                    continue
+
+            if page_resp is None:
+                if "404" in str(last_error):
+                    break
+                _log_event(
+                    "repository.codearts_release_files.failed",
+                    level="warning",
+                    project_id=project_id,
+                    tried_urls=tried_paths[-len(query_variants):],
+                    final_error=_describe_http_exception(last_error),
+                )
+                raise last_error
+
+            page_items = _extract_list(page_resp)
+            if page_items:
+                items.extend(page_items)
+            result = _extract_result_dict(page_resp)
+            try:
+                total_records = int(result.get("total_records") or 0)
+            except Exception:
+                total_records = 0
+            _log_event(
+                "repository.codearts_release_files.page_loaded",
+                project_id=project_id,
+                offset=offset,
+                page_item_count=len(page_items),
+                accumulated_count=len(items),
+                total_records=total_records or None,
+            )
+            if not page_items:
+                _log_event(
+                    "repository.codearts_release_files.success",
+                    project_id=project_id,
+                    total_count=len(items),
+                    pagination_assumption="offset_starts_at_1_pending_intranet_confirmation",
+                )
+                return items
+            next_offset = offset + len(page_items)
+            if total_records and next_offset > total_records:
+                _log_event(
+                    "repository.codearts_release_files.success",
+                    project_id=project_id,
+                    total_count=len(items),
+                    pagination_assumption="offset_starts_at_1_pending_intranet_confirmation",
+                )
+                return items
+            if len(page_items) < limit:
+                _log_event(
+                    "repository.codearts_release_files.success",
+                    project_id=project_id,
+                    total_count=len(items),
+                    pagination_assumption="offset_starts_at_1_pending_intranet_confirmation",
+                )
+                return items
+            offset = next_offset
+        if items:
+            _log_event(
+                "repository.codearts_release_files.success",
+                project_id=project_id,
+                total_count=len(items),
+                pagination_assumption="offset_starts_at_1_pending_intranet_confirmation",
+            )
+            return items
+    _log_event(
+        "repository.codearts_release_files.failed",
+        level="warning",
+        project_id=project_id,
+        tried_urls=tried_paths,
+        final_error=_describe_http_exception(last_error) if last_error else None,
+    )
+    raise Exception(f"获取发布库文件列表失败，已尝试: {', '.join(tried_paths)}；最后错误: {last_error}")
+
+
+def _get_codearts_release_file(
+    base_url: str,
+    token: str,
+    project_id: str,
+    path_value: Optional[str],
+    name: Optional[str],
+) -> dict:
+    import urllib.parse
+
+    file_name = str(name or "").strip()
+    if not file_name:
+        return {}
+    query = urllib.parse.urlencode(
+        {
+            "file_path": _normalize_codearts_release_parent_path(path_value),
+            "file_name": file_name,
+        }
+    )
+    last_error: Optional[Exception] = None
+    tried_paths: list[str] = []
+    for path_template in _DEFAULT_CODEARTS_RELEASE_FILE_PATHS:
+        path = _safe_format_path(path_template, project_id=project_id, query=query)
+        url = f"{base_url}{path}"
+        tried_paths.append(url)
+        try:
+            resp = _http_get_json(url, token=token)
+            _raise_codearts_error("获取发布库文件版本信息失败", resp, url)
+            return _extract_result_dict(resp)
+        except Exception as e:
+            last_error = e
+            if "404" in str(e):
+                continue
+            raise
+    raise Exception(f"获取发布库文件版本信息失败，已尝试: {', '.join(tried_paths)}；最后错误: {last_error}")
+
+
 def _list_codearts_tree_children(
     base_url: str,
     token: str,
@@ -3157,6 +3453,10 @@ def _list_codearts_project_files(base_url: str, token: str, project_info: dict) 
     results: list[dict] = []
     visited_files: set[str] = set()
 
+    # API 4.6.4: recursively list the complete repository tree.  API 4.6.5
+    # is called later by _enrich_codearts_file_detail for the canonical file
+    # metadata, checksum and download URL.  Do not use API 4.6.1 here because
+    # its required file_name filter cannot enumerate a whole project.
     def walk(parent_id: Optional[str] = None) -> None:
         for item in _list_codearts_tree_children(base_url, token, project_id, parent_id=parent_id):
             item_type = str(item.get("type") or "").strip().lower()
@@ -5571,8 +5871,15 @@ def _run_repository_auto_sync_job(job_id: int, project_key: str) -> None:
             },
             ensure_ascii=False,
         )
+        # The project may have been re-added while this older delete job was
+        # running.  Refresh before removing the setting: a stale job must not
+        # delete the new configuration or its freshly seeded members.
+        db.refresh(setting)
+        current_setting_config = _safe_json_loads(getattr(setting, "codearts_config_json", None))
+        delete_still_pending = bool(current_setting_config.get(_SYNC_PROJECT_DELETE_PENDING_FIELD))
         delete_completed = bool(
             project_delete_pending
+            and delete_still_pending
             and remaining_pending == 0
             and conflict_count == 0
             and skipped_count == 0
@@ -5583,12 +5890,12 @@ def _run_repository_auto_sync_job(job_id: int, project_key: str) -> None:
             ).delete(synchronize_session=False)
             db.delete(setting)
         else:
-            if project_delete_pending and (conflict_count > 0 or skipped_count > 0):
+            if project_delete_pending and delete_still_pending and (conflict_count > 0 or skipped_count > 0):
                 # Server-wins conflict means the requested project deletion did
                 # not complete.  Make the project visible again instead of
                 # leaving a permanently hidden, non-retryable configuration.
-                setting_config.pop(_SYNC_PROJECT_DELETE_PENDING_FIELD, None)
-                setting.codearts_config_json = json.dumps(setting_config, ensure_ascii=False)
+                current_setting_config.pop(_SYNC_PROJECT_DELETE_PENDING_FIELD, None)
+                setting.codearts_config_json = json.dumps(current_setting_config, ensure_ascii=False)
                 setting.auto_sync_last_error = "项目删除未被同步服务器接受，已保留服务器状态"
             else:
                 setting.auto_sync_last_error = None
@@ -6215,7 +6522,7 @@ async def get_codearts_status(
             normalized_project_key,
         )
         region = str(cfg.get("region") or "").strip()
-        base_url = str(cfg.get("base_url") or "https://cloudartifacts-ext.{region}.myhuaweicloud.com").rstrip("/")
+        base_url = str(cfg.get("base_url") or "https://codeartsartifact.{region}.cqcloud.cwgy.com").rstrip("/")
         base_url = _safe_format_path(base_url, region=region)
         mode = _normalize_codearts_repository_mode(cfg.get("repository_mode"))
         if mode == _CODEARTS_REPOSITORY_MODE_PRIVATE:
@@ -6445,17 +6752,26 @@ async def set_codearts_config(
         .filter(RepositoryProjectSetting.project_key == project_key)
         .first()
     )
+    existing_config = _safe_json_loads(getattr(existing_setting, "codearts_config_json", None)) if existing_setting else {}
+    replacing_deleted_project = bool(existing_config.get(_SYNC_PROJECT_DELETE_PENDING_FIELD))
 
     operation = str(payload.get("operation") or "").strip().lower()
-    if operation == "create" and existing_setting:
+    if operation == "create" and existing_setting and not replacing_deleted_project:
         raise HTTPException(status_code=409, detail="该项目已存在，请使用“修改当前项目”更新配置")
     if operation == "edit" and not existing_setting:
         raise HTTPException(status_code=404, detail="要修改的项目不存在，请先新增项目")
     if existing_setting and not _is_super_admin(current_user):
-        if _get_current_user_project_role(db, project_key, current_user) != "admin":
+        if replacing_deleted_project:
+            # Members are intentionally removed during deletion.  Only the
+            # user who initiated that deletion may revive its hidden setting.
+            if existing_setting.updated_by_user_id != getattr(current_user, "id", None):
+                raise HTTPException(status_code=403, detail="只有删除该项目的用户或超级管理员可以重新添加")
+        elif _get_current_user_project_role(db, project_key, current_user) != "admin":
             raise HTTPException(status_code=403, detail="只有项目管理员可以修改项目配置")
-    existing = _get_project_codearts_config_raw(db, project_key, current_user)
+    existing = existing_config
     merged = _merge_codearts_config(existing, payload)
+    if replacing_deleted_project:
+        merged.pop(_SYNC_PROJECT_DELETE_PENDING_FIELD, None)
     effective = _build_effective_codearts_config(merged)
     is_web_private = _is_codearts_web_private_config(effective)
     configured_region = str(effective.get("region") or "").strip()
@@ -6484,7 +6800,12 @@ async def set_codearts_config(
     else:
         renamed_rows = 0
     _save_project_codearts_config(db, project_key, merged, current_user)
-    _ensure_project_member_seed(db, project_key, current_user, allow_creator=not bool(existing_setting))
+    _ensure_project_member_seed(
+        db,
+        project_key,
+        current_user,
+        allow_creator=not bool(existing_setting) or replacing_deleted_project,
+    )
     db.commit()
     wake_repository_data_sync_coordinator()
     _log_event(
@@ -6507,7 +6828,11 @@ async def set_codearts_config(
         "message": "保存成功",
         "data": {
             "enabled": bool(effective.get("enabled")),
+            # A revived delete-pending setting is not a brand-new project.
+            # This prevents the UI's first-sync failure rollback from removing
+            # the original deletion outbox records.
             "created": existing_setting is None,
+            "replaced_deleted_project": replacing_deleted_project,
             "project_key": project_key,
         },
     }
@@ -6878,6 +7203,14 @@ async def sync_codearts_project(
                 token,
                 project_info,
             )
+        configured_project_name = str(normalize_text(merged.get("project_name") or "")).strip()
+        if not configured_project_name:
+            remote_project_name = str(
+                normalize_text(project_info.get("project_name") or project_info.get("name") or "")
+            ).strip()
+            if remote_project_name:
+                merged["project_name"] = remote_project_name
+                _save_project_codearts_config(db, project_key, merged, current_user)
         _log_event(
             "repository.codearts_sync.remote_snapshot",
             **_current_user_log_context(current_user),

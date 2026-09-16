@@ -13,6 +13,7 @@ from backend.utils.app_paths import get_app_data_root
 
 
 ARTIFACT_MASTER_KEY_ENV = "PCIDS_ARTIFACT_MASTER_KEY"
+ARTIFACT_MASTER_KEY_AUTO_REPAIR_ENV = "PCIDS_ARTIFACT_MASTER_KEY_AUTO_REPAIR"
 _WINDOWS_MASTER_KEY_FILE = "artifact_master_key.dpapi"
 _MASTER_KEY_LENGTH = 32
 
@@ -64,6 +65,18 @@ def _get_windows_master_key_path() -> Path:
     base_dir = get_artifact_secure_data_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir / _WINDOWS_MASTER_KEY_FILE
+
+
+def _artifact_master_key_auto_repair_enabled() -> bool:
+    raw = str(os.environ.get(ARTIFACT_MASTER_KEY_AUTO_REPAIR_ENV, "0")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _archive_invalid_windows_key(key_path: Path) -> Path:
+    suffix = os.environ.get("PCIDS_TEST_TIMESTAMP") or secrets.token_hex(6)
+    archive_path = key_path.with_name(f"{key_path.name}.invalid-{suffix}")
+    key_path.replace(archive_path)
+    return archive_path
 
 
 class _DataBlob(ctypes.Structure):
@@ -136,7 +149,23 @@ def _load_or_create_windows_key() -> MasterKeyRecord:
             protected_payload = key_path.read_bytes()
             key = _dpapi_unprotect(protected_payload)
         except Exception as exc:
-            raise MasterKeyError(f"读取受保护主密钥失败: {key_path}") from exc
+            if not _artifact_master_key_auto_repair_enabled():
+                raise MasterKeyError(f"读取受保护主密钥失败: {key_path}") from exc
+            try:
+                archived_path = _archive_invalid_windows_key(key_path)
+            except Exception as archive_exc:
+                raise MasterKeyError(f"归档失效主密钥失败: {key_path}") from archive_exc
+            key = secrets.token_bytes(_MASTER_KEY_LENGTH)
+            protected_payload = _dpapi_protect(key)
+            try:
+                key_path.write_bytes(protected_payload)
+            except Exception as write_exc:
+                raise MasterKeyError(f"重建主密钥文件失败: {key_path}") from write_exc
+            return MasterKeyRecord(
+                key=key,
+                source="windows_dpapi_repaired",
+                location=f"{key_path} (archived previous key to {archived_path})",
+            )
         if len(key) != _MASTER_KEY_LENGTH:
             raise MasterKeyError(f"受保护主密钥长度无效: {key_path}")
         return MasterKeyRecord(key=key, source="windows_dpapi", location=str(key_path))

@@ -105,9 +105,11 @@ def get_license_public_key_path() -> Path:
 
 
 def is_license_enforcement_enabled() -> bool:
-    if getattr(sys, "frozen", False):
-        return True
     raw = str(os.environ.get("PCIDS_LICENSE_ENFORCEMENT", "1")).strip().lower()
+    if getattr(sys, "frozen", False):
+        bypass_raw = str(os.environ.get("PCIDS_PACKAGED_LICENSE_BYPASS", "0")).strip().lower()
+        if bypass_raw in _DISABLED_VALUES:
+            return True
     return raw not in _DISABLED_VALUES
 
 

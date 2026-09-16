@@ -150,14 +150,27 @@ def test_import_always_verifies_signature_when_enforcement_is_disabled(
     assert not (data_root / "license" / "pcids.lic").exists()
 
 
-def test_packaged_backend_cannot_disable_license_enforcement(monkeypatch: pytest.MonkeyPatch):
+def test_packaged_backend_cannot_disable_license_enforcement_without_explicit_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+):
     monkeypatch.setenv("PCIDS_LICENSE_ENFORCEMENT", "0")
     monkeypatch.setenv("PCIDS_LICENSE_PUBLIC_KEY_FILE", "/tmp/attacker-public-key.pem")
+    monkeypatch.delenv("PCIDS_PACKAGED_LICENSE_BYPASS", raising=False)
     monkeypatch.setattr("backend.utils.license_manager.sys.frozen", True, raising=False)
 
     assert is_license_enforcement_enabled() is True
     assert get_license_public_key_path().name == "license_public_key.pem"
     assert str(get_license_public_key_path()) != "/tmp/attacker-public-key.pem"
+
+
+def test_packaged_backend_can_disable_license_enforcement_with_explicit_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("PCIDS_LICENSE_ENFORCEMENT", "0")
+    monkeypatch.setenv("PCIDS_PACKAGED_LICENSE_BYPASS", "1")
+    monkeypatch.setattr("backend.utils.license_manager.sys.frozen", True, raising=False)
+
+    assert is_license_enforcement_enabled() is False
 
 
 def test_issuer_reuses_machine_slot_and_enforces_customer_limit(tmp_path: Path):

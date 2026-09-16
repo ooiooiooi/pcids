@@ -76,7 +76,7 @@ test('honors an explicit managed data directory', (t) => {
   assert.equal(result.dataRoot, path.resolve(configuredRoot))
 })
 
-test('refuses startup when multiple databases exist', (t) => {
+test('prefers install data and records ignored legacy databases when duplicates exist', (t) => {
   const roots = temporaryRoots()
   t.after(() => fs.rmSync(roots.base, { recursive: true, force: true }))
   for (const root of [roots.targetRoot, roots.userRoot]) {
@@ -84,11 +84,30 @@ test('refuses startup when multiple databases exist', (t) => {
     fs.writeFileSync(path.join(root, 'app_data.db'), root)
   }
 
+  const result = resolveSingleDataRoot({
+    targetRoot: roots.targetRoot,
+    legacyRoots: [roots.machineRoot, roots.userRoot],
+  })
+
+  assert.equal(result.dataRoot, path.resolve(roots.targetRoot))
+  assert.equal(result.databasePath, path.join(path.resolve(roots.targetRoot), 'app_data.db'))
+  assert.deepEqual(result.ignoredLegacyDatabases, [path.join(path.resolve(roots.userRoot), 'app_data.db')])
+})
+
+test('still refuses startup when duplicates exist outside the install root', (t) => {
+  const roots = temporaryRoots()
+  t.after(() => fs.rmSync(roots.base, { recursive: true, force: true }))
+  for (const root of [roots.machineRoot, roots.userRoot]) {
+    fs.mkdirSync(root, { recursive: true })
+    fs.writeFileSync(path.join(root, 'app_data.db'), root)
+  }
+
   assert.throws(
-    () => resolveSingleDataRoot({
-      targetRoot: roots.targetRoot,
-      legacyRoots: [roots.machineRoot, roots.userRoot],
-    }),
+    () =>
+      resolveSingleDataRoot({
+        targetRoot: roots.targetRoot,
+        legacyRoots: [roots.machineRoot, roots.userRoot],
+      }),
     /检测到多份 PCIDS 数据库/,
   )
 })

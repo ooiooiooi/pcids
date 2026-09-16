@@ -15,6 +15,7 @@ from backend.models.repository import RepositoryProjectSetting
 from backend.models.task import BurningTask
 from backend.routers.repositories import (
     _filter_repositories_for_active_codearts_mode,
+    _list_codearts_project_files,
     set_codearts_config,
     sync_codearts_project,
 )
@@ -688,6 +689,55 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
 
+    def test_project_create_replaces_hidden_delete_pending_setting(self):
+        project_id = "recreate-project"
+        project_key = f"proj_{project_id}"
+        self.db.add(
+            RepositoryProjectSetting(
+                project_key=project_key,
+                updated_by_user_id=self.user.id,
+                codearts_config_json=json.dumps(
+                    {
+                        "enabled": True,
+                        "project_id": project_id,
+                        "_data_sync_project_delete_pending": True,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        self.db.commit()
+
+        result = asyncio.run(
+            set_codearts_config(
+                {
+                    "operation": "create",
+                    "enabled": True,
+                    "repository_mode": "release",
+                    "domain_name": "tenant",
+                    "username": "user",
+                    "password": "password",
+                    "region": "cn-cq-1",
+                    "project_id": project_id,
+                    "project_name": "",
+                },
+                self.db,
+                self.user,
+                None,
+            )
+        )
+
+        self.assertEqual(result["code"], 0)
+        self.assertFalse(result["data"]["created"])
+        self.assertTrue(result["data"]["replaced_deleted_project"])
+        stored = json.loads(
+            self.db.query(RepositoryProjectSetting)
+            .filter(RepositoryProjectSetting.project_key == project_key)
+            .one()
+            .codearts_config_json
+        )
+        self.assertNotIn("_data_sync_project_delete_pending", stored)
+
     def test_project_edit_preserves_saved_password_when_form_leaves_it_blank(self):
         project_id = "editable-project"
         project_key = f"proj_{project_id}"
@@ -764,6 +814,62 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         renamed_detail = json.loads(existing_repo.repo_detail_json)
         self.assertEqual(renamed_detail["name"], "旧项目名称")
         self.assertEqual(renamed_detail["project_name"], "旧项目名称")
+
+
+class RepositoryCodeartsTreeApiMappingTests(unittest.TestCase):
+    def test_list_project_files_recursively_uses_tree_api(self):
+        project_info = {
+            "project_id": "project-1",
+            "name": "Demo Project",
+            "repo_name": "tree-repo",
+        }
+        base_url = "https://artifact.example.com"
+
+        with (
+            patch("backend.routers.repositories._list_codearts_tree_children") as list_children,
+        ):
+            list_children.side_effect = [
+                [{"id": "folder-1", "type": "folder", "name": "images"}],
+                [{"id": "file-1", "type": "file", "name": "firmware.bin", "path": "/images", "size": 128,
+                  "download_url": "/DevRepoServer/v1/files/download?file_id=file-1", "repo_name": "tree-repo"}],
+            ]
+            items = _list_codearts_project_files(base_url, "token", project_info)
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(
+            item["download_uri"],
+            "/DevRepoServer/v1/files/download?file_id=file-1",
+        )
+        self.assertEqual(item["remote_repo_id"], "tree-repo")
+        self.assertEqual(item["display_path"], "/images/firmware.bin")
+        self.assertEqual(list_children.call_args_list[0].kwargs["parent_id"], None)
+        self.assertEqual(list_children.call_args_list[1].kwargs["parent_id"], "folder-1")
+
+    def test_list_project_files_deduplicates_tree_files(self):
+        project_info = {
+            "project_id": "project-1",
+            "name": "Demo Project",
+            "repo_name": "tree-repo",
+        }
+        base_url = "https://artifact.example.com"
+
+        with (
+            patch("backend.routers.repositories._list_codearts_tree_children", return_value=[
+                {"id": "file-1", "type": "file", "name": "firmware.bin", "path": "/", "download_url": "same-url"},
+                {"id": "file-2", "type": "file", "name": "firmware-copy.bin", "path": "/", "download_url": "same-url"},
+            ]),
+        ):
+            items = _list_codearts_project_files(base_url, "token", project_info)
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(
+            item["download_uri"],
+            "same-url",
+        )
+        self.assertEqual(item["name"], "firmware.bin")
+        self.assertEqual(item["display_path"], "/firmware.bin")
 
 
 if __name__ == "__main__":

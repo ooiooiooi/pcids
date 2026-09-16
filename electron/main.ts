@@ -11,6 +11,7 @@ let pythonProcess: childProcess.ChildProcess | null = null
 let backendPort: number | null = null
 let isQuitting = false
 let backendRestarting = false
+let singleDataRootWarning: string | null = null
 const backendOutputTail: string[] = []
 const BACKEND_START_ATTEMPTS = 3
 const BACKEND_START_TIMEOUT_MS = 120000
@@ -34,6 +35,13 @@ function configureSingleDatabaseRoot(): string {
     legacyRoots: [path.join(commonAppData, 'PCIDS'), legacyUserDataRoot],
     configuredRoot: process.env.PCIDS_DATA_DIR,
   })
+  if (resolution.ignoredLegacyDatabases?.length) {
+    singleDataRootWarning =
+      '检测到旧位置仍保留 PCIDS 数据库，当前安装版已继续使用安装目录 data 中的数据库启动。\n\n' +
+      `当前使用：${resolution.databasePath}\n` +
+      `已忽略：\n${resolution.ignoredLegacyDatabases.join('\n')}\n\n` +
+      '如确认旧库不再使用，可手工备份后清理这些旧目录。'
+  }
   app.setPath('userData', resolution.dataRoot)
   return resolution.dataRoot
 }
@@ -90,6 +98,10 @@ function recordBackendOutput(message: string): void {
   } catch (error) {
     console.error(`Unable to persist backend startup log: ${error}`)
   }
+}
+
+function recordDesktopWarning(message: string): void {
+  recordBackendOutput(`[desktop-warning] ${message}`)
 }
 
 function resolveBundledToolsDir(): string {
@@ -551,7 +563,14 @@ function startPythonBackend(port: number): childProcess.ChildProcess {
     PCIDS_NODE_BIN: process.execPath,
     PCIDS_RUNTIME_ROOT: runtimeRoot,
     PCIDS_DATA_DIR: dataRoot,
-    PCIDS_LICENSE_ENFORCEMENT: app.isPackaged ? '1' : (process.env.PCIDS_LICENSE_ENFORCEMENT || '1'),
+    PCIDS_ARTIFACT_MASTER_KEY_AUTO_REPAIR: app.isPackaged
+      ? '1'
+      : (process.env.PCIDS_ARTIFACT_MASTER_KEY_AUTO_REPAIR || '0'),
+    // Temporary packaged-build switch for intranet validation.
+    // Keep license logic intact, but boot this packaged desktop build
+    // with enforcement disabled so repository flows can be verified first.
+    PCIDS_PACKAGED_LICENSE_BYPASS: app.isPackaged ? '1' : (process.env.PCIDS_PACKAGED_LICENSE_BYPASS || '0'),
+    PCIDS_LICENSE_ENFORCEMENT: app.isPackaged ? '0' : (process.env.PCIDS_LICENSE_ENFORCEMENT || '1'),
     DB_PATH: path.join(dataRoot, 'app_data.db'),
     PCIDS_LOG_DIR: logRoot,
     ELECTRON_RUN_AS_NODE: '1',
@@ -749,6 +768,15 @@ async function createWindow() {
     backendPort = startedBackend.port
     const backendBaseUrl = startedBackend.baseUrl
     await mainWindow.loadURL(getFrontendUrl(backendBaseUrl))
+    if (singleDataRootWarning) {
+      recordDesktopWarning(singleDataRootWarning)
+      dialog.showMessageBox({
+        type: 'warning',
+        title: '数据库位置提示',
+        message: '安装版已优先使用当前目录 data 数据库启动',
+        detail: singleDataRootWarning,
+      }).catch(() => undefined)
+    }
 
     if (!app.isPackaged) {
       mainWindow.webContents.openDevTools()

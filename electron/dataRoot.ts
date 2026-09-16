@@ -7,6 +7,7 @@ export type DataRootResolution = {
   databasePath: string
   migratedFrom?: string
   migrationBackup?: string
+  ignoredLegacyDatabases?: string[]
 }
 
 type ResolveDataRootOptions = {
@@ -126,14 +127,20 @@ export function resolveSingleDataRoot(options: ResolveDataRootOptions): DataRoot
   const rootsWithDatabase = candidateRoots.filter((root) => fs.existsSync(databasePath(root)))
 
   if (rootsWithDatabase.length > 1) {
-    throw new Error(
-      '检测到多份 PCIDS 数据库，已停止启动以避免读取或覆盖错误数据。请只保留一份数据库后重试：\n' +
-        rootsWithDatabase.map((root) => databasePath(root)).join('\n'),
-    )
+    const targetHasDatabase = rootsWithDatabase.some((root) => samePath(root, targetRoot))
+    if (!targetHasDatabase) {
+      throw new Error(
+        '检测到多份 PCIDS 数据库，已停止启动以避免读取或覆盖错误数据。请只保留一份数据库后重试：\n' +
+          rootsWithDatabase.map((root) => databasePath(root)).join('\n'),
+      )
+    }
   }
 
   let migratedFrom: string | undefined
   let migrationBackup: string | undefined
+  const ignoredLegacyDatabases = rootsWithDatabase
+    .filter((root) => !samePath(root, targetRoot))
+    .map((root) => databasePath(root))
   if (rootsWithDatabase.length === 1 && !samePath(rootsWithDatabase[0], targetRoot)) {
     migratedFrom = rootsWithDatabase[0]
     migrationBackup = copyAndArchiveLegacyRoot(
@@ -158,5 +165,6 @@ export function resolveSingleDataRoot(options: ResolveDataRootOptions): DataRoot
     databasePath: databasePath(targetRoot),
     migratedFrom,
     migrationBackup,
+    ignoredLegacyDatabases: ignoredLegacyDatabases.length ? ignoredLegacyDatabases : undefined,
   }
 }
