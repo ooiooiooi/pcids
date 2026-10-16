@@ -21,7 +21,6 @@ const BURNER_MODEL_OPTIONS = [
   { value: 'J-LINK', label: 'J-LINK' },
   { value: 'PWLINK2', label: 'PWLINK2' },
   { value: 'GDLINK', label: 'GDLINK' },
-  { value: 'SWD下载器', label: 'SWD下载器' },
   { value: 'AL321', label: 'AL321' },
   { value: 'ST-LINK', label: 'ST-LINK' },
   { value: 'HDSC CCID', label: 'HDSC CCID' },
@@ -64,7 +63,6 @@ const BURNER_CAPABILITY_MAP: Record<string, { supported_interfaces: string[]; su
   J_LINK: { supported_interfaces: ['SWD', 'JTAG', 'CJTAG'], supported_chips: ['ARM'] },
   PWLINK2: { supported_interfaces: ['SWD', 'JTAG'], supported_chips: ['ARM'] },
   GDLINK: { supported_interfaces: ['SWD', 'JTAG'], supported_chips: ['ARM'] },
-  SWD下载器: { supported_interfaces: ['SWD'], supported_chips: ['ARM'] },
   AL321: { supported_interfaces: ['JTAG'], supported_chips: ['FPGA'] },
   ST_LINK: { supported_interfaces: ['SWD', 'JTAG', 'CJTAG'], supported_chips: ['ARM'] },
   HDSC_CCID: { supported_interfaces: ['UART'], supported_chips: ['ARM'] },
@@ -100,6 +98,17 @@ const getBurnerCapabilityConfig = (deviceModel?: string) => {
     supported_interfaces: sortByPresetOrder(config.supported_interfaces, BURNER_INTERFACE_ORDER),
     supported_chips: sortByPresetOrder(config.supported_chips, CHIP_ORDER),
   }
+}
+
+const getBurnerModelOptions = (currentValue?: string) => {
+  const currentText = String(currentValue || '').trim()
+  if (currentText === 'SWD下载器') {
+    return [
+      ...BURNER_MODEL_OPTIONS,
+      { value: 'SWD下载器', label: 'SWD下载器（历史型号，只读兼容）', disabled: true },
+    ]
+  }
+  return BURNER_MODEL_OPTIONS
 }
 
 const requiresPhysicalPortStrategy = (deviceModel?: string) => normalizeBurnerModelKey(deviceModel) === 'XDS510PLUS'
@@ -1054,7 +1063,7 @@ const Burner: React.FC = () => {
 
             {deviceCategory === 'burner' ? (
               <Form.Item label="选择烧录器" name="device_model" rules={[{ required: true, message: '请选择烧录器' }]} required>
-                <Select placeholder="请选择烧录器" options={BURNER_MODEL_OPTIONS} />
+                <Select placeholder="请选择烧录器" options={getBurnerModelOptions(deviceModel)} />
               </Form.Item>
             ) : (
               <div className="device-form-grid__placeholder" />

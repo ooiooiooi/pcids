@@ -50,6 +50,7 @@ type InstallSource = 'local' | 'server' | 'codearts'
 type DownloadTarget = 'local' | 'server'
 type CodeartsRepositoryMode = 'release' | 'private' | 'web'
 type ProjectConfigIntent = 'create' | 'edit'
+const CODEARTS_CONNECTION_STATUS_TTL_MS = 30_000
 
 const CODEARTS_SYNC_DEFINITIVE_ERROR = '__pcidsCodeartsSyncDefinitive'
 
@@ -171,6 +172,19 @@ function guessCodeartsMetaFromKey(key: string) {
   return { project_id: m[1], package_id: m[2], version_id: m[3] }
 }
 
+function hasExplicitBoolean(value: any) {
+  return typeof value === 'boolean' || value === 0 || value === 1
+}
+
+function resolveExplicitBoolean(...candidates: any[]) {
+  for (const candidate of candidates) {
+    if (hasExplicitBoolean(candidate)) {
+      return Boolean(candidate)
+    }
+  }
+  return undefined
+}
+
 function getNodeLocationState(node?: AnyNode | null) {
   const fileDetail = (node?.file_detail || {}) as Record<string, any>
   const storageLocation = String(node?.storage_location ?? fileDetail.storage_location ?? '').trim().toLowerCase()
@@ -182,8 +196,10 @@ function getNodeLocationState(node?: AnyNode | null) {
     String(node?.server_target ?? fileDetail.server_target ?? node?.storage_target ?? fileDetail.storage_target ?? '').trim(),
     serverPath,
   )
-  const localExists = Boolean(node?.local_exists || fileDetail.local_exists || (localPath && storageLocation !== 'server'))
-  const serverExists = Boolean(node?.server_exists || fileDetail.server_exists || serverPath || serverTarget)
+  const explicitLocalExists = resolveExplicitBoolean(node?.local_exists, fileDetail.local_exists)
+  const explicitServerExists = resolveExplicitBoolean(node?.server_exists, fileDetail.server_exists)
+  const localExists = explicitLocalExists ?? Boolean(localPath && storageLocation !== 'server')
+  const serverExists = explicitServerExists ?? Boolean(serverPath || serverTarget)
   const remoteDownloadable = Boolean(node?.remote_downloadable ?? node?.download_uri ?? fileDetail.download_url ?? fileDetail.download_url_with_id)
 
   return {
@@ -329,6 +345,7 @@ const Repository: React.FC = () => {
   const [codeartsCfg, setCodeartsCfg] = useState<any>({})
   const [codeartsConnected, setCodeartsConnected] = useState(false)
   const [codeartsConnectionDetail, setCodeartsConnectionDetail] = useState('')
+  const [codeartsStatusCheckedAt, setCodeartsStatusCheckedAt] = useState(0)
   const [projectOptions, setProjectOptions] = useState<Array<{ label: string; value: string; repositoryMode: CodeartsRepositoryMode }>>([])
   const [currentProjectKey, setCurrentProjectKey] = useState<string>('')
   const [repositoryMode, setRepositoryMode] = useState<CodeartsRepositoryMode>('web')
@@ -531,6 +548,7 @@ const Repository: React.FC = () => {
       setCodeartsCfg({})
       setCodeartsConnected(false)
       setCodeartsConnectionDetail('')
+      setCodeartsStatusCheckedAt(Date.now())
       return
     }
     try {
@@ -543,9 +561,38 @@ const Repository: React.FC = () => {
       const connected = Boolean(statusRes?.code === 0 && statusRes?.data?.connected)
       setCodeartsConnected(connected)
       setCodeartsConnectionDetail(String(statusRes?.data?.detail || ''))
+      setCodeartsStatusCheckedAt(Date.now())
     } catch {
       setCodeartsConnected(false)
       setCodeartsConnectionDetail('CodeArts 连接检测失败')
+      setCodeartsStatusCheckedAt(Date.now())
+    }
+  }
+
+  const ensureFreshCodeartsConnection = async (force = false) => {
+    if (!currentProjectKey) {
+      setCodeartsConnected(false)
+      setCodeartsConnectionDetail('请先选择项目')
+      setCodeartsStatusCheckedAt(Date.now())
+      return false
+    }
+    const now = Date.now()
+    if (!force && now - codeartsStatusCheckedAt < CODEARTS_CONNECTION_STATUS_TTL_MS) {
+      return codeartsConnected
+    }
+    try {
+      const statusRes: any = await repositoryApi.getCodeartsStatus({ project_key: currentProjectKey || undefined })
+      const connected = Boolean(statusRes?.code === 0 && statusRes?.data?.connected)
+      setCodeartsConnected(connected)
+      setCodeartsConnectionDetail(String(statusRes?.data?.detail || ''))
+      setCodeartsStatusCheckedAt(Date.now())
+      return connected
+    } catch (error: any) {
+      const detail = String(error?.response?.data?.detail || 'CodeArts 连接检测失败').trim()
+      setCodeartsConnected(false)
+      setCodeartsConnectionDetail(detail)
+      setCodeartsStatusCheckedAt(Date.now())
+      return false
     }
   }
 
@@ -953,6 +1000,12 @@ const Repository: React.FC = () => {
 
   const handleDownloadArtifact = async (target: DownloadTarget, node: AnyNode, jumpAfterDownload = false) => {
     if (!node?.project_id || !node?.download_uri) return
+    const connected = await ensureFreshCodeartsConnection()
+    if (!connected) {
+      message.warning(codeartsConnectionDetail || 'CodeArts 当前无法连接，请稍后重试或改用离线副本')
+      setDownloadTaskNotice({ type: 'error', message: codeartsConnectionDetail || 'CodeArts 当前无法连接' })
+      return
+    }
     const messageKey = `repository-download-${node.repo_id || node.key}-${target}`
     message.open({
       key: messageKey,
@@ -1012,6 +1065,9 @@ const Repository: React.FC = () => {
       }
     } catch (e: any) {
       const errorText = e?.response?.data?.detail || (target === 'server' ? '下载到服务器失败' : '下载到本地失败')
+      setCodeartsConnected(false)
+      setCodeartsConnectionDetail(String(errorText || 'CodeArts 下载失败'))
+      setCodeartsStatusCheckedAt(Date.now())
       message.open({
         key: messageKey,
         type: 'error',
@@ -1102,7 +1158,8 @@ const Repository: React.FC = () => {
     const downloadItems: Array<{ key: InstallSource; label: string }> = []
     const deleteItems: Array<{ key: 'local' | 'server' | 'all'; label: string; danger?: boolean }> = []
 
-    if (!isCodeartsConnected && locationState.localExists) installItems.push({ key: 'local', label: '本地安装' })
+    if (locationState.localExists) installItems.push({ key: 'local', label: '本地安装' })
+    if (locationState.serverExists) installItems.push({ key: 'server', label: '服务器安装' })
     if (isCodeartsConnected && locationState.remoteDownloadable) {
       downloadItems.push({ key: 'server', label: locationState.serverExists ? '重新下载到服务器' : '下载到服务器' })
       downloadItems.push({ key: 'local', label: locationState.localExists ? '重新下载到本地' : '下载到本地' })
@@ -1126,9 +1183,10 @@ const Repository: React.FC = () => {
     }
   }, [isCodeartsConnected, selectedNode])
 
-  const handleOnlineInstallClick = (node: AnyNode) => {
+  const handleOnlineInstallClick = async (node: AnyNode) => {
     const locationState = getNodeLocationState(node)
-    if (!isCodeartsConnected) {
+    const connected = await ensureFreshCodeartsConnection()
+    if (!connected) {
       message.warning(codeartsConnectionDetail || 'CodeArts 当前无法连接，请使用已下载到本地的制品进行离线安装')
       return
     }

@@ -2,8 +2,8 @@ import { Table, Button, Space, Modal, App as AntdApp, Tag, Select, Input, InputN
 import { PlusOutlined, SearchOutlined, DesktopOutlined, AppstoreOutlined, MinusOutlined, SyncOutlined, LinkOutlined, QuestionCircleOutlined, CopyOutlined } from '@ant-design/icons'
 import { Fragment, useState, useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { taskApi, productApi, burnerApi, scriptApi, repositoryApi } from '../../services/api'
-import { Permission } from '../../hooks'
+import { taskApi, productApi, burnerApi, scriptApi, repositoryApi, metaApi } from '../../services/api'
+import { Permission, usePermission } from '../../hooks'
 import { renderListPaginationTotal } from '../../utils/pagination'
 import { formatDateTime, parseServerDateTime } from '../../utils/dateTime'
 import { resolveMediaUrl } from '../../utils/mediaUrl'
@@ -16,6 +16,7 @@ import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm, { ActionConfirmDialog } from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
 import { resolveArtifactSelectionAfterRefresh } from './artifactSelectionState'
+import { DEFAULT_IDE_OPTIONS } from '../../constants/meta'
 import KylinIcon from '../../assets/images/os-kylin-logo.svg'
 import HarmonyIcon from '../../assets/images/os-harmony.svg'
 import SylixIcon from '../../assets/images/os-sylixos.png'
@@ -200,17 +201,7 @@ const renderSingleLineTooltipText = (value: any) => {
   return <EllipsisText value={text} />
 }
 
-const BOARD_IDE_OPTIONS = [
-  '',
-  'Code Composer Studio',
-  'IAR Embedded Workbench For Arm',
-  'Keil uVision',
-  'MPLAB',
-  'STM32CubeIDE',
-  'Vitis',
-  'Vivado',
-  'WindRiver Workbench',
-]
+const DEFAULT_BOARD_IDE_OPTIONS = ['', ...DEFAULT_IDE_OPTIONS]
 
 const HYBRID_BURN_MODE_OPTIONS = [
   { label: 'TFTP+串口（系统异常/未分区）', value: 'TFTP+串口' },
@@ -257,6 +248,17 @@ const extractArtifactExtension = (...candidates: any[]) => {
     return normalized.split('.').pop() || ''
   }
   return ''
+}
+
+const hasExplicitBoolean = (value: any) => typeof value === 'boolean' || value === 0 || value === 1
+
+const resolveExplicitBoolean = (...candidates: any[]) => {
+  for (const candidate of candidates) {
+    if (hasExplicitBoolean(candidate)) {
+      return Boolean(candidate)
+    }
+  }
+  return undefined
 }
 
 const hasInvalidWhitespace = (value: any) => /\s/.test(String(value || '').trim())
@@ -316,8 +318,10 @@ const getRepositoryLocationState = (item: any) => {
   const localPath = String(item?.local_path || fileDetail?.local_path || item?.file_url || '').trim()
   const serverPath = String(item?.server_path || fileDetail?.server_path || '').trim()
   const serverTarget = String(item?.server_target || fileDetail?.server_target || item?.storage_target || fileDetail?.storage_target || '').trim()
-  const localExists = Boolean(item?.local_exists ?? fileDetail?.local_exists ?? localPath)
-  const serverExists = Boolean(item?.server_exists ?? fileDetail?.server_exists ?? serverPath ?? serverTarget)
+  const explicitLocalExists = resolveExplicitBoolean(item?.local_exists, fileDetail?.local_exists)
+  const explicitServerExists = resolveExplicitBoolean(item?.server_exists, fileDetail?.server_exists)
+  const localExists = explicitLocalExists ?? Boolean(localPath)
+  const serverExists = explicitServerExists ?? Boolean(serverPath || serverTarget)
   const remoteDownloadable = Boolean(item?.remote_downloadable ?? item?.download_uri ?? fileDetail?.download_url ?? fileDetail?.download_url_with_id)
   return {
     localExists: localExists && Boolean(localPath),
@@ -499,6 +503,7 @@ const Burning: React.FC = () => {
   const location = useLocation()
   const navigate = useNavigate()
   const { message } = AntdApp.useApp()
+  const { hasPermission } = usePermission()
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<any[]>([])
@@ -550,6 +555,7 @@ const Burning: React.FC = () => {
   const [isBoardDetailOpen, setIsBoardDetailOpen] = useState(false)
   const [versionBaselineReady, setVersionBaselineReady] = useState(false)
   const [versionBaselineChecksum, setVersionBaselineChecksum] = useState('')
+  const [boardIdeOptions, setBoardIdeOptions] = useState<string[]>(DEFAULT_BOARD_IDE_OPTIONS)
   const [hybridConnectionPassed, setHybridConnectionPassed] = useState(false)
   const [wizardSubmitLoading, setWizardSubmitLoading] = useState(false)
   const [wizardBoardPage, setWizardBoardPage] = useState(1)
@@ -558,6 +564,7 @@ const Burning: React.FC = () => {
   const [terminatingTaskId, setTerminatingTaskId] = useState<number | null>(null)
   const [terminateDialogTask, setTerminateDialogTask] = useState<any | null>(null)
   const [terminateReason, setTerminateReason] = useState('')
+  const canOverrideTask = hasPermission('burning:override')
   const isTaskActive = (task?: any) => [1, 4].includes(Number(task?.status))
   const runningTaskIds = useMemo(
     () => dataSource
@@ -573,6 +580,23 @@ const Burning: React.FC = () => {
   useEffect(() => {
     fetchRepositories()
   }, [currentProject.projectKey])
+
+  useEffect(() => {
+    const fetchIdeOptions = async () => {
+      try {
+        const res: any = await metaApi.getIdes()
+        const values = Array.isArray(res?.data)
+          ? res.data.map((item: any) => String(item?.name || '').trim()).filter(Boolean)
+          : []
+        if (values.length > 0) {
+          setBoardIdeOptions(['', ...values])
+        }
+      } catch {
+        setBoardIdeOptions(DEFAULT_BOARD_IDE_OPTIONS)
+      }
+    }
+    void fetchIdeOptions()
+  }, [])
 
   useEffect(() => {
     const handleProjectChange = () => {
@@ -1091,8 +1115,21 @@ const Burning: React.FC = () => {
   }
 
   const selectedRepository = repositories.find((repo) => repo.id === wizardData.software)
-  const effectiveInstallSource = selectedRepository
+  const selectedRepositoryLocation = selectedRepository ? getRepositoryLocationState(selectedRepository) : null
+  const defaultInstallSource = selectedRepository
     ? getArtifactLocationInfo(selectedRepository).installSource
+    : 'codearts'
+  const requestedInstallSource = String(wizardData.installSource || '').trim()
+  const effectiveInstallSource = selectedRepository
+    ? (
+      requestedInstallSource === 'local' && selectedRepositoryLocation?.localExists
+        ? 'local'
+        : requestedInstallSource === 'server' && selectedRepositoryLocation?.serverExists
+          ? 'server'
+          : requestedInstallSource === 'codearts' && selectedRepositoryLocation?.remoteDownloadable
+            ? 'codearts'
+            : defaultInstallSource
+    )
     : 'codearts'
   const selectedOsType = wizardData.osId ? osTypeMap[Number(wizardData.osId)] : ''
   const isHarmonyOs = selectedOsType === 'harmony'
@@ -1372,6 +1409,41 @@ const Burning: React.FC = () => {
       return false
     }
     return true
+  }
+
+  const refreshSelectedRepositoryForSubmit = async () => {
+    if (!selectedRepository?.id) return selectedRepository
+    try {
+      const res: any = await repositoryApi.getById(Number(selectedRepository.id))
+      if (res?.code === 0 && res?.data) {
+        return res.data
+      }
+    } catch {
+      // ignore and fall back to cached data
+    }
+    return selectedRepository
+  }
+
+  const confirmVersionMismatchBeforeSubmit = async (historyChecksum: string, currentChecksum: string) => {
+    if (!canOverrideTask) return false
+    return new Promise<boolean>((resolve) => {
+      Modal.confirm({
+        title: '版本一致性比对失败，是否强制覆盖执行？',
+        content: (
+          <div>
+            <div style={{ marginBottom: 8 }}>当前制品与该制品上次成功烧录的校验码不一致。</div>
+            <div style={{ marginBottom: 8 }}>制品：{selectedRepository?.name || '-'}</div>
+            <div style={{ marginBottom: 8, wordBreak: 'break-all' }}>当前校验码：{currentChecksum}</div>
+            <div style={{ wordBreak: 'break-all' }}>历史基线：{historyChecksum}</div>
+          </div>
+        ),
+        okText: '强制覆盖并继续',
+        cancelText: '取消',
+        centered: true,
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      })
+    })
   }
 
   const validateOsConfig = () => {
@@ -1685,16 +1757,18 @@ const Burning: React.FC = () => {
     const taskServerPath = String(task?.server_path || task?.file_detail?.server_path || '').trim()
     const taskServerTarget = String(task?.server_target || task?.storage_target || task?.file_detail?.server_target || task?.file_detail?.storage_target || '').trim()
     const taskDisplayPath = String(task?.display_path || task?.download_uri || task?.file_url || task?.project_key || '').trim()
-    if (installSource === 'server' && (task?.server_exists || taskServerPath || taskServerTarget)) {
+    const taskLocalExists = resolveExplicitBoolean(task?.local_exists, task?.file_detail?.local_exists) ?? Boolean(taskLocalPath)
+    const taskServerExists = resolveExplicitBoolean(task?.server_exists, task?.file_detail?.server_exists) ?? Boolean(taskServerPath || taskServerTarget)
+    if (installSource === 'server' && taskServerExists) {
       return { sourceType: '服务器', sourcePath: taskServerTarget || taskServerPath || '-' }
     }
-    if (installSource === 'local' && (task?.local_exists || taskLocalPath)) {
+    if (installSource === 'local' && taskLocalExists) {
       return { sourceType: '本地', sourcePath: taskLocalPath || '-' }
     }
-    if (task?.local_exists || taskLocalPath || task?.source_type === 'local_upload') {
+    if (taskLocalExists || task?.source_type === 'local_upload') {
       return { sourceType: '本地', sourcePath: taskLocalPath || taskDisplayPath || '-' }
     }
-    if (task?.server_exists || taskServerPath || taskServerTarget) {
+    if (taskServerExists) {
       return { sourceType: '服务器', sourcePath: taskServerTarget || taskServerPath || '-' }
     }
     if (taskDisplayPath) {
@@ -2370,6 +2444,32 @@ const Burning: React.FC = () => {
       if (platform === 'hybrid' && !validateHybridConfig()) {
         return
       }
+      const freshRepository = await refreshSelectedRepositoryForSubmit()
+      const freshLocationState = getRepositoryLocationState(freshRepository)
+      const currentInstallSource = String(wizardData.installSource || effectiveInstallSource || 'codearts').trim()
+      if (currentInstallSource === 'local' && !freshLocationState.localExists) {
+        message.warning('当前本地离线文件已不存在，请重新下载后再创建任务')
+        return
+      }
+      if (currentInstallSource === 'server' && !freshLocationState.serverExists) {
+        message.warning('当前服务器副本已不存在，请重新下载到服务器后再创建任务')
+        return
+      }
+      let overrideConfirmed = false
+      if (effectiveWizardOptions.includes('version')) {
+        const historyChecksum = String(versionBaselineChecksum || '').trim().toLowerCase()
+        const currentChecksum = String(getRepositoryChecksum(freshRepository) || '').trim().toLowerCase()
+        if (historyChecksum && currentChecksum && historyChecksum !== currentChecksum) {
+          if (!canOverrideTask) {
+            message.warning('当前制品与历史基线不一致，且你没有强制覆盖权限，无法继续提交')
+            return
+          }
+          overrideConfirmed = await confirmVersionMismatchBeforeSubmit(historyChecksum, currentChecksum)
+          if (!overrideConfirmed) {
+            return
+          }
+        }
+      }
       const activeBoardConfigKeys = new Set(
         platform === 'board' || platform === 'hybrid'
           ? supportedScriptConfigFields
@@ -2383,13 +2483,13 @@ const Burning: React.FC = () => {
       const configPayload = {
         task_type: platform,
         platform,
-        install_source: effectiveInstallSource,
+        install_source: currentInstallSource || effectiveInstallSource,
         retries: Number(wizardData.retryCount || 0),
         keep_local: effectiveWizardOptions.includes('local'),
         integrity: effectiveWizardOptions.includes('integrity'),
         version_check: effectiveWizardOptions.includes('version'),
         write_verify: effectiveWizardOptions.includes('writeVerify'),
-        expected_checksum: getRepositoryChecksum(selectedRepository) || undefined,
+        expected_checksum: getRepositoryChecksum(freshRepository) || undefined,
         history_checksum: effectiveWizardOptions.includes('version') ? versionBaselineChecksum || undefined : undefined,
         script_id: platform === 'board' || platform === 'hybrid' ? wizardData.scriptId : undefined,
         os_type: platform === 'os' ? osTypeMap[wizardData.osId] : undefined,
@@ -2451,8 +2551,8 @@ const Burning: React.FC = () => {
         extra_config: wizardData.config || undefined,
       }
       const createRes: any = await taskApi.create({
-        software_name: selectedRepository.name,
-        repository_id: selectedRepository.id,
+        software_name: freshRepository?.name || selectedRepository.name,
+        repository_id: freshRepository?.id || selectedRepository.id,
         task_type: platform || undefined,
         board_name:
           platform === 'board' || platform === 'hybrid'
@@ -2476,6 +2576,7 @@ const Burning: React.FC = () => {
         expected_checksum: configPayload.expected_checksum,
         version_check: configPayload.version_check ? 1 : 0,
         history_checksum: configPayload.history_checksum,
+        override_confirmed: overrideConfirmed ? 1 : 0,
         // 创建成功后由后端直接推上执行轨道，不会再额外生成新任务
         auto_execute: true,
       })
@@ -2872,7 +2973,7 @@ const Burning: React.FC = () => {
     if (!isWizardOpen || currentStep !== 0 || artifactRows.length === 0) return
     const selectedIndex = artifactRows.findIndex((item) => Number(item.value) === Number(wizardData.software))
     const currentRecord = selectedIndex >= 0 ? artifactRows[selectedIndex] : null
-    if (currentRecord?.installSource && currentRecord.installSource !== wizardData.installSource) {
+    if (!wizardData.installSource && currentRecord?.installSource) {
       setWizardData((prev: any) => ({
         ...prev,
         installSource: currentRecord.installSource,
@@ -3783,7 +3884,7 @@ const Burning: React.FC = () => {
                     style={{ width: '100%' }}
                     value={wizardData.ide}
                     onChange={(v) => setWizardData((prev: any) => ({ ...prev, ide: v }))}
-                    options={BOARD_IDE_OPTIONS.map((item) => ({ label: item || '不选择IDE', value: item }))}
+                    options={boardIdeOptions.map((item) => ({ label: item || '不选择IDE', value: item }))}
                   />
                 </div>
                 <div style={{ marginBottom: 16 }}>
@@ -4156,7 +4257,7 @@ const Burning: React.FC = () => {
         open={isConsistencyOpen} 
         onCancel={() => setIsConsistencyOpen(false)} 
         footer={
-          consistencyTask?.consistency_passed === 0 && !consistencyTask.override_confirmed ? (
+          consistencyTask?.consistency_passed === 0 && !consistencyTask.override_confirmed && canOverrideTask ? (
             <Space>
               <Button onClick={() => handleOverride(consistencyTask.id)}>强制覆盖</Button>
             </Space>

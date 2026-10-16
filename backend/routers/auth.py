@@ -4,25 +4,29 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+import logging
 import secrets
-import shutil
 import uuid
 import os
 import time
 from threading import Lock
 from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File
+from starlette.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
-from backend.utils.db import get_db
-from backend.utils.app_paths import get_app_data_root, get_upload_root
+from backend.utils.db import SessionLocal, get_db
+from backend.utils.app_paths import get_app_data_root, get_avatar_upload_root, get_upload_root
 from backend.models.user import User
 from backend.models.log import LoginLog
 from backend.schemas import Token, LoginRequest, TokenData, Response
+from backend.utils.image_uploads import AVATAR_MAX_BYTES, sanitize_image_upload, validate_image_filename
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 def _get_runtime_secret_file() -> Path:
     configured = str(os.environ.get("PCIDS_SECRET_KEY_FILE") or "").strip()
@@ -237,6 +241,91 @@ class UpdatePasswordRequest(BaseModel):
     old_password: str
     new_password: str
 
+
+def _get_avatar_upload_dir() -> Path:
+    return get_avatar_upload_root()
+
+
+def _build_avatar_url(request: Request, filename: str) -> str:
+    return f"{str(request.base_url).rstrip('/')}/api/auth/avatar/{filename}"
+
+
+def _safe_remove_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("avatar.file_delete_failed | path=%s", path, exc_info=True)
+
+
+def _resolve_managed_avatar_path(avatar_url: Optional[str]) -> Optional[Path]:
+    raw = str(avatar_url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    path = parsed.path if parsed.scheme and parsed.netloc else raw
+    if path.startswith("/api/auth/avatar/"):
+        filename = Path(path.rsplit("/", 1)[-1]).name
+        validate_image_filename(filename)
+        return _get_avatar_upload_dir() / filename
+    if path.startswith("/uploads/avatars/"):
+        filename = Path(path.rsplit("/", 1)[-1]).name
+        validate_image_filename(filename)
+        return _get_avatar_upload_dir() / filename
+    if path.startswith("/uploads/"):
+        filename = Path(path.rsplit("/", 1)[-1]).name
+        validate_image_filename(filename)
+        return get_upload_root() / filename
+    return None
+
+
+def sanitize_stored_avatars() -> dict[str, int]:
+    summary = {"checked": 0, "migrated": 0, "removed": 0}
+    db = SessionLocal()
+    try:
+        users = db.query(User).filter(User.avatar_url.isnot(None)).all()
+        for user in users:
+            try:
+                avatar_path = _resolve_managed_avatar_path(getattr(user, "avatar_url", None))
+            except HTTPException:
+                user.avatar_url = None
+                summary["removed"] += 1
+                continue
+            if avatar_path is None:
+                continue
+            summary["checked"] += 1
+            if not avatar_path.exists():
+                user.avatar_url = None
+                summary["removed"] += 1
+                continue
+            try:
+                sanitized = sanitize_image_upload(
+                    filename=avatar_path.name,
+                    content=avatar_path.read_bytes(),
+                    content_type=None,
+                    max_bytes=AVATAR_MAX_BYTES,
+                )
+            except HTTPException:
+                _safe_remove_file(avatar_path)
+                user.avatar_url = None
+                summary["removed"] += 1
+                continue
+
+            canonical_name = f"{uuid.uuid4().hex}.{sanitized.extension}"
+            canonical_path = _get_avatar_upload_dir() / canonical_name
+            avatar_path_resolved = avatar_path.resolve(strict=False)
+            canonical_path.write_bytes(sanitized.content)
+            user.avatar_url = f"/api/auth/avatar/{canonical_name}"
+            if avatar_path_resolved != canonical_path.resolve(strict=False):
+                _safe_remove_file(avatar_path)
+            summary["migrated"] += 1
+        db.commit()
+        return summary
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 @router.put("/me", response_model=Response)
 async def update_me(request_data: UpdateMeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """更新当前用户信息"""
@@ -260,13 +349,38 @@ async def update_password(request_data: UpdatePasswordRequest, db: Session = Dep
 @router.post("/avatar", response_model=Response)
 async def upload_avatar(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """上传头像"""
-    ext = file.filename.split('.')[-1]
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    filepath = get_upload_root() / filename
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    avatar_url = f"{str(request.base_url).rstrip('/')}/uploads/{filename}"
+    sanitized = sanitize_image_upload(
+        filename=file.filename or "",
+        content=await file.read(),
+        content_type=file.content_type,
+        max_bytes=AVATAR_MAX_BYTES,
+    )
+    filename = f"{uuid.uuid4().hex}.{sanitized.extension}"
+    filepath = _get_avatar_upload_dir() / filename
+    filepath.write_bytes(sanitized.content)
+
+    try:
+        previous_avatar_path = _resolve_managed_avatar_path(getattr(current_user, "avatar_url", None))
+    except HTTPException:
+        previous_avatar_path = None
+    avatar_url = _build_avatar_url(request, filename)
     current_user.avatar_url = avatar_url
     db.commit()
+    if previous_avatar_path and previous_avatar_path != filepath:
+        _safe_remove_file(previous_avatar_path)
     return {"code": 0, "message": "success", "data": avatar_url}
+
+
+@router.get("/avatar/{filename}")
+async def get_avatar(filename: str):
+    safe = Path(filename).name
+    validate_image_filename(safe)
+    path = _get_avatar_upload_dir() / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="头像不存在")
+    media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(
+        str(path),
+        media_type=media_type,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )

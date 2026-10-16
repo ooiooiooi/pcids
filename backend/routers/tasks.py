@@ -2377,6 +2377,26 @@ def _normalize_checksum(v: Optional[str]) -> Optional[str]:
         return None
     return "".join(str(v).strip().split()).lower()
 
+
+def _validate_submit_stage_consistency_override(task: BurningTask, repo: Optional[Repository]) -> None:
+    if not bool(getattr(task, "version_check", None)):
+        return
+    if bool(getattr(task, "override_confirmed", None)):
+        return
+    current_checksum = (
+        _normalize_checksum(getattr(task, "expected_checksum", None))
+        or _normalize_checksum(getattr(repo, "sha256", None) if repo else None)
+        or _normalize_checksum(getattr(repo, "md5", None) if repo else None)
+    )
+    history_checksum = _normalize_checksum(getattr(task, "history_checksum", None))
+    if not current_checksum or not history_checksum:
+        return
+    if evaluate_version_consistency(history_checksum, current_checksum) == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="版本一致性比对失败，请确认后再选择是否强制覆盖执行",
+        )
+
 def _safe_int(v, default: int = 0) -> int:
     return safe_int(v, default=default)
 
@@ -6862,15 +6882,15 @@ async def simulate_burning_process(
                     "请检查文件是否存在、是否被其他程序占用，以及当前服务账户是否有读取权限。\n"
                     f"制品路径：{used_file_path or '-'}"
                 )
+            elif not is_consistency_execution_allowed(task.consistency_passed, task.override_confirmed):
+                script_execution_success = False
+                script_failure_reason = "版本一致性比对失败"
+                script_execution_log = "执行前版本一致性比对失败，已停止执行脚本。"
             elif task.integrity_passed == 0:
                 script_execution_success = False
                 script_failure_reason = "完整性校验失败"
                 script_execution_log = "执行前完整性校验失败：本地制品 MD5/SHA256 与任务期望值不一致，已停止执行烧录脚本。"
                 execution_monitor.record("integrity", "failed", "执行前完整性校验失败，已停止执行脚本")
-            elif not is_consistency_execution_allowed(task.consistency_passed, task.override_confirmed):
-                script_execution_success = False
-                script_failure_reason = "版本一致性比对失败"
-                script_execution_log = "执行前版本一致性比对失败，已停止执行脚本。"
             
             if script_failure_reason:
                 pass
@@ -8118,6 +8138,7 @@ async def create_task(
     if task_type in {"board", "hybrid"}:
         _ensure_requested_script_matches_resolved_script(requested_script_id, resolved_script)
     _validate_task_creation_payload(db, task, config, selected_burner, resolved_script)
+    _validate_submit_stage_consistency_override(task, selected_repo)
     if _get_task_type(task, config) in {"board", "hybrid"}:
         if not resolved_script:
             raise HTTPException(status_code=400, detail="未找到匹配的执行脚本")

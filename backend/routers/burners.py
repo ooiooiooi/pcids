@@ -42,6 +42,14 @@ from backend.routers.repositories import _get_repository_server_transport_config
 from backend.utils.permission import require_permission
 from backend.utils.agent_security import build_agent_headers, require_agent_token
 from backend.utils.app_paths import get_app_data_root
+from backend.utils.meta_catalog import (
+    FIXED_BURNER_MODELS,
+    LEGACY_BURNER_MODEL_ALIASES,
+    ensure_supported_burner_model,
+    get_burner_capability_config,
+    normalize_burner_model_key,
+    resolve_burner_model_name,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -139,7 +147,6 @@ DEVICE_TYPE_ALIASES: list[tuple[str, list[str]]] = [
     ("J-LINK", ["j-link", "jlink"]),
     ("PWLINK2", ["pwlink", "p-wlink", "pwlink2", "pw winusb", "pw_winusb", "#pw_winusb_cmsis-dap"]),
     ("GDLINK", ["gdlink", "gd-link"]),
-    ("SWD下载器", ["swd"]),
     ("AL321", ["al321"]),
     ("ST-LINK", ["st-link", "stlink"]),
     ("HDSC CCID", ["hdsc", "ccid"]),
@@ -177,27 +184,10 @@ def _get_env_float(name: str, default: float, min_value: float = 0.5, max_value:
 REMOTE_SCAN_TIMEOUT_SECONDS = _get_env_float("PCIDS_REMOTE_BURNER_SCAN_TIMEOUT_SECONDS", 6)
 REMOTE_DISCOVERY_TIMEOUT_SECONDS = _get_env_float("PCIDS_REMOTE_BURNER_DISCOVERY_TIMEOUT_SECONDS", 6)
 BURNER_CAPABILITY_MAP = {
-    "J_LINK": {"supported_interfaces": ["SWD", "JTAG", "CJTAG"], "supported_chips": ["ARM"]},
-    "PWLINK2": {"supported_interfaces": ["SWD", "JTAG"], "supported_chips": ["ARM"]},
-    "GDLINK": {"supported_interfaces": ["SWD", "JTAG"], "supported_chips": ["ARM"]},
-    "SWD下载器": {"supported_interfaces": ["SWD"], "supported_chips": ["ARM"]},
-    "AL321": {"supported_interfaces": ["JTAG"], "supported_chips": ["FPGA"]},
-    "ST_LINK": {"supported_interfaces": ["SWD", "JTAG", "CJTAG"], "supported_chips": ["ARM"]},
-    "HDSC_CCID": {"supported_interfaces": ["UART"], "supported_chips": ["ARM"]},
-    "XDS510PLUS": {"supported_interfaces": ["JTAG"], "supported_chips": ["TI DSP"]},
-    "MPLAB_ICD_3_DV164035": {"supported_interfaces": ["ICSP"], "supported_chips": ["PIC"]},
-    "ALTERA_BLASTER_II": {"supported_interfaces": ["JTAG"], "supported_chips": ["FPGA", "CPLD"]},
-    "GOWIN_USB_CABLE": {"supported_interfaces": ["JTAG"], "supported_chips": ["FPGA"]},
+    normalize_burner_model_key(item): get_burner_capability_config(item)
+    for item in FIXED_BURNER_MODELS
 }
-LEGACY_BURNER_NAME_MAP = {
-    "J-LINK V11": "J-LINK",
-    "J_LINK V11": "J-LINK",
-    "PWLINK V2": "PWLINK2",
-    "ST_LINK": "ST-LINK",
-    "ST-LINK V2": "ST-LINK",
-    "MPLAB ICD 3": "MPLAB ICD 3 DV164035",
-    "TI XDS510 Plus": "XDS510plus",
-}
+LEGACY_BURNER_NAME_MAP = dict(LEGACY_BURNER_MODEL_ALIASES)
 
 
 def _stable_identifier(prefix: str, parts: list[str], length: int) -> str:
@@ -2817,15 +2807,7 @@ def _infer_node_scope(burner: Burner) -> str:
 
 
 def _normalize_burner_model_key(value: Optional[str]) -> str:
-    raw_value = str(value or "").strip()
-    canonical_value = LEGACY_BURNER_NAME_MAP.get(raw_value, raw_value)
-    return (
-        canonical_value
-        .replace("Ⅱ", "II")
-        .replace("-", "_")
-        .replace(" ", "_")
-        .upper()
-    )
+    return normalize_burner_model_key(value)
 
 
 def _sort_by_preset_order(values: list[str], order: list[str]) -> list[str]:
@@ -2862,7 +2844,7 @@ def _backfill_al321_binding_from_usb_binding(normalized: dict, config: dict, res
 
 def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) -> dict:
     normalized = dict(payload)
-    resolved_type = str(normalized.get("type") or getattr(existing, "type", None) or "").strip()
+    resolved_type = resolve_burner_model_name(normalized.get("type") or getattr(existing, "type", None))
     raw_config = normalized.get("config_json")
     if raw_config is None and existing is not None:
         raw_config = getattr(existing, "config_json", None)
@@ -2882,6 +2864,7 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
         normalized["sn"] = ""
         normalized["port"] = ""
     else:
+        normalized["type"] = resolved_type
         capability = BURNER_CAPABILITY_MAP.get(_normalize_burner_model_key(resolved_type)) or {}
         config["device_category"] = "burner"
         config["device_model"] = resolved_type
@@ -2955,6 +2938,19 @@ def _validate_burner_payload_required(payload: dict) -> None:
         raise HTTPException(status_code=422, detail="按 SN 识别时必须填写 SN 标识码")
     if strategy == 2 and _normalize_binding_port(payload.get("port")) in {"", "-"}:
         raise HTTPException(status_code=422, detail="按物理端口识别时必须填写物理端口")
+
+
+def _validate_supported_burner_type(
+    burner_type: Optional[str],
+    *,
+    allow_legacy_existing: bool = False,
+) -> None:
+    resolved_type = str(burner_type or "").strip()
+    if not resolved_type or resolved_type == "SD卡文件写入":
+        return
+    if allow_legacy_existing and resolved_type == "SWD下载器":
+        return
+    ensure_supported_burner_model(resolved_type)
 
 
 def _clear_conflicting_burner_port(conflict_burner: Burner, modified_by: Optional[str] = None) -> None:
@@ -3410,6 +3406,7 @@ async def create_burner(
     force_rebind_port = bool(payload.pop("force_rebind_port", False))
     payload.pop("status", None)
     payload = _normalize_burner_payload(payload)
+    _validate_supported_burner_type(payload.get("type"))
     payload = _ensure_burner_owner_node(payload)
     _validate_burner_payload_required(payload)
     conflict_burner = _validate_burner_binding_unique(db, payload, force_rebind_port=force_rebind_port)
@@ -3457,6 +3454,10 @@ async def update_burner(
     force_rebind_port = bool(raw_update_payload.pop("force_rebind_port", False))
     raw_update_payload.pop("status", None)
     update_payload = _normalize_burner_payload(raw_update_payload, existing=burner)
+    _validate_supported_burner_type(
+        update_payload.get("type", burner.type),
+        allow_legacy_existing=str(getattr(burner, "type", None) or "").strip() == "SWD下载器",
+    )
     update_payload = _ensure_burner_owner_node({
         "host_type": getattr(burner, "host_type", "local"),
         "host_address": getattr(burner, "host_address", None),

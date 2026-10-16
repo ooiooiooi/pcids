@@ -1,7 +1,7 @@
 import { Table, Button, Input, Modal, Form, App as AntdApp, Select, Checkbox, Space } from 'antd'
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons'
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { scriptApi, productApi, burnerApi } from '../../services/api'
+import { scriptApi, productApi, burnerApi, metaApi } from '../../services/api'
 import { Permission, usePermission } from '../../hooks'
 import { renderListPaginationTotal } from '../../utils/pagination'
 import { formatDateTime } from '../../utils/dateTime'
@@ -9,17 +9,7 @@ import { ActionButtonGroup, ActionLinkButton, PagePrimaryButton } from '../../co
 import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
-
-const IDE_OPTIONS = [
-  'Code Composer Studio',
-  'IAR Embedded Workbench',
-  'Keil uVision',
-  'MPLAB',
-  'STM32CubeIDE',
-  'Vitis',
-  'Vivado',
-  'WindRiver Workbench',
-]
+import { DEFAULT_IDE_OPTIONS } from '../../constants/meta'
 
 const NONE_ASSOCIATED_IDE_VALUE = '__NONE_ASSOCIATED_IDE__'
 
@@ -260,12 +250,13 @@ const Script: React.FC = () => {
   const [editingScriptType, setEditingScriptType] = useState('shell')
   const [contentModalReadOnly, setContentModalReadOnly] = useState(false)
   const [deletingScriptId, setDeletingScriptId] = useState<number | null>(null)
+  const [ideOptions, setIdeOptions] = useState<string[]>(DEFAULT_IDE_OPTIONS)
   const canViewScript = hasPermission('script:view')
   const canEditScript = hasPermission('script:edit')
   const ideSelectOptions = useMemo(() => ([
     { value: NONE_ASSOCIATED_IDE_VALUE, label: '不关联IDE' },
-    ...IDE_OPTIONS.map((ide) => ({ value: ide, label: ide })),
-  ]), [])
+    ...ideOptions.map((ide) => ({ value: ide, label: ide })),
+  ]), [ideOptions])
 
   const [products, setProducts] = useState<any[]>([])
   const [burners, setBurners] = useState<any[]>([])
@@ -297,6 +288,23 @@ const Script: React.FC = () => {
 
   useEffect(() => {
     fetchDependencies()
+  }, [])
+
+  useEffect(() => {
+    const fetchIdeOptions = async () => {
+      try {
+        const res: any = await metaApi.getIdes()
+        const options = Array.isArray(res?.data)
+          ? res.data.map((item: any) => String(item?.name || '').trim()).filter(Boolean)
+          : []
+        if (options.length > 0) {
+          setIdeOptions(options)
+        }
+      } catch {
+        setIdeOptions(DEFAULT_IDE_OPTIONS)
+      }
+    }
+    void fetchIdeOptions()
   }, [])
 
   const fetchDependencies = async () => {

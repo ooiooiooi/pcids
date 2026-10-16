@@ -68,7 +68,7 @@ class SystemScriptParameterContractTests(unittest.TestCase):
         for script_name, burner_name in [
             ("al321_fpga_mcu_flash", "AL321"),
             ("gdlink_arm_mcu_flash", "GDLINK"),
-            ("swd_downloader_arm_mcu_flash", "SWD下载器"),
+            ("swd_downloader_arm_mcu_flash", "PWLINK2"),
             ("gowin_usb_cable_fpga_flash", "Gowin USB Cable"),
         ]:
             with self.subTest(script_name=script_name):

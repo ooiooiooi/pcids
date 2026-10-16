@@ -90,7 +90,6 @@ DEFAULT_BURNER_CATALOG = [
     {"name": "J-LINK", "type": "J-LINK", "description": "Segger J-LINK 系列烧录器"},
     {"name": "PWLINK2", "type": "PWLINK2", "description": "PWLINK 系列烧录器"},
     {"name": "GDLINK", "type": "GDLINK", "description": "GD 系列烧录器"},
-    {"name": "SWD下载器", "type": "SWD下载器", "description": "通用 SWD 下载器"},
     {"name": "AL321", "type": "AL321", "description": "AL321 系列烧录器"},
     {"name": "ST-LINK", "type": "ST-LINK", "description": "ST-LINK 系列烧录器"},
     {"name": "HDSC CCID", "type": "HDSC CCID", "description": "HDSC CCID 烧录器"},
@@ -445,7 +444,7 @@ DEFAULT_SYSTEM_SCRIPT_CATALOG = [
     },
     {
         "name": "swd_downloader_arm_mcu_flash",
-        "burner": "SWD下载器",
+        "burner": "PWLINK2",
         "default_config": {
             "ide_name": "Keil uVision",
             "interface_type": "SWD",
@@ -716,7 +715,7 @@ DEFAULT_SYSTEM_SCRIPT_BINDINGS = {
         "ide_name": "Keil uVision",
         "associated_ide": "Keil uVision",
         "associated_board": "STM32F407VGT6开发板,LPC55S69评估板",
-        "associated_burner": "SWD下载器",
+        "associated_burner": "PWLINK2",
     },
     "al321_fpga_mcu_flash": {
         "ide_name": "Keil uVision",
@@ -1626,6 +1625,8 @@ DEFAULT_ACTION_PERMISSION_DEFINITIONS = [
     {"name": "删除角色", "code": "role:delete", "type": "button", "menu_id": 82},
     {"name": "清空登录日志", "code": "log/login:clear", "type": "button", "menu_id": 84},
     {"name": "清空操作日志", "code": "log/operation:clear", "type": "button", "menu_id": 85},
+    {"name": "查看元数据接口", "code": "meta:view", "type": "button", "menu_id": 8},
+    {"name": "编辑元数据接口", "code": "meta:edit", "type": "button", "menu_id": 8},
 ]
 
 VIEW_PERMISSION_NAME_OVERRIDES = {
@@ -1848,6 +1849,7 @@ DEFAULT_ROLE_PERMISSION_CODES = {
         "injection:add",
         "protocol:view",
         "protocol:execute",
+        "meta:view",
     },
     "观察员": {
         "workbench:view",
@@ -1859,6 +1861,7 @@ DEFAULT_ROLE_PERMISSION_CODES = {
         "record:view",
         "injection:view",
         "protocol:view",
+        "meta:view",
     },
 }
 

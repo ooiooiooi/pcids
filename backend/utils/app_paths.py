@@ -32,6 +32,12 @@ def get_product_upload_root() -> Path:
     return root
 
 
+def get_avatar_upload_root() -> Path:
+    root = get_upload_root() / "avatars"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def get_task_runs_root() -> Path:
     root = get_upload_root() / "task_runs"
     root.mkdir(parents=True, exist_ok=True)

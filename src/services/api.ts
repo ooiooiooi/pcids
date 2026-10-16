@@ -167,6 +167,17 @@ export const authApi = {
   }),
 }
 
+export const metaApi = {
+  getIdes: () => request.get('/meta/ides', {
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+  } as any),
+  getBurners: () => request.get('/meta/burners', {
+    skipAutoErrorMessage: true,
+    suppressBackendServiceError: true,
+  } as any),
+}
+
 // 消息服务
 export const messageApi = {
   getList: (params?: { page?: number; page_size?: number; is_read?: number }) =>
@@ -257,7 +268,7 @@ export const scriptApi = {
 export const taskApi = {
   getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string; board_name?: string; keyword?: string; project_key?: string }, silent = false) =>
     request.get('/tasks', { params, ...(silent ? { skipAutoErrorMessage: true, suppressBackendServiceError: true } : {}) } as any),
-  create: (data: { software_name: string; repository_id?: number; task_type?: 'board' | 'os' | 'hybrid'; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string; auto_execute?: boolean }) =>
+  create: (data: { software_name: string; repository_id?: number; task_type?: 'board' | 'os' | 'hybrid'; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string; override_confirmed?: number; auto_execute?: boolean }) =>
     request.post('/tasks', data, {
       // Web-session artifacts may require the user to finish a browser download first.
       timeout: 15 * 60 * 1000,

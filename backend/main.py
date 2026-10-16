@@ -46,7 +46,8 @@ from backend.utils.runtime_dependencies import (
 from backend.utils.app_paths import get_app_data_root, get_upload_root
 from backend.utils.key_management import MasterKeyError, describe_artifact_master_key_source
 from backend.models.log import OperationLog
-from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, business_sync, messages, dashboard, license
+from backend.routers import auth, users, roles, products, burners, scripts, tasks, logs, permissions, records, injections, protocol_tests, repositories, business_sync, messages, dashboard, license, meta
+from backend.routers.auth import sanitize_stored_avatars
 from backend.routers.auth import SECRET_KEY, ALGORITHM
 from backend.utils.license_manager import get_license_status, is_license_enforcement_enabled
 from jose import jwt, JWTError
@@ -509,6 +510,14 @@ class LicenseEnforcementMiddleware(BaseHTTPMiddleware):
             },
         )
 
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        return response
+
+
 def _run_startup_diagnostics() -> None:
     """Run non-critical workstation probes without delaying API readiness."""
     started_at = time.monotonic()
@@ -542,6 +551,11 @@ async def lifespan(app: FastAPI):
         logger.exception("artifact.master_key.init_failed")
         raise
     init_db()
+    try:
+        avatar_cleanup = sanitize_stored_avatars()
+        logger.info("avatar.storage.sanitized | %s", json.dumps(avatar_cleanup, ensure_ascii=False))
+    except Exception:
+        logger.exception("avatar.storage.sanitize_failed")
     tasks.recover_interrupted_tasks()
     repositories.recover_repository_auto_sync_jobs()
     await injections.recover_interrupted_injections()
@@ -609,6 +623,7 @@ app = FastAPI(
 
 app.add_middleware(OperationLogMiddleware)
 app.add_middleware(LicenseEnforcementMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # 配置 CORS（允许 Electron 访问）
 app.add_middleware(
@@ -638,6 +653,7 @@ app.include_router(repositories.router, prefix="/api/repositories", tags=["制�
 app.include_router(business_sync.router, prefix="/api/business-sync", tags=["业务数据同步"])
 app.include_router(messages.router, prefix="/api/messages", tags=["消息中心"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["工作台"])
+app.include_router(meta.router, prefix="/api/meta", tags=["二次开发元数据"])
 
 UPLOAD_ROOT = get_upload_root()
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
