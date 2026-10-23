@@ -62,7 +62,7 @@ class CodeArtsFlashAdapterTests(unittest.TestCase):
             config = {"target_config_file": ""}
             with mock.patch.dict("os.environ", {"PCIDS_BUNDLED_TOOLS_DIR": str(tools_root)}, clear=False):
                 _apply_adapter_defaults(item, config)
-            self.assertEqual(Path(config["target_config_file"]), ccxml)
+            self.assertEqual(Path(config["target_config_file"]).resolve(), ccxml.resolve())
 
     def test_hdsc_adapter_validation_uses_uart_baud_options(self):
         item = next(item for item in SYSTEM_SCRIPT_CATALOG if item["name"] == "hdsc_ccid_arm_mcu_flash")

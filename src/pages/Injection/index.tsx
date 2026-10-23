@@ -2,7 +2,7 @@ import { Card, Table, Button, Input, Modal, Form, App as AntdApp, Tag, Select, T
 import { SearchOutlined, CaretRightOutlined, PlusOutlined, ApiOutlined, DatabaseOutlined, DisconnectOutlined, SafetyCertificateOutlined, ReloadOutlined, ThunderboltOutlined, CloseOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { injectionApi, productApi } from '../../services/api'
-import { Permission } from '../../hooks'
+import { Permission, usePermission } from '../../hooks'
 import { renderListPaginationTotal } from '../../utils/pagination'
 import { formatDateTime } from '../../utils/dateTime'
 import { PagePrimaryButton } from '../../components/ActionButton'
@@ -94,6 +94,8 @@ const getConnectionTestErrorMessage = (error: any, targetIp: any, targetPort: an
 
 const Injection: React.FC = () => {
   const { message } = AntdApp.useApp()
+  const { hasPermission } = usePermission()
+  const canExecuteInjection = hasPermission('injection:add')
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const [isActionOpen, setIsActionOpen] = useState(false)
@@ -420,6 +422,7 @@ const Injection: React.FC = () => {
   }
 
   const handleExecute = async () => {
+    if (!canExecuteInjection) return
     try {
       const values = await actionForm.validateFields()
       const payload = buildScenarioPayload(values)
@@ -475,6 +478,7 @@ const Injection: React.FC = () => {
   }
 
   const handleEmergencyRecover = async (runId = monitorRunId, source: 'monitor' | 'detail' = 'monitor') => {
+    if (!canExecuteInjection) return
     if (!runId) return
     try {
       await injectionApi.recoverRun(runId)
@@ -653,14 +657,17 @@ const Injection: React.FC = () => {
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, whiteSpace: 'nowrap' }}>
             {canStop ? (
+              <Permission code="injection:add">
               <Button type="link" danger style={{ padding: 0 }} onClick={() => handleStopRun(record)}>
                 停止
               </Button>
+              </Permission>
             ) : null}
             <Button type="link" style={{ padding: 0 }} onClick={() => openRunMonitor(record.id, record.exec_status)}>
               执行详情
             </Button>
             {canDelete ? (
+              <Permission code="injection:delete">
               <ActionConfirm
                 title="删除执行记录"
                 description={`确认删除任务 ${record.task_no || record.id} 吗？`}
@@ -680,12 +687,11 @@ const Injection: React.FC = () => {
                   }
                 }}
               >
-                <Permission code="injection:delete">
                   <Button type="link" danger style={{ padding: 0 }}>
                     删除
                   </Button>
-                </Permission>
               </ActionConfirm>
+              </Permission>
             ) : null}
           </div>
         )
@@ -1143,7 +1149,7 @@ const Injection: React.FC = () => {
               type="primary"
               danger
               icon={<ThunderboltOutlined />}
-              disabled={!canRecover}
+              disabled={!canRecover || !canExecuteInjection}
               onClick={() => handleEmergencyRecover()}
               style={{ width: '100%', height: 42, borderRadius: 10, boxShadow: 'none' }}
             >
@@ -1214,6 +1220,7 @@ const Injection: React.FC = () => {
                     <Button 
                       type="primary" 
                       icon={<CaretRightOutlined />} 
+                      disabled={!canExecuteInjection}
                       onClick={() => openUnifiedModal(item)}
                       style={{ flex: 1 }}
                     >
@@ -1334,7 +1341,7 @@ const Injection: React.FC = () => {
         okText="执行"
         cancelText="取消"
         onCancel={() => { setIsActionOpen(false); actionForm.resetFields(); setInjectionType(''); setSelectedScenario(null); setStorageConnectionResult(null); setNetworkConnectionResult(null); setPermissionConnectionResult(null); setNetworkInterfaces([]) }}
-        okButtonProps={{ disabled: injectionType === 'network_error' ? !networkExecuteReady : injectionType === 'storage_full' ? !storageExecuteReady : injectionType === 'permission_error' ? !permissionExecuteReady : false }}
+        okButtonProps={{ disabled: !canExecuteInjection || (injectionType === 'network_error' ? !networkExecuteReady : injectionType === 'storage_full' ? !storageExecuteReady : injectionType === 'permission_error' ? !permissionExecuteReady : false) }}
       >
         <Form form={actionForm} layout="vertical" requiredMark={false}>
           {!['network_error', 'storage_full', 'permission_error'].includes(injectionType) && (
@@ -1419,7 +1426,7 @@ const Injection: React.FC = () => {
                 </Col>
               </Row>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12, marginBottom: 16 }}>
-                <Button type="primary" ghost loading={storageConnectionLoading} onClick={handleStorageConnectionTest}>连接测试</Button>
+                <Permission code="injection:add"><Button type="primary" ghost loading={storageConnectionLoading} onClick={handleStorageConnectionTest}>连接测试</Button></Permission>
                 {storageConnectionResult && (
                   <div style={{ color: storageConnectionResult.success ? '#19B67A' : '#F54B4B', fontWeight: 600 }}>
                     {storageConnectionResult.success ? '测试通过' : '测试失败'}
@@ -1471,7 +1478,7 @@ const Injection: React.FC = () => {
                 </Col>
               </Row>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12, marginBottom: 16 }}>
-                <Button type="primary" ghost loading={networkConnectionLoading} onClick={handleNetworkConnectionTest}>连接测试</Button>
+                <Permission code="injection:add"><Button type="primary" ghost loading={networkConnectionLoading} onClick={handleNetworkConnectionTest}>连接测试</Button></Permission>
                 {networkConnectionResult && (
                   <div style={{ color: networkConnectionResult.success ? '#19B67A' : '#F54B4B', fontWeight: 600 }}>
                     {networkConnectionResult.success ? '测试通过' : '测试失败'}
@@ -1523,7 +1530,7 @@ const Injection: React.FC = () => {
                 </Col>
               </Row>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12, marginBottom: 16 }}>
-                <Button type="primary" ghost loading={permissionConnectionLoading} onClick={handlePermissionConnectionTest}>连接测试</Button>
+                <Permission code="injection:add"><Button type="primary" ghost loading={permissionConnectionLoading} onClick={handlePermissionConnectionTest}>连接测试</Button></Permission>
                 {permissionConnectionResult && (
                   <div style={{ color: permissionConnectionResult.success ? '#19B67A' : '#F54B4B', fontWeight: 600 }}>
                     {permissionConnectionResult.success ? '测试通过' : '测试失败'}
@@ -1773,7 +1780,7 @@ const Injection: React.FC = () => {
                   type="primary"
                   danger
                   icon={<ThunderboltOutlined />}
-                  disabled={!detailRecord?.can_recover}
+                  disabled={!detailRecord?.can_recover || !canExecuteInjection}
                   loading={detailLoading}
                   onClick={() => handleEmergencyRecover(selectedRecord.id, 'detail')}
                   style={{ width: '100%', marginBottom: 16 }}
@@ -1792,7 +1799,7 @@ const Injection: React.FC = () => {
                   type="primary"
                   danger
                   icon={<ThunderboltOutlined />}
-                  disabled={!detailRecord?.can_recover}
+                  disabled={!detailRecord?.can_recover || !canExecuteInjection}
                   loading={detailLoading}
                   onClick={() => handleEmergencyRecover(selectedRecord.id, 'detail')}
                   style={{ width: '100%', marginBottom: 16 }}
@@ -1810,7 +1817,7 @@ const Injection: React.FC = () => {
                   type="primary"
                   danger
                   icon={<ThunderboltOutlined />}
-                  disabled={!detailRecord?.can_recover}
+                  disabled={!detailRecord?.can_recover || !canExecuteInjection}
                   loading={detailLoading}
                   onClick={() => handleEmergencyRecover(selectedRecord.id, 'detail')}
                   style={{ width: '100%', marginBottom: 16 }}

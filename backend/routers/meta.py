@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
@@ -22,10 +23,11 @@ from backend.utils.meta_catalog import (
 from backend.utils.permission import require_permission
 
 
-def _meta_error_response(status_code: int, message: str, data: Any = None) -> JSONResponse:
+def _meta_error_response(status_code: int, message: str, data: Any = None, headers=None) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"code": status_code, "message": message, "data": data},
+        headers=headers,
     )
 
 
@@ -37,9 +39,11 @@ class MetaRoute(APIRoute):
             try:
                 return await original_handler(request)
             except RequestValidationError as exc:
-                return _meta_error_response(422, "请求参数不符合要求", exc.errors())
+                errors = exc.errors()
+                status = 400 if any(item.get("type") == "extra_forbidden" for item in errors) else 422
+                return _meta_error_response(status, "请求参数不符合要求", jsonable_encoder(errors))
             except HTTPException as exc:
-                return _meta_error_response(int(exc.status_code or 400), str(exc.detail or "请求失败"))
+                return _meta_error_response(int(exc.status_code or 400), str(exc.detail or "请求失败"), headers=exc.headers)
 
         return custom_handler
 
@@ -64,7 +68,7 @@ async def get_meta_ides(
     _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("meta:view")),
 ):
-    return {"code": 0, "message": "success", "data": list_meta_ides()}
+    return {"code": 0, "message": "success", "data": list_meta_ides(_db)}
 
 
 @router.post("/ides", response_model=Response)
@@ -74,7 +78,7 @@ async def post_meta_ides(
     _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("meta:edit")),
 ):
-    return {"code": 0, "message": "success", "data": create_meta_ide(payload.name)}
+    return {"code": 0, "message": "success", "data": create_meta_ide(_db, payload.name)}
 
 
 @router.get("/burners", response_model=Response)
@@ -83,7 +87,7 @@ async def get_meta_burners(
     _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("meta:view")),
 ):
-    return {"code": 0, "message": "success", "data": list_meta_burners()}
+    return {"code": 0, "message": "success", "data": list_meta_burners(_db)}
 
 
 @router.post("/burners", response_model=Response)
@@ -93,4 +97,4 @@ async def post_meta_burners(
     _current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("meta:edit")),
 ):
-    return {"code": 0, "message": "success", "data": create_meta_burner(payload.name, payload.type)}
+    return {"code": 0, "message": "success", "data": create_meta_burner(_db, payload.name, payload.type)}

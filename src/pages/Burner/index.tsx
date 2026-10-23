@@ -176,8 +176,8 @@ const buildBurnerPayload = (values: any, strategy: number) => {
   const config = {
     device_category: deviceCategory,
     device_model: deviceCategory === 'burner' ? values.device_model || '' : '',
-    supported_interfaces: deviceCategory === 'burner' ? burnerCapability.supported_interfaces : [],
-    supported_chips: deviceCategory === 'burner' ? burnerCapability.supported_chips : [],
+    supported_interfaces: deviceCategory === 'burner' ? (deviceModel === 'SWD下载器' ? values.supported_interfaces || [] : burnerCapability.supported_interfaces) : [],
+    supported_chips: deviceCategory === 'burner' ? (deviceModel === 'SWD下载器' ? values.supported_chips || [] : burnerCapability.supported_chips) : [],
     supported_card_types: deviceCategory === 'sd_reader' ? values.supported_card_types || [] : [],
     mount_path: deviceCategory === 'sd_reader' ? values.mount_path || '' : '',
     usb_binding: deviceCategory === 'burner' ? values.usb_binding || {} : {},
@@ -431,6 +431,7 @@ const Burner: React.FC = () => {
       editForm.setFieldsValue({ supported_interfaces: [], supported_chips: [], sn: undefined, port: undefined })
       return
     }
+    if (editDeviceModel === 'SWD下载器') return
     const capability = getBurnerCapabilityConfig(editDeviceModel)
     editForm.setFieldsValue({
       supported_interfaces: capability.supported_interfaces,

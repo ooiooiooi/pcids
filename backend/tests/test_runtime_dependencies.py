@@ -40,8 +40,8 @@ class RuntimeDependenciesTest(unittest.TestCase):
                 configure_bundled_tools.cache_clear()
                 configured = configure_bundled_tools()
 
-                self.assertEqual(configured["STLINK_UTILITY_CLI"], str(external.resolve()))
-                self.assertEqual(os.environ["STLINK_UTILITY_CLI"], str(external.resolve()))
+                self.assertEqual(Path(configured["STLINK_UTILITY_CLI"]).resolve(), external.resolve())
+                self.assertEqual(Path(os.environ["STLINK_UTILITY_CLI"]).resolve(), external.resolve())
 
     def test_bundled_hdc_tool_is_discovered(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -137,7 +137,7 @@ class RuntimeDependenciesTest(unittest.TestCase):
             self.assertEqual(readiness_by_name["PWLINK2"]["status"], "ok")
             self.assertEqual(readiness_by_name["PWLINK2"]["configured_mode"], "file")
             self.assertTrue(str(readiness_by_name["PWLINK2"]["configured_path"]).endswith("pyocd.exe"))
-            self.assertEqual(readiness_by_name["SWD Downloader"]["status"], "ok")
+            self.assertNotIn("SWD Downloader", readiness_by_name)
 
     def test_burner_readiness_accepts_bundled_pyocd_for_jlink_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -168,7 +168,7 @@ class RuntimeDependenciesTest(unittest.TestCase):
             root = Path(temp_dir)
             bundled_root = root / "burners"
             openfpgaloader = bundled_root / "AL321" / "openFPGALoader" / "openFPGALoader.exe"
-            driver_tool = bundled_root / "AL321" / "drivers" / "AL321_WinUSB_Driver_Tool.exe"
+            driver_tool = bundled_root / "AL321" / "drivers" / "al321_winusb_driver_tool.exe"
             switch_script = bundled_root / "AL321" / "drivers" / "switch-al321-driver.ps1"
             openfpgaloader.parent.mkdir(parents=True)
             driver_tool.parent.mkdir(parents=True)
@@ -195,7 +195,7 @@ class RuntimeDependenciesTest(unittest.TestCase):
             self.assertTrue(str(readiness_by_name["AL321"]["configured_path"]).endswith("openFPGALoader.exe"))
             self.assertTrue(readiness_by_name["AL321"]["driver_ready"])
             self.assertTrue(
-                any(str(item).endswith("AL321_WinUSB_Driver_Tool.exe") for item in readiness_by_name["AL321"]["driver_artifacts"])
+                any(str(item).lower().endswith("al321_winusb_driver_tool.exe") for item in readiness_by_name["AL321"]["driver_artifacts"])
             )
 
     def test_bundled_program_flash_is_discovered_for_al321(self):
@@ -340,7 +340,7 @@ class RuntimeDependenciesTest(unittest.TestCase):
                     "LOCALAPPDATA": str(root / "LocalAppData"),
                 },
                 clear=False,
-            ):
+            ), patch.dict(COMMON_TOOL_SEARCH_PATHS, {"JLINK_EXE": [str(jlink_root)]}, clear=False):
                 configure_bundled_tools.cache_clear()
                 readiness = build_burner_tool_readiness()
 
@@ -366,14 +366,14 @@ class RuntimeDependenciesTest(unittest.TestCase):
                 run_mock.return_value.stdout = "recovered"
                 run_mock.return_value.stderr = ""
                 configure_bundled_tools.cache_clear()
-                self.assertEqual(get_al321_driver_state_file(), state_file)
+                self.assertEqual(get_al321_driver_state_file().resolve(), state_file.resolve())
                 recovered = recover_pending_al321_driver_state()
 
             self.assertTrue(recovered)
             args = run_mock.call_args.args[0]
             self.assertIn("-Mode", args)
             self.assertIn("recover-pending", args)
-            self.assertIn(str(script_path), args)
+            self.assertIn(str(script_path.resolve()), args)
 
     def test_al321_missing_driver_switch_script_is_reported_before_execution(self):
         with tempfile.TemporaryDirectory() as temp_dir:

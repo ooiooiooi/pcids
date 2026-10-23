@@ -74,6 +74,11 @@ class RepositoryAutoSyncTests(unittest.TestCase):
         self.engine.dispose()
 
     def test_apply_server_delete_keeps_local_copy(self):
+        import tempfile
+        local_copy = tempfile.NamedTemporaryFile(suffix=".pcenc")
+        self.addCleanup(local_copy.close)
+        local_copy.write(b"valid local copy")
+        local_copy.flush()
         project_key = "proj_sync-delete"
         repo = Repository(
             name="BOOT.bin",
@@ -87,7 +92,7 @@ class RepositoryAutoSyncTests(unittest.TestCase):
             repo,
             {},
             local_exists=True,
-            local_path="Z:/pcids-test/BOOT.bin.pcenc",
+            local_path=local_copy.name,
             server_exists=True,
             server_path="C:/pcids-artifacts/BOOT.bin.pcenc",
             server_target="127.0.0.1:8000",

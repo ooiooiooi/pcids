@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import HTTPException
+from sqlalchemy import exists, func, insert, literal, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from backend.utils.app_paths import get_app_data_root
+from backend.models.ide import IDE
+from backend.models.burner import Burner
 
 
 DEFAULT_IDE_NAMES = [
@@ -76,10 +81,31 @@ def _load_catalog() -> dict[str, list[dict[str, Any]]]:
     return {"ides": list(ides), "burners": list(burners)}
 
 
-def _save_catalog(payload: dict[str, list[dict[str, Any]]]) -> None:
-    path = _meta_catalog_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def seed_meta_catalog(db: Session) -> None:
+    """Import the old catalogue once without replacing registered devices."""
+    catalog = _load_catalog()
+    used = {item.name_key for item in db.query(Burner).all() if item.name_key}
+    for burner in db.query(Burner).order_by(Burner.id).all():
+        key = burner.name.strip().casefold()
+        if not burner.name_key and key not in used:
+            burner.name_key = key
+            used.add(key)
+    db.flush()
+    for name in DEFAULT_IDE_NAMES + [str(item.get("name") or "").strip() for item in catalog["ides"]]:
+        if name:
+            db.execute(insert(IDE).from_select(
+                ["name", "name_key"],
+                select(literal(name), literal(name.casefold())).where(
+                    ~exists().where(IDE.name_key == name.casefold()),
+                ),
+            ))
+    for item in catalog["burners"]:
+        name = str(item.get("name") or "").strip()
+        model = resolve_burner_model_name(item.get("type"))
+        if name and model in FIXED_BURNER_MODELS and name.casefold() not in used:
+            _insert_burner_if_missing(db, name, model)
+            used.add(name.casefold())
+    db.commit()
 
 
 def normalize_burner_model_key(value: Optional[str]) -> str:
@@ -133,75 +159,77 @@ def _normalize_entry_name(name: Any) -> str:
     return str(name or "").strip()
 
 
-def list_meta_ides() -> list[dict[str, Any]]:
-    catalog = _load_catalog()
-    names: list[str] = []
-    for item in DEFAULT_IDE_NAMES:
-        if item not in names:
-            names.append(item)
-    for item in catalog["ides"]:
-        name = _normalize_entry_name(item.get("name"))
-        if name and name.lower() not in {existing.lower() for existing in names}:
-            names.append(name)
-    return [{"name": item} for item in names]
+def list_meta_ides(db: Session) -> list[dict[str, Any]]:
+    return [{"id": item.id, "name": item.name} for item in db.query(IDE).order_by(IDE.id).all()]
 
 
-def create_meta_ide(name: Any) -> dict[str, Any]:
+def create_meta_ide(db: Session, name: Any) -> dict[str, Any]:
     resolved_name = _normalize_entry_name(name)
     if not resolved_name:
         raise HTTPException(status_code=422, detail="IDE 名称不能为空")
-    existing_names = {item["name"].lower() for item in list_meta_ides()}
-    if resolved_name.lower() in existing_names:
-        raise HTTPException(status_code=409, detail="IDE 名称已存在")
+    if len(resolved_name) > 100:
+        raise HTTPException(status_code=422, detail="IDE 名称最长100字符")
+    item = IDE(name=resolved_name, name_key=resolved_name.casefold())
+    db.add(item)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="IDE 名称已存在") from exc
+    db.refresh(item)
+    return {"id": item.id, "name": item.name}
 
-    catalog = _load_catalog()
-    catalog["ides"].append({"name": resolved_name})
-    _save_catalog(catalog)
-    return {"name": resolved_name}
 
-
-def list_meta_burners() -> list[dict[str, Any]]:
-    catalog = _load_catalog()
+def list_meta_burners(db: Session) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-
-    for model_name in FIXED_BURNER_MODELS:
-        capability = get_burner_capability_config(model_name)
-        items.append({
-            "name": model_name,
-            "type": model_name,
-            **capability,
-        })
-        seen_names.add(model_name.lower())
-
-    for item in catalog["burners"]:
-        name = _normalize_entry_name(item.get("name"))
-        burner_type = resolve_burner_model_name(item.get("type"))
-        if not name or name.lower() in seen_names:
-            continue
+    for item in db.query(Burner).order_by(Burner.id).all():
+        name = item.name
+        burner_type = resolve_burner_model_name(item.type)
         if burner_type not in FIXED_BURNER_MODELS:
             continue
         capability = get_burner_capability_config(burner_type)
         items.append({
+            "id": item.id,
             "name": name,
             "type": burner_type,
             **capability,
         })
-        seen_names.add(name.lower())
     return items
 
 
-def create_meta_burner(name: Any, burner_type: Any) -> dict[str, Any]:
+def _insert_burner_if_missing(db: Session, name: str, model: str) -> bool:
+    # A single INSERT ... SELECT serializes duplicate checks with the SQLite write.
+    result = db.execute(insert(Burner).from_select(
+        ["name", "name_key", "type", "status", "is_enabled", "host_type", "strategy", "config_json"],
+        select(literal(name), literal(name.casefold()), literal(model), literal(0), literal(1), literal("local"), literal(1),
+               literal(json.dumps(get_burner_capability_config(model)))).where(
+            ~exists().where(func.lower(func.trim(Burner.name)) == name.lower()),
+        ),
+    ))
+    return result.rowcount == 1
+
+
+def create_meta_burner(db: Session, name: Any, burner_type: Any) -> dict[str, Any]:
     resolved_name = _normalize_entry_name(name)
     if not resolved_name:
         raise HTTPException(status_code=422, detail="烧录器名称不能为空")
-    resolved_type = ensure_supported_burner_model(burner_type)
-    existing_names = {item["name"].lower() for item in list_meta_burners()}
-    if resolved_name.lower() in existing_names:
+    if len(resolved_name) > 100:
+        raise HTTPException(status_code=422, detail="烧录器名称最长100字符")
+    if burner_type not in FIXED_BURNER_MODELS:
+        raise HTTPException(status_code=422, detail="设备型号仅支持固定 10 种")
+    resolved_type = str(burner_type)
+    if any(item.name.strip().casefold() == resolved_name.casefold() for item in db.query(Burner).all()):
         raise HTTPException(status_code=409, detail="烧录器名称已存在")
-
-    catalog = _load_catalog()
-    catalog["burners"].append({"name": resolved_name, "type": resolved_type})
-    _save_catalog(catalog)
+    try:
+        inserted = _insert_burner_if_missing(db, resolved_name, resolved_type)
+        if inserted:
+            db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="烧录器名称已存在") from exc
+    if not inserted:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="烧录器名称已存在")
+    item = db.query(Burner).filter(Burner.name == resolved_name).first()
     capability = get_burner_capability_config(resolved_type)
-    return {"name": resolved_name, "type": resolved_type, **capability}
+    return {"id": item.id, "name": resolved_name, "type": resolved_type, **capability}

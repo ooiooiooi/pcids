@@ -33,6 +33,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from jose import JWTError, jwt
 
 from backend.utils.db import get_db, ensure_schema, generate_task_no
 from backend.models.user import User
@@ -44,7 +45,7 @@ from backend.models.script import Script
 from backend.models.log import Record, OperationLog
 from backend.models.message import Message
 from backend.schemas import TaskCreate, TaskTerminateRequest, TaskUpdate, Response, PaginatedResponse
-from backend.routers.auth import get_current_user
+from backend.routers.auth import get_current_user, SECRET_KEY, ALGORITHM
 from backend.routers.burners import (
     REMOTE_SCAN_TIMEOUT_SECONDS,
     _build_scan_result,
@@ -1887,14 +1888,24 @@ def _ensure_repository_file_available_for_execution(
     config = dict(config or {})
     location_state = _get_repository_location_state(repo, _safe_json_loads(getattr(repo, "file_detail_json", None)))
     install_source = str(config.get("install_source") or "").strip().lower()
+    if install_source not in {"", "local", "server", "codearts"}:
+        raise HTTPException(status_code=400, detail="不支持的制品来源")
+    created_local_copy = False
+    created_server_copy = False
+    if install_source == "local" and not _resolve_existing_local_repository_artifact_path(repo):
+        raise HTTPException(status_code=400, detail="当前本地离线文件已不存在，请重新下载或明确选择其他来源")
+    if install_source == "server":
+        if not location_state.get("server_exists") or not location_state.get("server_path"):
+            raise HTTPException(status_code=400, detail="当前服务器副本已不存在，请重新下载或明确选择其他来源")
+        created_local_copy = not bool(location_state.get("local_exists"))
+        repo = _download_repository_artifact_from_server_storage(db, repo)
+        location_state = _get_repository_location_state(repo, _safe_json_loads(repo.file_detail_json))
     retain_downloaded_artifact = bool(config.get("keep_local"))
     storage_mode = _resolve_artifact_storage_mode(
         install_source,
         getattr(burner, "host_type", None) if burner else None,
         getattr(burner, "agent_url", None) if burner else None,
     )
-    created_local_copy = False
-    created_server_copy = False
     execution_trace_id = f"task-artifact-prepare-{uuid.uuid4().hex[:12]}"
     logger.info(
         "task.artifact.prepare.begin | %s",
@@ -1920,11 +1931,7 @@ def _ensure_repository_file_available_for_execution(
         created_server_copy = True
         location_state = _get_repository_location_state(repo, _safe_json_loads(getattr(repo, "file_detail_json", None)))
 
-    raw_file_url = str(getattr(repo, "file_url", None) or "").strip()
-    local_file_ready = False
-    if raw_file_url:
-        candidate = raw_file_url.lstrip("/")
-        local_file_ready = os.path.exists(candidate) and os.path.isfile(candidate)
+    local_file_ready = bool(_resolve_existing_local_repository_artifact_path(repo))
 
     if not local_file_ready:
         if location_state.get("server_exists") and location_state.get("server_path"):
@@ -1965,6 +1972,8 @@ def _resolve_existing_local_repository_artifact_path(repo: Optional[Repository])
     if not repo:
         return None
     location_state = _get_repository_location_state(repo, _safe_json_loads(getattr(repo, "file_detail_json", None)))
+    if not location_state.get("local_exists"):
+        return None
     candidates: list[str] = []
     local_path = str(location_state.get("local_path") or "").strip()
     repo_file_url = str(getattr(repo, "file_url", None) or "").strip()
@@ -1973,7 +1982,7 @@ def _resolve_existing_local_repository_artifact_path(repo: Optional[Repository])
     if repo_file_url and repo_file_url not in candidates:
         candidates.append(repo_file_url)
     for candidate in candidates:
-        normalized = candidate.lstrip("/")
+        normalized = candidate if os.path.isabs(candidate) and os.path.isfile(candidate) else candidate.lstrip("/")
         if os.path.exists(normalized) and os.path.isfile(normalized):
             return normalized
     return None
@@ -1989,6 +1998,8 @@ def _ensure_repository_local_file_available_for_runtime(
 ) -> tuple[Optional[Repository], Optional[str]]:
     if not repo:
         return None, None
+    config = dict(config or {})
+    offline = str(config.get("install_source") or "").lower() in {"local", "server"}
     existing_local_path = _resolve_existing_local_repository_artifact_path(repo)
     if existing_local_path:
         expected = _normalize_checksum(getattr(repo, "sha256", None)) or _normalize_checksum(getattr(repo, "md5", None))
@@ -2011,11 +2022,16 @@ def _ensure_repository_local_file_available_for_runtime(
                         ensure_ascii=False,
                     ),
                 )
+                if offline:
+                    # Keep the actual file so execution can record both hashes and the failed check.
+                    return repo, existing_local_path
                 if current_user is not None:
                     repo = _refresh_repository_artifact_after_key_failure(db, repo, current_user, existing_local_path)
                     return repo, _resolve_existing_local_repository_artifact_path(repo)
                 return repo, None
             except (ArtifactDecryptionError, ArtifactKeyValidationError, ArtifactPermissionDeniedError):
+                if offline:
+                    raise HTTPException(status_code=400, detail="离线制品无法安全解密，请重新下载")
                 if current_user is not None:
                     repo = _refresh_repository_artifact_after_key_failure(db, repo, current_user, existing_local_path)
                     return repo, _resolve_existing_local_repository_artifact_path(repo)
@@ -2031,9 +2047,11 @@ def _ensure_repository_local_file_available_for_runtime(
         getattr(burner, "agent_url", None) if burner else None,
     )
 
+    if install_source == "local":
+        raise HTTPException(status_code=400, detail="选定的本地离线制品已不存在，请重新下载或明确选择其他来源")
     if location_state.get("server_exists") and location_state.get("server_path"):
         repo = _download_repository_artifact_from_server_storage(db, repo)
-    elif current_user:
+    elif current_user and not offline:
         repo = _download_repository_artifact_to_local_storage(db, repo, current_user)
     else:
         logger.warning(
@@ -2048,7 +2066,7 @@ def _ensure_repository_local_file_available_for_runtime(
                 ensure_ascii=False,
             ),
         )
-        return repo, None
+        raise HTTPException(status_code=400, detail="选定的离线制品已不存在，请重新下载或明确选择其他来源")
 
     return repo, _resolve_existing_local_repository_artifact_path(repo)
 
@@ -2105,7 +2123,7 @@ def _refresh_repository_artifact_after_key_failure(
 def _cleanup_repository_artifacts_after_execution(
     db: Session,
     repo: Optional[Repository],
-    task: BurningTask,
+    task: Optional[BurningTask],
     config: Optional[dict],
 ) -> None:
     if not repo:
@@ -2143,11 +2161,12 @@ def _cleanup_repository_artifacts_after_execution(
             server_path=next_server_path,
             server_target=next_server_target,
         )
-        task_config = _parse_task_config(task)
-        task_config["cleanup_local_artifact_after_execution"] = False
-        task_config["cleanup_server_artifact_after_execution"] = False
-        task.config_json = json.dumps(task_config, ensure_ascii=False)
-        db.add(task)
+        if task:
+            task_config = _parse_task_config(task)
+            task_config["cleanup_local_artifact_after_execution"] = False
+            task_config["cleanup_server_artifact_after_execution"] = False
+            task.config_json = json.dumps(task_config, ensure_ascii=False)
+            db.add(task)
         if cleanup_server and location_state["server_exists"]:
             _commit_repository_runtime_state_with_outbox(
                 db,
@@ -2179,6 +2198,7 @@ async def execute_task(
     task_id: int,
     background_tasks: BackgroundTasks,
     request: Request,
+    payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:add"))
@@ -2194,26 +2214,23 @@ async def execute_task(
         raise HTTPException(status_code=400, detail="这个任务正在执行中，请等待当前执行完成后再试")
 
     task_config = _parse_task_config(source_task)
-    repo = db.query(Repository).filter(Repository.id == source_task.repository_id).first() if source_task.repository_id else None
-    selected_burner = db.query(Burner).filter(Burner.id == source_task.burner_id).first() if getattr(source_task, "burner_id", None) else None
-    if repo and str(getattr(repo, "project_key", "") or "").strip():
-        _require_project_permission(db, str(repo.project_key), current_user, "mark_flash_file")
-    repo, artifact_cleanup_plan = await asyncio.to_thread(
-        _ensure_repository_file_available_for_execution,
-        db,
-        repo,
-        current_user,
-        burner=selected_burner,
-        config=task_config,
-    )
+    old_token = payload.get("override_token") or task_config.get("_override_token")
+    verification_task = BurningTask(**TaskCreate.model_validate(source_task, from_attributes=True).model_dump(exclude={"auto_execute", "override_token"}))
+    repo, selected_burner, task_config = _prepare_submission_config(db, verification_task, current_user)
+    checks = await _submission_checks(db, verification_task, repo, task_config, selected_burner, current_user)
+    _validate_submit_stage_consistency_override(verification_task, task_config, checks, current_user, old_token)
     if not repo or not repo.file_url:
         raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
 
-    task_config = {
-        **task_config,
-        **artifact_cleanup_plan,
-    }
     cloned_task = _clone_task_for_execution(db, source_task, current_user, task_config)
+    cloned_task.override_confirmed = verification_task.override_confirmed
+    cloned_task.expected_checksum = verification_task.expected_checksum
+    cloned_task.history_checksum = verification_task.history_checksum
+    cloned_task.burner_id = verification_task.burner_id
+    cloned_task.script_id = verification_task.script_id
+    cloned_task.agent_url = verification_task.agent_url
+    cloned_task.integrity = verification_task.integrity
+    cloned_task.version_check = verification_task.version_check
     task_config = {
         **task_config,
         "source_task_id": source_task.id,
@@ -2221,6 +2238,15 @@ async def execute_task(
         "execution_task_id": cloned_task.id,
         "execution_task_no": cloned_task.task_no,
     }
+
+    if not checks["integrity_passed"]:
+        _record_submission_integrity_failure(cloned_task, task_config, checks)
+        db.commit()
+        _cleanup_repository_artifacts_after_execution(db, repo, cloned_task, task_config)
+        return {
+            "code": 0, "message": "完整性校验失败，已记录校验码，未执行设备操作",
+            "data": {"id": cloned_task.id, "task_no": cloned_task.task_no, "source_task_id": source_task.id},
+        }
 
     await _start_task_execution(
         db=db,
@@ -2378,24 +2404,143 @@ def _normalize_checksum(v: Optional[str]) -> Optional[str]:
     return "".join(str(v).strip().split()).lower()
 
 
-def _validate_submit_stage_consistency_override(task: BurningTask, repo: Optional[Repository]) -> None:
-    if not bool(getattr(task, "version_check", None)):
-        return
-    if bool(getattr(task, "override_confirmed", None)):
-        return
-    current_checksum = (
-        _normalize_checksum(getattr(task, "expected_checksum", None))
-        or _normalize_checksum(getattr(repo, "sha256", None) if repo else None)
-        or _normalize_checksum(getattr(repo, "md5", None) if repo else None)
+def _repository_baseline(db: Session, repository_id: Optional[int]) -> tuple[Optional[int], Optional[str]]:
+    baseline = (db.query(BurningTask)
+                .filter(BurningTask.repository_id == repository_id, BurningTask.status == int(TaskStatus.SUCCESS))
+                .order_by(BurningTask.finished_at.desc(), BurningTask.id.desc()).first()) if repository_id else None
+    checksum = (_normalize_checksum(getattr(baseline, "current_sha256", None))
+                or _normalize_checksum(getattr(baseline, "current_md5", None)))
+    return getattr(baseline, "id", None), checksum
+
+
+def _override_binding(task: BurningTask, config: dict) -> str:
+    transient = {
+        "_override_token", "history_checksum", "override_confirmed",
+        "source_task_id", "source_task_no", "execution_task_id", "execution_task_no", "auto_execute",
+        "artifact_storage_mode", "retain_downloaded_artifact", "storage_location",
+        "cleanup_local_artifact_after_execution", "cleanup_server_artifact_after_execution",
+    }
+    payload = {key: getattr(task, key, None) for key in (
+        "repository_id", "task_type", "product_id", "burner_id", "script_id",
+        "target_ip", "target_port", "agent_url", "integrity", "version_check", "expected_checksum",
+    )}
+    payload["config"] = {key: value for key, value in config.items() if key not in transient}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _require_override_permission(user: User) -> None:
+    if getattr(user, "status", 1) != 1 or getattr(getattr(user, "role", None), "status", 1) != 1:
+        raise HTTPException(status_code=403, detail="账号或角色已被禁用")
+    permissions = user.get_permissions()
+    if "all" not in permissions and "burning:override" not in permissions:
+        raise HTTPException(status_code=403, detail="没有强制覆盖权限")
+
+
+def _execution_revision(db: Session, task: BurningTask) -> str:
+    snapshots = {}
+    for model, identifier, fields in (
+        (Script, task.script_id, ("content", "default_config_json", "task_type")),
+        (Burner, task.burner_id, ("type", "sn", "port", "agent_url", "host_type", "host_address", "config_json")),
+        (Product, task.product_id, ("chip_model", "burn_interface", "config_description")),
+    ):
+        row = db.query(model).populate_existing().filter(model.id == identifier).first() if identifier else None
+        snapshots[model.__tablename__] = {key: getattr(row, key, None) for key in fields} if row else None
+    return hashlib.sha256(json.dumps(snapshots, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _issue_override_token(task: BurningTask, config: dict, user: User, baseline_id, baseline, md5v, sha256v) -> str:
+    return jwt.encode({
+        "purpose": "task-override", "user_id": user.id, "repository_id": task.repository_id,
+        "token_version": int(getattr(user, "token_version", 0) or 0),
+        "binding": _override_binding(task, config), "baseline_id": baseline_id,
+        "baseline": baseline, "md5": md5v, "sha256": sha256v,
+        "exp": int(time.time()) + 600,
+    }, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _verify_override_token(token: Optional[str], task: BurningTask, config: dict, user: User,
+                           baseline_id, baseline, md5v, sha256v) -> bool:
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    expected = {
+        "purpose": "task-override", "user_id": user.id, "repository_id": task.repository_id,
+        "token_version": int(getattr(user, "token_version", 0) or 0),
+        "binding": _override_binding(task, config), "baseline_id": baseline_id,
+        "baseline": baseline, "md5": md5v, "sha256": sha256v,
+    }
+    return all(payload.get(key) == value for key, value in expected.items())
+
+
+async def _submission_checks(db: Session, task: BurningTask, repo: Repository, config: dict,
+                             burner: Optional[Burner], user: User, *, preflight_only: bool = False) -> dict:
+    task.integrity = int(bool(config.get("integrity", task.integrity)))
+    task.version_check = int(bool(config.get("version_check", task.version_check)))
+    task.keep_local = int(bool(config.get("keep_local", task.keep_local)))
+    task.expected_checksum = _get_repository_checksum(repo) or None
+    config["expected_checksum"] = task.expected_checksum
+    config["_execution_revision"] = _execution_revision(db, task)
+    baseline_id, baseline = _repository_baseline(db, task.repository_id)
+    task.history_checksum = baseline
+    config["history_checksum"] = baseline
+    preparation_config = {**config, "keep_local": False} if preflight_only else config
+    repo, cleanup_plan = await asyncio.to_thread(
+        _ensure_repository_file_available_for_execution, db, repo, user, burner=burner, config=preparation_config,
     )
-    history_checksum = _normalize_checksum(getattr(task, "history_checksum", None))
-    if not current_checksum or not history_checksum:
-        return
-    if evaluate_version_consistency(history_checksum, current_checksum) == 0:
-        raise HTTPException(
-            status_code=409,
-            detail="版本一致性比对失败，请确认后再选择是否强制覆盖执行",
-        )
+    if not preflight_only:
+        config.update(cleanup_plan)
+    path = _resolve_existing_local_repository_artifact_path(repo)
+    try:
+        if not path:
+            raise OSError("Artifact missing")
+        md5v, sha256v, _ = await asyncio.to_thread(_compute_decrypted_artifact_hashes, path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="制品校验值计算失败，请检查文件或重新下载") from exc
+    finally:
+        if preflight_only:
+            _cleanup_repository_artifacts_after_execution(db, repo, None, cleanup_plan)
+    baseline_id, baseline = _repository_baseline(db, task.repository_id)
+    task.history_checksum = baseline
+    config["history_checksum"] = baseline
+    if task.version_check and not baseline:
+        raise HTTPException(status_code=409, detail="版本一致性比对失败：最新成功烧录基线已不可用")
+    integrity_passed = (not task.integrity or task.expected_checksum in {md5v, sha256v})
+    current = md5v if baseline and len(baseline) == 32 else sha256v
+    mismatch = bool(task.version_check and baseline and baseline != current)
+    return {"baseline_id": baseline_id, "baseline": baseline, "md5": md5v, "sha256": sha256v,
+            "integrity_passed": integrity_passed, "version_mismatch": mismatch}
+
+
+def _validate_submit_stage_consistency_override(task: BurningTask, config: dict, checks: dict,
+                                                user: User, token: Optional[str]) -> None:
+    task.override_confirmed = 0
+    config.pop("_override_token", None)
+    if checks["version_mismatch"]:
+        if not token:
+            raise HTTPException(status_code=409, detail="版本一致性比对失败，请确认后再选择是否强制覆盖执行")
+        _require_override_permission(user)
+        if not _verify_override_token(token, task, config, user, checks["baseline_id"], checks["baseline"], checks["md5"], checks["sha256"]):
+            raise HTTPException(status_code=409, detail="制品、基线或配置已变化，请重新确认强制覆盖")
+        task.override_confirmed = 1
+        config["_override_token"] = token
+    if not checks["integrity_passed"] and not task.override_confirmed:
+        raise HTTPException(status_code=400, detail="完整性校验失败")
+
+
+def _record_submission_integrity_failure(task: BurningTask, config: dict, checks: dict) -> None:
+    """Keep forensic hashes without scheduling any device or environment script."""
+    task.config_json = json.dumps(config, ensure_ascii=False)
+    task.current_md5 = checks["md5"]
+    task.current_sha256 = checks["sha256"]
+    task.integrity_passed = 0
+    task.consistency_passed = 0 if checks["version_mismatch"] else 1
+    task.status = int(TaskStatus.FAILED)
+    task.finished_at = datetime.now()
+    task.last_error = "完整性校验失败"
+    task.result = "完整性校验失败，已记录制品 MD5/SHA256，未执行烧录、安装、重试或回滚。"
 
 def _safe_int(v, default: int = 0) -> int:
     return safe_int(v, default=default)
@@ -3056,24 +3201,14 @@ async def get_version_baseline_status(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    baseline_task = (
-        db.query(BurningTask)
-        .filter(BurningTask.repository_id == repository_id, BurningTask.status == 2)
-        .order_by(BurningTask.updated_at.desc(), BurningTask.id.desc())
-        .first()
-    )
-    baseline_checksum = (
-        str(getattr(baseline_task, "current_sha256", None) or "").strip()
-        or str(getattr(baseline_task, "current_md5", None) or "").strip()
-        or str(getattr(baseline_task, "history_checksum", None) or "").strip()
-    )
+    baseline_id, baseline_checksum = _repository_baseline(db, repository_id)
     return {
         "code": 0,
         "message": "success",
         "data": {
-            "has_baseline": bool(baseline_task and baseline_checksum),
+            "has_baseline": bool(baseline_id and baseline_checksum),
             "history_checksum": baseline_checksum or None,
-            "baseline_task_id": getattr(baseline_task, "id", None),
+            "baseline_task_id": baseline_id,
         },
     }
 
@@ -3743,7 +3878,7 @@ class _EmbeddedTftpServer:
     def __init__(self, *, root_dir: str, bind_host: str = "0.0.0.0", port: int = 69):
         self.root_dir = str(Path(root_dir).expanduser().resolve(strict=False))
         self.bind_host = str(bind_host or "0.0.0.0").strip() or "0.0.0.0"
-        self.port = int(port or 69)
+        self.port = int(port)
         self._socket: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -3753,9 +3888,13 @@ class _EmbeddedTftpServer:
 
     def start(self) -> "_EmbeddedTftpServer":
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind((self.bind_host, self.port))
-        server_socket.settimeout(0.5)
+        try:
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind((self.bind_host, self.port))
+            server_socket.settimeout(0.5)
+        except Exception:
+            server_socket.close()
+            raise
         self._socket = server_socket
         self.port = int(server_socket.getsockname()[1])
         self._record_event(f"[INFO] 内置 TFTP 服务已启动：{self.bind_host}:{self.port}，根目录：{self.root_dir}")
@@ -6481,6 +6620,8 @@ async def simulate_burning_process(
                     used_file_path = work_copy_path
                 except ArtifactKeyValidationError as exc:
                     try:
+                        if str(config.get("install_source") or "").lower() in {"local", "server"}:
+                            raise HTTPException(status_code=400, detail="离线制品解密失败，请重新下载，未切换为在线来源")
                         repo = _refresh_repository_artifact_after_key_failure(db, repo, operator_user, encrypted_artifact_path)
                         refreshed_path = _resolve_existing_local_repository_artifact_path(repo)
                         if not refreshed_path:
@@ -6680,8 +6821,13 @@ async def simulate_burning_process(
                         reason=artifact_hash_error,
                     )
             else:
-                execution_monitor.record("artifact", "warning", "ARTIFACT HASH SKIPPED: no runtime file path")
+                artifact_hash_error = "制品文件不存在"
+                execution_monitor.record("artifact", "error", "制品校验值计算失败")
 
+            if repo:
+                db.refresh(repo)
+                task.expected_checksum = _get_repository_checksum(repo) or None
+                config["expected_checksum"] = task.expected_checksum
             expected = _normalize_checksum(task.expected_checksum)
             if task.integrity:
                 if expected and (expected == _normalize_checksum(task.current_md5) or expected == _normalize_checksum(task.current_sha256)):
@@ -6691,14 +6837,32 @@ async def simulate_burning_process(
                     task.integrity_passed = 0
                     execution_monitor.record("integrity", "error", "INTEGRITY CHECK FAILED", expected_checksum=task.expected_checksum or "")
                 else:
+                    task.integrity_passed = 0
                     execution_monitor.record("integrity", "warning", "INTEGRITY CHECK ENABLED BUT EXPECTED CHECKSUM IS MISSING")
             else:
                 execution_monitor.record("integrity", "skipped", "INTEGRITY CHECK OFF")
 
             if task.version_check:
-                hist = _normalize_checksum(task.history_checksum)
-                curr = _normalize_checksum(task.current_sha256) or _normalize_checksum(task.current_md5)
-                task.consistency_passed = evaluate_version_consistency(hist, curr)
+                baseline_id, hist = _repository_baseline(db, task.repository_id)
+                task.history_checksum = hist
+                curr = (_normalize_checksum(task.current_md5) if hist and len(hist) == 32
+                        else _normalize_checksum(task.current_sha256))
+                task.consistency_passed = evaluate_version_consistency(hist, curr) if hist and curr else 0
+                task.override_confirmed = 0
+                config["_execution_revision"] = _execution_revision(db, task)
+                if operator_user and config.get("_override_token"):
+                    try:
+                        db.refresh(operator_user)
+                        if operator_user.role:
+                            db.refresh(operator_user.role)
+                            db.expire(operator_user.role, ["permissions"])
+                        _require_override_permission(operator_user)
+                        task.override_confirmed = int(_verify_override_token(
+                            config["_override_token"], task, config, operator_user, baseline_id, hist,
+                            task.current_md5, task.current_sha256,
+                        ))
+                    except HTTPException:
+                        task.override_confirmed = 0
                 if task.consistency_passed == 1:
                     execution_monitor.record("consistency", "success", "版本一致性校验通过")
                 elif task.consistency_passed == 0:
@@ -7178,6 +7342,9 @@ async def simulate_burning_process(
                 ),
             )
 
+            if attempt_failure_reason in {"制品校验值计算失败", "版本一致性比对失败", "完整性校验失败"}:
+                execution_monitor.record("retry", "skipped", "确定性校验失败，不执行设备回滚或重复重试")
+                break
             if attempt < retries:
                 execution_monitor.record(
                     "retry",
@@ -7721,6 +7888,12 @@ def task_to_dict(
         "created_by_user_id": getattr(t, "created_by_user_id", None),
         "task_type": _get_task_type(t),
         "executor": normalize_text(executor_name),
+        "executor_user": {
+            "id": creator.id,
+            "username": creator.username,
+            "display_name": creator.display_name,
+            "avatar_url": creator.avatar_url,
+        } if creator else None,
         "repository_id": t.repository_id,
         "repository_name": normalize_text(getattr(repo, "name", None) if repo else None),
         "project_key": getattr(repo, "project_key", None) if repo else None,
@@ -8088,6 +8261,63 @@ def _delete_unstarted_auto_execute_task(db: Session, task: BurningTask) -> bool:
         return False
 
 
+def _prepare_submission_config(db: Session, task: BurningTask, current_user: User):
+    selected_repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
+    if not selected_repo:
+        raise HTTPException(status_code=400, detail="所选软件不存在")
+    if str(selected_repo.project_key or "").strip():
+        _require_project_permission(db, str(selected_repo.project_key), current_user, "mark_flash_file")
+    config = _parse_task_config(task)
+    config.pop("_override_token", None)
+    config["history_checksum"] = _repository_baseline(db, task.repository_id)[1]
+    selected_burner = _resolve_missing_task_burner(db, task, config)
+    if selected_burner and selected_burner.agent_url:
+        task.agent_url = selected_burner.agent_url
+    requested_script_id = task.script_id or _safe_int(config.get("script_id"), default=0) or None
+    resolved_script = _resolve_task_script(db, task, config, burner=selected_burner)
+    config = normalize_execution_config(config, resolved_script)
+    if task.product_id:
+        product = db.query(Product).filter(Product.id == task.product_id).first()
+        if product and not str(config.get("target_chip") or "").strip():
+            config["target_chip"] = product.chip_model or ""
+    task.task_type = _get_task_type(task, config)
+    if task.task_type in {"board", "hybrid"}:
+        _ensure_requested_script_matches_resolved_script(requested_script_id, resolved_script)
+        if not resolved_script:
+            raise HTTPException(status_code=400, detail="未找到匹配的执行脚本")
+        task.script_id = resolved_script.id
+        config["script_id"] = resolved_script.id
+    _validate_task_creation_payload(db, task, config, selected_burner, resolved_script)
+    return selected_repo, selected_burner, config
+
+
+@router.post("/preflight", response_model=Response)
+async def preflight_task(task_data: TaskCreate, db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user),
+                         _: None = Depends(require_permission("burning:add"))):
+    task = BurningTask(**task_data.model_dump(exclude={"auto_execute", "override_token"}))
+    repo, burner, config = _prepare_submission_config(db, task, current_user)
+    checks = await _submission_checks(db, task, repo, config, burner, current_user, preflight_only=True)
+    permissions = current_user.get_permissions()
+    allowed = "all" in permissions or "burning:override" in permissions
+    token = _issue_override_token(task, config, current_user, checks["baseline_id"], checks["baseline"], checks["md5"], checks["sha256"]) if allowed and checks["version_mismatch"] else None
+    return {"code": 0, "message": "success", "data": {
+        **checks, "override_token": token, "can_override": allowed,
+        "repository_name": repo.name,
+    }}
+
+
+@router.post("/{task_id}/preflight", response_model=Response)
+async def preflight_existing_task(task_id: int, db: Session = Depends(get_db),
+                                  current_user: User = Depends(get_current_user),
+                                  _: None = Depends(require_permission("burning:add"))):
+    source = _get_scoped_task_or_404(db, current_user, task_id)
+    if _is_task_active_status(source.status):
+        raise HTTPException(status_code=409, detail="任务正在执行中")
+    payload = TaskCreate.model_validate(source, from_attributes=True)
+    return await preflight_task(payload, db, current_user)
+
+
 @router.post("", response_model=Response)
 async def create_task(
     task_data: TaskCreate,
@@ -8106,6 +8336,7 @@ async def create_task(
     ensure_schema()
     payload = task_data.model_dump()
     auto_execute = bool(payload.pop("auto_execute", False))
+    override_token = payload.pop("override_token", None)
     task = BurningTask(**payload)
     task.status = int(TaskStatus.PENDING)
     task.termination_reason = None
@@ -8113,70 +8344,32 @@ async def create_task(
     task.terminated_by_user_id = None
     task.task_no = generate_task_no(db)
     task.created_by_user_id = current_user.id
-    selected_repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
-    if selected_repo and str(getattr(selected_repo, "project_key", "") or "").strip():
-        _require_project_permission(db, str(selected_repo.project_key), current_user, "mark_flash_file")
-    config = _parse_task_config(task)
-    selected_burner = _resolve_missing_task_burner(db, task, config)
-    if selected_burner and getattr(selected_burner, "agent_url", None):
-        task.agent_url = selected_burner.agent_url
-    task_type = _get_task_type(task, config)
-    config["artifact_storage_mode"] = _resolve_artifact_storage_mode(
-        config.get("install_source"),
-        getattr(selected_burner, "host_type", None) if selected_burner else None,
-        getattr(selected_burner, "agent_url", None) if selected_burner else None,
-    )
-    config["retain_downloaded_artifact"] = bool(config.get("keep_local"))
-    requested_script_id = (
-        getattr(task, "script_id", None) or _safe_int(config.get("script_id"), default=0) or None
-    ) if task_type in {"board", "hybrid"} else None
-    resolved_script = _resolve_task_script(db, task, config, burner=selected_burner)
-    config = normalize_execution_config(config, resolved_script)
-    if product := (db.query(Product).filter(Product.id == task.product_id).first() if getattr(task, "product_id", None) else None):
-        if not str(config.get("target_chip") or "").strip():
-            config["target_chip"] = str(getattr(product, "chip_model", None) or "").strip()
-    if task_type in {"board", "hybrid"}:
-        _ensure_requested_script_matches_resolved_script(requested_script_id, resolved_script)
-    _validate_task_creation_payload(db, task, config, selected_burner, resolved_script)
-    _validate_submit_stage_consistency_override(task, selected_repo)
-    if _get_task_type(task, config) in {"board", "hybrid"}:
-        if not resolved_script:
-            raise HTTPException(status_code=400, detail="未找到匹配的执行脚本")
-        task.script_id = resolved_script.id
-    if resolved_script:
-        config["script_id"] = resolved_script.id
+    selected_repo, selected_burner, config = _prepare_submission_config(db, task, current_user)
+    if bool(task.override_confirmed) or override_token:
+        _require_override_permission(current_user)
+    task.current_md5 = task.current_sha256 = task.integrity_passed = task.consistency_passed = None
+    checks = await _submission_checks(db, task, selected_repo, config, selected_burner, current_user)
+    _validate_submit_stage_consistency_override(task, config, checks, current_user, override_token)
     task.config_json = json.dumps(config, ensure_ascii=False)
+    if not checks["integrity_passed"]:
+        _record_submission_integrity_failure(task, config, checks)
     db.add(task)
     db.commit()
     db.refresh(task)
+    if not checks["integrity_passed"]:
+        _cleanup_repository_artifacts_after_execution(db, selected_repo, task, config)
 
     auto_execute_response = None
-    if auto_execute:
+    if auto_execute and checks["integrity_passed"]:
         # 重新读取 repository / burner，避免 selected_burner 已被新 task 关联冲掉
         repo = db.query(Repository).filter(Repository.id == task.repository_id).first() if task.repository_id else None
         burner = db.query(Burner).filter(Burner.id == task.burner_id).first() if getattr(task, "burner_id", None) else None
         if repo and str(getattr(repo, "project_key", "") or "").strip():
             _require_project_permission(db, str(repo.project_key), current_user, "mark_flash_file")
         task_config = _parse_task_config(task)
-        try:
-            repo, artifact_cleanup_plan = await asyncio.to_thread(
-                _ensure_repository_file_available_for_execution,
-                db,
-                repo,
-                current_user,
-                burner=burner,
-                config=task_config,
-            )
-        except Exception:
-            # An auto-start task is not a draft.  If its artifact cannot be
-            # prepared (for example an SSH/SFTP transfer fails), do not leave
-            # an unexecutable pending task in the task list.
-            _delete_unstarted_auto_execute_task(db, task)
-            raise
         if not repo or not repo.file_url:
             _delete_unstarted_auto_execute_task(db, task)
             raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
-        task_config = {**task_config, **artifact_cleanup_plan}
         task_config = {
             **task_config,
             "source_task_id": task.id,
@@ -8205,14 +8398,17 @@ async def create_task(
 
     return {
         "code": 0,
-        "message": "任务创建成功" if not auto_execute else "任务创建成功，已自动开始执行",
-        "data": {"id": task.id, "task_no": task.task_no, "auto_executed": auto_execute},
+        "message": ("完整性校验失败，已记录校验码，未执行设备操作" if not checks["integrity_passed"]
+                    else "任务创建成功，已自动开始执行" if auto_execute else "任务创建成功"),
+        "data": {"id": task.id, "task_no": task.task_no,
+                 "auto_executed": bool(auto_execute_response), "status": task.status},
     }
 
 
 @router.post("/{task_id}/override", response_model=Response)
 async def override_task(
     task_id: int,
+    payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(require_permission("burning:override")),
@@ -8220,6 +8416,23 @@ async def override_task(
     task = _get_scoped_task_or_404(db, current_user, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    if _is_task_active_status(task.status):
+        raise HTTPException(status_code=409, detail="执行中的任务不能修改覆盖确认")
+    token = payload.get("override_token")
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=409, detail="请先完成预检并确认强制覆盖")
+    # Verify a normalized snapshot without changing the historical task's inputs.
+    verification_task = BurningTask(**TaskCreate.model_validate(task, from_attributes=True).model_dump(
+        exclude={"auto_execute", "override_token"},
+    ))
+    repo, burner, config = _prepare_submission_config(db, verification_task, current_user)
+    checks = await _submission_checks(db, verification_task, repo, config, burner, current_user, preflight_only=True)
+    _validate_submit_stage_consistency_override(verification_task, config, checks, current_user, token)
+    if not checks["version_mismatch"]:
+        raise HTTPException(status_code=409, detail="当前制品无需强制覆盖，请重新执行预检")
+    saved_config = _parse_task_config(task)
+    saved_config["_override_token"] = token
+    task.config_json = json.dumps(saved_config, ensure_ascii=False)
     task.override_confirmed = 1
     db.commit()
     return {"code": 0, "message": "success", "data": {"id": task.id}}
@@ -8423,6 +8636,8 @@ async def update_task(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     updates = task_data.model_dump(exclude_unset=True)
+    if "override_confirmed" in updates:
+        raise HTTPException(status_code=400, detail="强制覆盖必须通过专用确认流程")
     if {"status", "result"} & set(updates):
         raise HTTPException(status_code=400, detail="任务状态和执行结果由系统执行流程维护，不能手动修改")
     if _is_task_active_status(task.status):
@@ -8430,6 +8645,10 @@ async def update_task(
 
     for key, value in updates.items():
         setattr(task, key, value)
+    task.override_confirmed = 0
+    config = _parse_task_config(task)
+    config.pop("_override_token", None)
+    task.config_json = json.dumps(config, ensure_ascii=False)
 
     db.commit()
     db.refresh(task)

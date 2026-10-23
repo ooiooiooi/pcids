@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - packaged runtime includes psutil
     psutil = None
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from backend.utils.db import get_db, ensure_schema
 from backend.utils.datetime_utils import database_time_to_local
@@ -2349,6 +2350,8 @@ def _build_discovery_payload(
                 node_candidates = []
 
         for candidate in node_candidates:
+            if str(candidate.get("type") or "").strip() == "SWD下载器":
+                continue
             candidate_id = str(candidate.get("candidate_id") or "")
             if not candidate_id or candidate_id in seen_candidate_ids:
                 continue
@@ -2357,6 +2360,7 @@ def _build_discovery_payload(
 
     burners = db.query(Burner).all()
     candidates = _resolve_ambiguous_candidate_types(candidates, burners)
+    candidates = [candidate for candidate in candidates if str(candidate.get("type") or "").strip() != "SWD下载器"]
     matched_candidate_ids: set[str] = set()
     changed_bindings: list[dict] = []
 
@@ -2866,6 +2870,15 @@ def _normalize_burner_payload(payload: dict, existing: Optional[Burner] = None) 
     else:
         normalized["type"] = resolved_type
         capability = BURNER_CAPABILITY_MAP.get(_normalize_burner_model_key(resolved_type)) or {}
+        if existing is not None and resolved_type == "SWD下载器" and existing.type == resolved_type:
+            try:
+                old_config = json.loads(existing.config_json or "{}") or {}
+            except (ValueError, TypeError):
+                old_config = {}
+            capability = {
+                "supported_interfaces": old_config.get("supported_interfaces", []),
+                "supported_chips": old_config.get("supported_chips", []),
+            }
         config["device_category"] = "burner"
         config["device_model"] = resolved_type
         config["supported_interfaces"] = _sort_by_preset_order(list(capability.get("supported_interfaces") or []), INTERFACE_ORDER)
@@ -2946,11 +2959,20 @@ def _validate_supported_burner_type(
     allow_legacy_existing: bool = False,
 ) -> None:
     resolved_type = str(burner_type or "").strip()
-    if not resolved_type or resolved_type == "SD卡文件写入":
+    if resolved_type == "SD卡文件写入":
         return
     if allow_legacy_existing and resolved_type == "SWD下载器":
         return
     ensure_supported_burner_model(resolved_type)
+
+
+def _validate_device_name_unique(db: Session, name: str, existing_id: Optional[int] = None) -> str:
+    key = str(name or "").strip().casefold()
+    if not key:
+        raise HTTPException(status_code=422, detail="设备名称不能为空")
+    if any(item.id != existing_id and item.name.strip().casefold() == key for item in db.query(Burner).all()):
+        raise HTTPException(status_code=409, detail="设备名称已存在")
+    return key
 
 
 def _clear_conflicting_burner_port(conflict_burner: Burner, modified_by: Optional[str] = None) -> None:
@@ -3409,6 +3431,7 @@ async def create_burner(
     _validate_supported_burner_type(payload.get("type"))
     payload = _ensure_burner_owner_node(payload)
     _validate_burner_payload_required(payload)
+    payload["name_key"] = _validate_device_name_unique(db, payload.get("name"))
     conflict_burner = _validate_burner_binding_unique(db, payload, force_rebind_port=force_rebind_port)
     while conflict_burner is not None:
         _ensure_burner_not_in_use(db, conflict_burner, "换绑物理端口")
@@ -3422,8 +3445,12 @@ async def create_burner(
     payload["status"] = 1 if payload.get("is_enabled", True) else 3
     burner = Burner(**payload)
     db.add(burner)
-    db.flush()
-    db.commit()
+    try:
+        db.flush()
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="设备名称或绑定已被占用") from exc
     db.refresh(burner)
     runtime_status = await _refresh_and_persist_single_burner_status(db, burner)
 
@@ -3476,6 +3503,8 @@ async def update_burner(
         "is_enabled": update_payload.get("is_enabled", burner.is_enabled),
     }
     _validate_burner_payload_required(resolved_payload)
+    if "name" in raw_update_payload and raw_update_payload["name"] != burner.name:
+        update_payload["name_key"] = _validate_device_name_unique(db, resolved_payload["name"], burner.id)
     conflict_burner = _validate_burner_binding_unique(
         db,
         resolved_payload,
@@ -3497,7 +3526,11 @@ async def update_burner(
     burner.status = 1 if _is_burner_enabled(burner) else 3
     burner.modified_by = current_user.username
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="设备名称或绑定已被占用") from exc
     db.refresh(burner)
     runtime_status = await _refresh_and_persist_single_burner_status(db, burner)
 
@@ -3571,6 +3604,8 @@ async def scan_burners(
     existing = db.query(Burner).filter(Burner.id == burner_id).first() if burner_id else None
     strategy = payload.get("strategy") or (existing.strategy if existing else 1)
     device_type = payload.get("type") or (existing.type if existing else None)
+    if str(device_type or "").strip() == "SWD下载器":
+        raise HTTPException(status_code=422, detail="历史 SWD 下载器仅保留资料编辑，请先改绑为实际设备型号后扫描")
     location = payload.get("location") or (existing.location if existing else None)
     agent_url = payload.get("agent_url") or (getattr(existing, "agent_url", None) if existing else None)
     allow_fallback = bool(payload.get("allow_fallback", False))
@@ -3710,6 +3745,8 @@ async def agent_scan_burners(request: Request, scan_request: Optional[dict] = Bo
     payload = scan_request or {}
     strategy = payload.get("strategy") or 1
     device_type = payload.get("type")
+    if str(device_type or "").strip() == "SWD下载器":
+        raise HTTPException(status_code=422, detail="SWD下载器不是可识别的设备型号")
     location = payload.get("location")
     expected_sn = payload.get("sn")
     expected_port = payload.get("port")

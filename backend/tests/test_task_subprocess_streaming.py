@@ -257,12 +257,17 @@ class TaskSubprocessStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ValueError", log_text)
 
     async def test_non_zero_script_with_explicit_timeout_marker_is_treated_as_timeout(self):
+        windows = sys.platform == "win32"
+        script = (
+            "@echo off\r\necho [ERROR] 脚本执行超时\r\nexit /b 124\r\n"
+            if windows else "import sys\nprint('[ERROR] 脚本执行超时')\nsys.exit(124)\n"
+        )
         success, log_text, failure_reason = await _execute_script_content_locally(
-            "@echo off\r\necho [ERROR] 脚本执行超时\r\nexit /b 124\r\n",
-            "bat",
+            script,
+            "bat" if windows else "python",
             {"TIMEOUT_SECONDS": "120"},
             120,
-            "timeout-marker.bat",
+            "timeout-marker.bat" if windows else "timeout-marker.py",
         )
 
         self.assertFalse(success)

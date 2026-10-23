@@ -3808,7 +3808,7 @@ def _create_protocol_session(
     return session
 
 
-def session_to_dict(s: ProtocolSession):
+def session_to_dict(s: ProtocolSession, user=None):
     return {
         "id": s.id,
         "task_no": getattr(s, "task_no", None),
@@ -3820,6 +3820,12 @@ def session_to_dict(s: ProtocolSession):
         "tx": s.tx_count,
         "rx": s.rx_count,
         "executor": s.executor,
+        "executor_user": {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+            "avatar_url": user.avatar_url,
+        } if user else None,
         "ip_address": s.ip_address,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
@@ -4086,7 +4092,7 @@ async def connect_device(
         if ethernet_runtime is not None:
             _shutdown_ethernet_runtime(ethernet_runtime)
         raise
-    return {"code": 0, "message": "连接成功", "data": session_to_dict(session)}
+    return {"code": 0, "message": "连接成功", "data": session_to_dict(session, current_user)}
 
 
 @router.post("/channel/scan", response_model=Response)
@@ -4164,7 +4170,7 @@ async def connect_channel(
         "code": 0,
         "message": "通道连接成功",
         "data": {
-            **session_to_dict(session),
+            **session_to_dict(session, current_user),
             "channel_status": config.get("channel_state") or "connected",
             "channel_name": config.get("physical_channel") or config.get("channel") or config.get("com_port") or config.get("adapter_name") or payload.protocol,
             "probe_summary": config.get("probe_summary") or "通道连接成功",
@@ -4729,10 +4735,14 @@ async def list_records(
         .distinct()
         .all()
     )
+    user_ids = {s.created_by_user_id for s in rows if s.created_by_user_id}
+    users = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+    legacy_names = {s.executor for s in rows if not s.created_by_user_id and s.executor}
+    legacy_users = {u.username: u for u in db.query(User).filter(User.username.in_(legacy_names)).all()} if legacy_names else {}
     return {
         "code": 0,
         "message": "success",
-        "data": [session_to_dict(s) for s in rows],
+        "data": [session_to_dict(s, users.get(s.created_by_user_id) or legacy_users.get(s.executor)) for s in rows],
         "executors": [str(executor or "").strip() for (executor,) in executor_rows if str(executor or "").strip()],
         "total": total,
         "page": page,
@@ -4753,7 +4763,9 @@ async def get_record_detail(
         raise HTTPException(status_code=404, detail="记录不存在")
     if _normalize_protocol_kind(session.protocol) == "ethernet":
         _close_ethernet_session_runtime(session.id)
-    return {"code": 0, "message": "success", "data": session_to_dict(session)}
+    user = (db.get(User, session.created_by_user_id) if session.created_by_user_id
+            else db.query(User).filter(User.username == session.executor).first())
+    return {"code": 0, "message": "success", "data": session_to_dict(session, user)}
 
 
 @router.delete("/records/{record_id}", response_model=Response)

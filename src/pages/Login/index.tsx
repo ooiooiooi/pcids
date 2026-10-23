@@ -80,7 +80,7 @@ const Login: React.FC = () => {
         <div className="login-desktop-titlebar">
           <div className="login-desktop-titlebar__brand">
             <img src={SoftwareLogo} alt="" />
-            <span>程控安装部署系统</span>
+            <span>嵌入式安装性测试工具</span>
           </div>
           <DesktopWindowControls />
         </div>
@@ -99,7 +99,7 @@ const Login: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'flex-start', flexDirection: 'column' }}>
             <div style={{ display: 'flex', alignItems: 'center', color: 'var(--pcids-brand-color)', fontSize: 32, fontWeight: 800 }}>
               <img src={SoftwareLogo} alt="软件图标" style={{ width: 40, height: 40, marginRight: 12, objectFit: 'contain' }} />
-              <span>程控安装部署系统</span>
+              <span>嵌入式安装性测试工具</span>
             </div>
             <div style={{ color: '#86909c', fontSize: 16, marginTop: 12, letterSpacing: 1 }}>
               安全可靠的嵌入式软件安装性测试解决方案

@@ -12,7 +12,7 @@ export async function loginAsAdmin(api: APIRequestContext): Promise<string> {
 
   const res = await api.post('/api/auth/login', {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form.toString(),
+    data: form.toString(),
   })
   expect(res.ok()).toBeTruthy()
   const json = await res.json()
@@ -148,7 +148,7 @@ export async function uiLogin(page: Page) {
   await page.goto('/#/login', { waitUntil: 'domcontentloaded' })
   await page.getByPlaceholder('请输入账号').fill('admin')
   await page.getByPlaceholder('请输入密码').fill('admin123')
-  await page.getByRole('button', { name: '登录' }).click()
+  await page.getByRole('button', { name: /登\s*录/ }).click()
   // 等待进入主界面（侧边栏菜单出现）
-  await expect(page.getByText('工作台')).toBeVisible()
+  await expect(page.getByText('工作台', { exact: true }).first()).toBeVisible()
 }

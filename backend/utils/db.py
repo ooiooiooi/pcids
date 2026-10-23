@@ -1420,6 +1420,10 @@ def ensure_default_system_scripts(db):
         .all()
     )
     for script in obsolete_scripts:
+        if script.name == "swd_downloader_arm_mcu_flash":
+            # Preserve history without silently rebinding a generic driver to PWLINK2.
+            script.is_system = 0
+            continue
         if str(getattr(script, "name", "") or "").strip() not in desired_script_names:
             db.delete(script)
             deleted += 1
@@ -1767,7 +1771,7 @@ def init_menus_and_permissions(db):
     burning_add_permission = db.query(Permission).filter(Permission.code == "burning:add").first()
     burning_extra_permissions = (
         db.query(Permission)
-        .filter(Permission.code.in_(["burning:terminate", "burning:report", "burning:override"]))
+        .filter(Permission.code.in_(["burning:terminate", "burning:report"]))
         .all()
     )
     if burning_add_permission and burning_extra_permissions:
@@ -1785,6 +1789,17 @@ def init_menus_and_permissions(db):
                     continue
                 db.add(RolePermission(role_id=role_id, permission_id=permission.id))
                 admin_assignment_count += 1
+                changed = True
+
+    meta_view = db.query(Permission).filter(Permission.code == "meta:view").first()
+    ide_consumers = db.query(Permission).filter(Permission.code.in_(["script:view", "burning:view"])).all()
+    if meta_view and ide_consumers:
+        roles = {row.role_id for row in db.query(RolePermission).filter(
+            RolePermission.permission_id.in_([item.id for item in ide_consumers])
+        ).all()}
+        for role_id in roles:
+            if not db.query(RolePermission).filter_by(role_id=role_id, permission_id=meta_view.id).first():
+                db.add(RolePermission(role_id=role_id, permission_id=meta_view.id))
                 changed = True
 
     # Prune obsolete permission codes that are no longer backed by the
@@ -2887,6 +2902,8 @@ def _ensure_schema_uncached():
     ensure_column("burners", "is_enabled", "INTEGER")
     ensure_column("burners", "config_json", "TEXT")
     ensure_column("burners", "modified_by", "VARCHAR(50)")
+    ensure_column("burners", "name_key", "VARCHAR(100)")
+    ensure_table("CREATE UNIQUE INDEX IF NOT EXISTS uq_burners_name_key ON burners (name_key)")
     ensure_column("products", "usage_description", "TEXT")
     ensure_column("products", "board_image", "VARCHAR(500)")
     ensure_column("products", "burn_interface", "TEXT")
@@ -3551,6 +3568,9 @@ def init_db():
     from backend.models.base import Base
     Base.metadata.create_all(bind=engine)
     ensure_schema()
+    from backend.utils.meta_catalog import seed_meta_catalog
+    with SessionLocal() as meta_db:
+        seed_meta_catalog(meta_db)
 
     if _is_initial_seed_completed():
         db = SessionLocal()

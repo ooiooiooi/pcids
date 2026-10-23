@@ -513,9 +513,42 @@ class LicenseEnforcementMiddleware(BaseHTTPMiddleware):
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("request.unhandled_error | path=%s", request.url.path)
+            response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         return response
+
+
+class MetaErrorsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path != "/api/meta" and not request.url.path.startswith("/api/meta/"):
+            return await call_next(request)
+        if request.url.path.rstrip("/") not in {"/api/meta/ides", "/api/meta/burners"}:
+            return JSONResponse(status_code=404, content={"code": 404, "message": "接口不存在", "data": None})
+        if request.method not in {"GET", "POST", "OPTIONS"}:
+            return JSONResponse(status_code=405, headers={"Allow": "GET, POST"}, content={"code": 405, "message": "请求方法不支持", "data": None})
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("meta.request.failed")
+            return JSONResponse(status_code=500, content={"code": 500, "message": "服务处理失败", "data": None})
+        if response.status_code < 400:
+            return response
+        body = b"".join([part async for part in response.body_iterator])
+        try:
+            payload = json.loads(body)
+        except (ValueError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        message = payload.get("message") or payload.get("detail") or "请求失败"
+        headers = {key: value for key, value in response.headers.items() if key not in {"content-length", "content-type"}}
+        return JSONResponse(status_code=response.status_code, headers=headers, content={
+            "code": response.status_code, "message": str(message), "data": payload.get("data"),
+        })
 
 
 def _run_startup_diagnostics() -> None:
@@ -623,7 +656,7 @@ app = FastAPI(
 
 app.add_middleware(OperationLogMiddleware)
 app.add_middleware(LicenseEnforcementMiddleware)
-app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(MetaErrorsMiddleware)
 
 # 配置 CORS（允许 Electron 访问）
 app.add_middleware(
@@ -634,6 +667,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
 
 # 注册路由
 app.include_router(license.router, prefix="/api/license", tags=["软件授权"])
@@ -656,7 +690,7 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["工作台"]
 app.include_router(meta.router, prefix="/api/meta", tags=["二次开发元数据"])
 
 UPLOAD_ROOT = get_upload_root()
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
+# Uploaded artifacts are served only by their dedicated, validated API routes.
 
 
 @app.get("/health")

@@ -6,6 +6,7 @@ from .user import User
 from .role import Role
 from .product import Product
 from .burner import Burner
+from .ide import IDE
 from .script import Script
 from .task import BurningTask
 from .log import Record, Injection, InjectionRun, ProtocolTest, ProtocolSession, ProtocolLog, LoginLog, OperationLog
@@ -41,6 +42,7 @@ __all__ = [
     "Role",
     "Product",
     "Burner",
+    "IDE",
     "Script",
     "BurningTask",
     "Record",

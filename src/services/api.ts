@@ -268,7 +268,10 @@ export const scriptApi = {
 export const taskApi = {
   getList: (params?: { page?: number; page_size?: number; status?: number; sort_field?: string; sort_order?: string; board_name?: string; keyword?: string; project_key?: string }, silent = false) =>
     request.get('/tasks', { params, ...(silent ? { skipAutoErrorMessage: true, suppressBackendServiceError: true } : {}) } as any),
-  create: (data: { software_name: string; repository_id?: number; task_type?: 'board' | 'os' | 'hybrid'; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string; override_confirmed?: number; auto_execute?: boolean }) =>
+  preflight: (data: Record<string, any>) => request.post('/tasks/preflight', data, {
+    timeout: 15 * 60 * 1000, skipAutoErrorMessage: true, suppressBackendServiceError: true,
+  } as any),
+  create: (data: { software_name: string; repository_id?: number; task_type?: 'board' | 'os' | 'hybrid'; board_name?: string; config_json?: string; target_ip?: string; target_port?: number; product_id?: number; burner_id?: number; script_id?: number; agent_url?: string; keep_local?: number; integrity?: number; expected_checksum?: string; version_check?: number; history_checksum?: string; override_confirmed?: number; override_token?: string; auto_execute?: boolean }) =>
     request.post('/tasks', data, {
       // Web-session artifacts may require the user to finish a browser download first.
       timeout: 15 * 60 * 1000,
@@ -296,9 +299,12 @@ export const taskApi = {
     request.get(`/tasks/${id}`, silent ? { skipAutoErrorMessage: true, suppressBackendServiceError: true } as any : undefined),
   getStatus: (id: number) =>
     request.get(`/tasks/${id}/status`, { skipAutoErrorMessage: true, suppressBackendServiceError: true } as any),
-  execute: (id: number) => request.post(`/tasks/${id}/execute`),
+  preflightExisting: (id: number) => request.post(`/tasks/${id}/preflight`, {}, {
+    timeout: 15 * 60 * 1000, skipAutoErrorMessage: true, suppressBackendServiceError: true,
+  } as any),
+  execute: (id: number, override_token?: string) => request.post(`/tasks/${id}/execute`, { override_token }),
   terminate: (id: number, data?: { reason?: string }) => request.post(`/tasks/${id}/terminate`, data || {}),
-  override: (id: number) => request.post(`/tasks/${id}/override`),
+  override: (id: number, override_token: string) => request.post(`/tasks/${id}/override`, { override_token }),
   getConsistencyReportHtml: (id: number, print = false) =>
     request.get(`/tasks/${id}/consistency/report/html`, { params: { print: print ? 1 : 0 }, responseType: 'blob' as any }),
   getConsistencyReportCsv: (id: number) =>

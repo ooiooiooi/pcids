@@ -1305,9 +1305,9 @@ const Protocol: React.FC = () => {
     gpio_io: { background: '#ffe9a8', color: '#d79b00' },
   }
 
-  const renderExecutorBadge = (value: string) => {
+  const renderExecutorBadge = (value: string, user?: any) => {
     const text = String(value || '').trim()
-    return <UserIdentity fallbackName={text || '-'} avatarSize={23} />
+    return <UserIdentity user={user} fallbackName={text || '-'} avatarSize={23} />
   }
 
   const recordColumns = [
@@ -1326,7 +1326,7 @@ const Protocol: React.FC = () => {
       dataIndex: 'executor',
       key: 'executor',
       width: 130,
-      render: (value: string) => renderExecutorBadge(value),
+      render: (value: string, record: any) => renderExecutorBadge(value, record.executor_user),
     },
     {
       title: '类型',

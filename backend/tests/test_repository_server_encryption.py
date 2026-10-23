@@ -151,7 +151,11 @@ class RepositoryServerEncryptionTests(unittest.TestCase):
         remote_path, _target = _transfer_repository_artifact_via_ssh(encrypted_path, "firmware.bin", config)
 
         self.assertTrue(Path(remote_path).is_file())
+        self.assertEqual(Path(remote_path).parent, Path(storage_root).resolve())
         self.assertTrue(Path(remote_path).read_bytes().startswith(b"PCIDSENC1"))
+        destination = os.path.join(self.temp_dir.name, "retrieved-local.pcenc")
+        _retrieve_repository_artifact_via_ssh(remote_path, destination, config)
+        self.assertEqual(Path(destination).read_bytes(), Path(remote_path).read_bytes())
 
 
 if __name__ == "__main__":

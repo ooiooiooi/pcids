@@ -1217,6 +1217,23 @@ def _codearts_tenant_id_from_repo_id(repo_id: Optional[str]) -> Optional[str]:
 def _transfer_repository_artifact_via_ssh(encrypted_path: str, filename: str, config: dict) -> tuple[str, str]:
     if not config["host"] or not config["username"]:
         raise RuntimeError("服务器 SSH 下载配置缺少地址或用户名")
+    if _is_local_server_host(config.get("host")):
+        local_root = Path(str(config.get("storage_root") or _get_repository_server_storage_root())).expanduser()
+        if not local_root.is_absolute():
+            raise RuntimeError("本机服务器存储目录必须使用当前系统的绝对路径")
+        local_root = local_root.resolve()
+        local_root.mkdir(parents=True, exist_ok=True)
+        safe_name = posixpath.basename(str(filename).replace("\\", "/")) or "artifact.pcenc"
+        if not safe_name.lower().endswith(".pcenc"):
+            safe_name += ".pcenc"
+        local_path = (local_root / safe_name).resolve()
+        if not _is_path_within_root(str(local_path), str(local_root)):
+            raise RuntimeError("本机服务器制品路径超出存储目录")
+        shutil.copy2(encrypted_path, local_path)
+        with local_path.open("rb") as stored_file:
+            if stored_file.read(9) != b"PCIDSENC1":
+                raise RuntimeError("本机服务器制品写入校验失败")
+        return str(local_path), f"{config['host']}:{config['port']}"
     server_os = _normalize_server_os(config.get("server_os"))
     remote_root = _normalize_remote_server_path(
         str(config.get("storage_root") or _get_repository_server_storage_root()),
@@ -1226,13 +1243,6 @@ def _transfer_repository_artifact_via_ssh(encrypted_path: str, filename: str, co
     legacy_plaintext_path = _build_repository_server_saved_path(posixpath.basename(filename), server_os, remote_root)
     sftp_remote_path = _to_sftp_path(remote_path, server_os)
     sftp_legacy_plaintext_path = _to_sftp_path(legacy_plaintext_path, server_os)
-    if _is_local_server_host(config.get("host")):
-        Path(remote_root).mkdir(parents=True, exist_ok=True)
-        shutil.copy2(encrypted_path, remote_path)
-        with open(remote_path, "rb") as stored_file:
-            if stored_file.read(9) != b"PCIDSENC1":
-                raise RuntimeError("本机服务器制品写入校验失败")
-        return remote_path, f"{config['host']}:{config['port']}"
     with SSHClientSession(
         config["host"],
         config["port"],
@@ -1255,7 +1265,10 @@ def _retrieve_repository_artifact_via_ssh(remote_path: str, local_path: str, con
     normalized_remote_path = _normalize_remote_server_path(remote_path, server_os)
     sftp_remote_path = _to_sftp_path(normalized_remote_path, server_os)
     if _is_local_server_host(config.get("host")):
-        shutil.copy2(normalized_remote_path, local_path)
+        source = Path(remote_path).expanduser()
+        if not source.is_absolute():
+            raise RuntimeError("本机服务器制品必须使用当前系统的绝对路径")
+        shutil.copy2(source, local_path)
     else:
         with SSHClientSession(
             config["host"],
@@ -1359,19 +1372,13 @@ def _get_repository_location_state(
     if not server_path and storage_location == "server":
         server_path = str(detail.get("storage_path") or "").strip()
 
-    local_exists = bool(detail.get("local_exists"))
-    if local_path and (storage_location in {"", "local", "both"} or source_type == "local_upload" or (repo_file_url == local_path and storage_location != "server")):
-        local_exists = True
+    local_exists = detail.get("local_exists") is True or detail.get("local_exists") == 1
     if local_exists and local_path:
-        effective_allowed_roots = allowed_roots if allowed_roots is not None else _repository_allowed_roots()
-        if any(_is_path_within_root(local_path, root) for root in effective_allowed_roots):
-            local_exists = os.path.exists(local_path) and os.path.isfile(local_path)
+        local_exists = os.path.exists(local_path) and os.path.isfile(local_path)
     elif local_exists and not local_path:
         local_exists = False
 
-    server_exists = bool(detail.get("server_exists"))
-    if storage_location in {"server", "both"} and (server_path or server_target):
-        server_exists = True
+    server_exists = detail.get("server_exists") is True or detail.get("server_exists") == 1
     if server_exists and not (server_path or server_target):
         server_exists = False
 
@@ -8707,10 +8714,14 @@ async def list_project_members(
                 "id": m.id,
                 "user_id": m.user_id,
                 "username": u.username,
+                "display_name": u.display_name,
+                "avatar_url": u.avatar_url,
                 "role": m.role,
                 "joined_at": (m.joined_at or m.created_at).isoformat() if (m.joined_at or m.created_at) else None,
                 "inviter_user_id": m.inviter_user_id,
                 "inviter_username": getattr(inv, "username", None) if inv else None,
+                "inviter_display_name": getattr(inv, "display_name", None) if inv else None,
+                "inviter_avatar_url": getattr(inv, "avatar_url", None) if inv else None,
             }
         )
     _log_event(

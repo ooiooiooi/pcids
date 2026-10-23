@@ -1,6 +1,6 @@
 import { useLocation, useNavigate } from 'react-router-dom'
 import React, { useState, useEffect, useMemo } from 'react'
-import { Layout, Menu, Badge, Drawer, Modal, Tabs, Form, Input, Button, Upload, message, List, Spin, Dropdown, ConfigProvider } from 'antd'
+import { Layout, Menu, Badge, Drawer, Modal, Tabs, Form, Input, Button, Upload, App as AntdApp, Alert, List, Spin, Dropdown, ConfigProvider } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   BellOutlined,
@@ -478,6 +478,8 @@ function readCurrentRoutePath() {
 }
 
 const App: React.FC = () => {
+  const { message } = AntdApp.useApp()
+  const [avatarError, setAvatarError] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
   const [activePath, setActivePath] = useState(readCurrentRoutePath)
@@ -527,6 +529,7 @@ const App: React.FC = () => {
             },
           }
         }
+        return res.data
       }
     } catch {
       // ignore
@@ -880,7 +883,7 @@ const App: React.FC = () => {
 
   const handleUpdatePassword = async (values: any) => {
     if (values.newPassword !== values.confirmPassword) {
-      message.error('两次输入密码不一致')
+      pwdForm.setFields([{ name: 'confirmPassword', errors: ['密码不一致'] }])
       return
     }
     try {
@@ -1046,23 +1049,32 @@ const App: React.FC = () => {
           />
         </div>
         <Upload
+          accept=".jpg,.jpeg,.png"
           showUploadList={false}
           customRequest={async (options) => {
+            setAvatarError('')
             const formData = new FormData()
             formData.append('file', options.file as File)
             try {
               const res: any = await authApi.uploadAvatar(formData)
               if (res.code === 0) {
                 message.success('头像上传成功')
-                fetchUserInfo()
+                const profile = await fetchUserInfo()
+                if (profile) window.dispatchEvent(new CustomEvent('pcids:user-profile-updated', { detail: profile }))
+                options.onSuccess?.(res)
+              } else {
+                throw new Error(res.message || '上传失败')
               }
             } catch (e: any) {
-              message.error(e?.response?.data?.detail || '上传失败')
+              const detail = e?.response?.data?.detail || e?.response?.data?.message || e?.message || '上传失败'
+              setAvatarError(String(detail))
+              options.onError?.(e)
             }
           }}
         >
           <Button size="middle" style={{ borderStyle: 'dashed' }}>更换头像</Button>
         </Upload>
+        {avatarError && <Alert type="error" role="alert" message={avatarError} style={{ marginTop: 12 }} />}
         <div style={{ fontSize: 12, color: '#86909c', marginTop: 16, textAlign: 'center', lineHeight: '20px' }}>
           支持 JPG / PNG 格式，<br />大小不超过 2MB
         </div>
@@ -1096,7 +1108,15 @@ const App: React.FC = () => {
                 <Form.Item label="新密码" name="newPassword" rules={[{ required: true, message: '请输入新密码' }]}>
                   <Input.Password id="profile-new-password" name="newPassword" autoComplete="new-password" placeholder="请输入新密码" size="large" prefix={<LockOutlined style={{ color: '#c9cdd4' }} />} />
                 </Form.Item>
-                <Form.Item label="确认新密码" name="confirmPassword" rules={[{ required: true, message: '请确认新密码' }]}>
+                <Form.Item label="确认新密码" name="confirmPassword" dependencies={['newPassword']} rules={[
+                  { required: true, message: '请确认新密码' },
+                  ({ getFieldValue }) => ({
+                    validator(_, value) {
+                      return !value || value === getFieldValue('newPassword')
+                        ? Promise.resolve() : Promise.reject(new Error('密码不一致'))
+                    },
+                  }),
+                ]}>
                   <Input.Password id="profile-confirm-password" name="confirmPassword" autoComplete="new-password" placeholder="请确认新密码" size="large" prefix={<LockOutlined style={{ color: '#c9cdd4' }} />} />
                 </Form.Item>
               </Form>
@@ -1109,9 +1129,9 @@ const App: React.FC = () => {
 
   const handleProfileOk = () => {
     if (profileTab === 'info') {
-      infoForm.validateFields().then(handleUpdateProfile)
+      infoForm.validateFields().then(handleUpdateProfile).catch(() => undefined)
     } else {
-      pwdForm.validateFields().then(handleUpdatePassword)
+      pwdForm.validateFields().then(handleUpdatePassword).catch(() => undefined)
     }
   }
 
@@ -1121,7 +1141,7 @@ const App: React.FC = () => {
         <div className="desktop-app-loading__titlebar">
           <div className="app-header-brand" style={{ display: 'flex', alignItems: 'center', color: 'var(--pcids-brand-color)', fontWeight: 800, fontSize: 18 }}>
             <img src={SoftwareLogo} alt="软件图标" style={{ width: 24, height: 24, marginRight: 8, objectFit: 'contain' }} />
-            <span>程控安装部署系统</span>
+            <span>嵌入式安装性测试工具</span>
           </div>
           <DesktopWindowControls />
         </div>
@@ -1148,7 +1168,7 @@ const App: React.FC = () => {
       >
         <div className="app-header-brand" style={{ display: 'flex', alignItems: 'center', color: 'var(--pcids-brand-color)', fontWeight: 800, fontSize: 18, width: 216 }}>
           <img src={SoftwareLogo} alt="软件图标" style={{ width: 24, height: 24, marginRight: 8, objectFit: 'contain' }} />
-          <span>程控安装部署系统</span>
+          <span>嵌入式安装性测试工具</span>
         </div>
         <div className="app-header-actions">
           <div className="app-header-tools">

@@ -13,6 +13,7 @@ class Burner(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    name_key: Mapped[Optional[str]] = mapped_column(String(100), unique=True)
     type: Mapped[str] = mapped_column(String(50))
     sn: Mapped[Optional[str]] = mapped_column(String(100))
     port: Mapped[Optional[str]] = mapped_column(String(100))

@@ -19,3 +19,5 @@ email-validator==2.2.0
 pyserial==3.5
 paramiko==5.0.0
 PyYAML==6.0.3
+Pillow==11.3.0; python_version >= "3.9"
+Pillow==10.4.0; python_version < "3.9"

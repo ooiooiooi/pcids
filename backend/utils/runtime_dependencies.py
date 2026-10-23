@@ -173,12 +173,6 @@ BURNER_TOOL_GROUPS = [
         "tool_label": "pyOCD CMSIS-DAP / PWLINK2",
     },
     {
-        "burner": "SWD Downloader",
-        "env_names": ["PYOCD_EXE", "SWD_CMD_TEMPLATE"],
-        "bundled_dir": "SWD_Downloader",
-        "tool_label": "pyOCD / SWD command template",
-    },
-    {
         "burner": "GDLINK",
         "env_names": ["GDLINK_CLI", "GDLINK_CMD_TEMPLATE"],
         "bundled_dir": "GDLINK",

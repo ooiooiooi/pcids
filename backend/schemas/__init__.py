@@ -296,6 +296,7 @@ class TaskBase(BaseModel):
 class TaskCreate(TaskBase):
     """创建任务请求"""
     auto_execute: Optional[bool] = None
+    override_token: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):

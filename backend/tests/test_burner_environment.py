@@ -43,7 +43,7 @@ class BurnerEnvironmentTests(unittest.TestCase):
         )
         self.assertEqual(
             runner.call_args.args[0],
-            Path(r"C:\\Program Files\\PCIDS\\resources\\tools\\burners\\GOWIN\\drivers\\switch-gowin-usb-mode.ps1"),
+            Path(r"C:\\Program Files\\PCIDS\\resources\\tools\\burners") / "GOWIN" / "drivers" / "switch-gowin-usb-mode.ps1",
         )
 
     @patch("backend.utils.burner_environment._al321_environment", return_value="al321-ready")

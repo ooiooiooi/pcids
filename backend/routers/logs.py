@@ -10,6 +10,7 @@ from backend.schemas import Response, PaginatedResponse
 from backend.routers.auth import get_current_user
 from backend.utils.datetime_utils import database_time_to_local
 from backend.utils.permission import require_any_permission
+from backend.utils.user_identity import user_identity
 
 router = APIRouter()
 
@@ -21,6 +22,7 @@ def login_log_to_dict(log, db: Session, users_by_id: Optional[dict[int, User]] =
         else db.query(User).filter(User.id == log.user_id).first()
     )
     return {
+        **{key: value for key, value in (user_identity(user) or {}).items() if key != "id"},
         "id": log.id,
         "user_id": log.user_id,
         "username": user.username if user else "未知用户",
@@ -40,6 +42,7 @@ def operation_log_to_dict(log, db: Session, users_by_id: Optional[dict[int, User
         else db.query(User).filter(User.id == log.user_id).first()
     )
     return {
+        **{key: value for key, value in (user_identity(user) or {}).items() if key != "id"},
         "id": log.id,
         "user_id": log.user_id,
         "username": user.username if user else "未知用户",

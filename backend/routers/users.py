@@ -28,6 +28,7 @@ from backend.models.role import Role
 from backend.utils.datetime_utils import database_time_to_local
 from backend.utils.permission import ensure_role_assignable, require_permission
 from backend.utils.notifications import create_structured_message
+from backend.utils.user_identity import user_identity
 
 router = APIRouter()
 
@@ -150,6 +151,7 @@ async def get_active_users(
     users_data = []
     for user in active_users:
         users_data.append({
+            **user_identity(user),
             "id": user.id,
             "username": user.username,
             "real_name": user.real_name,
@@ -232,6 +234,7 @@ async def get_users(
         "message": "success",
         "data": [
             {
+                **user_identity(u),
                 "id": u.id,
                 "username": u.username,
                 "display_name": u.display_name,
@@ -284,6 +287,7 @@ async def get_user(
         "code": 0,
         "message": "success",
         "data": {
+            **user_identity(user),
             "id": user.id,
             "username": user.username,
             "email": user.email,

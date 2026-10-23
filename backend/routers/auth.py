@@ -265,15 +265,20 @@ def _resolve_managed_avatar_path(avatar_url: Optional[str]) -> Optional[Path]:
     path = parsed.path if parsed.scheme and parsed.netloc else raw
     if path.startswith("/api/auth/avatar/"):
         filename = Path(path.rsplit("/", 1)[-1]).name
-        validate_image_filename(filename)
-        return _get_avatar_upload_dir() / filename
+        if filename in {"", ".", ".."}:
+            return None
+        current = _get_avatar_upload_dir() / filename
+        legacy = get_upload_root() / "avatars" / filename
+        return current if current.exists() or current.is_symlink() else legacy
     if path.startswith("/uploads/avatars/"):
         filename = Path(path.rsplit("/", 1)[-1]).name
-        validate_image_filename(filename)
-        return _get_avatar_upload_dir() / filename
+        if filename in {"", ".", ".."}:
+            return None
+        return get_upload_root() / "avatars" / filename
     if path.startswith("/uploads/"):
         filename = Path(path.rsplit("/", 1)[-1]).name
-        validate_image_filename(filename)
+        if filename in {"", ".", ".."}:
+            return None
         return get_upload_root() / filename
     return None
 
@@ -293,14 +298,21 @@ def sanitize_stored_avatars() -> dict[str, int]:
             if avatar_path is None:
                 continue
             summary["checked"] += 1
+            if avatar_path.is_symlink():
+                _safe_remove_file(avatar_path)
+                user.avatar_url = None
+                summary["removed"] += 1
+                continue
             if not avatar_path.exists():
                 user.avatar_url = None
                 summary["removed"] += 1
                 continue
             try:
+                with avatar_path.open("rb") as source:
+                    avatar_content = source.read(AVATAR_MAX_BYTES + 1)
                 sanitized = sanitize_image_upload(
                     filename=avatar_path.name,
-                    content=avatar_path.read_bytes(),
+                    content=avatar_content,
                     content_type=None,
                     max_bytes=AVATAR_MAX_BYTES,
                 )
@@ -310,7 +322,7 @@ def sanitize_stored_avatars() -> dict[str, int]:
                 summary["removed"] += 1
                 continue
 
-            canonical_name = f"{uuid.uuid4().hex}.{sanitized.extension}"
+            canonical_name = avatar_path.name if avatar_path.parent == _get_avatar_upload_dir() else f"{uuid.uuid4().hex}.{sanitized.extension}"
             canonical_path = _get_avatar_upload_dir() / canonical_name
             avatar_path_resolved = avatar_path.resolve(strict=False)
             canonical_path.write_bytes(sanitized.content)
@@ -319,6 +331,26 @@ def sanitize_stored_avatars() -> dict[str, int]:
                 _safe_remove_file(avatar_path)
             summary["migrated"] += 1
         db.commit()
+        # Only image-upload locations are scanned; repository artifacts are not touched.
+        for directory in {_get_avatar_upload_dir(), get_upload_root(), get_upload_root() / "avatars"}:
+            if not directory.exists():
+                continue
+            for candidate in directory.iterdir():
+                if candidate.is_symlink():
+                    _safe_remove_file(candidate)
+                    summary["removed"] += 1
+                    continue
+                if not candidate.is_file():
+                    continue
+                if directory == get_upload_root() and candidate.suffix.lower() not in {".png", ".jpg", ".jpeg", ".html", ".htm", ".svg"}:
+                    continue
+                try:
+                    with candidate.open("rb") as source:
+                        sanitized = sanitize_image_upload(filename=candidate.name, content=source.read(AVATAR_MAX_BYTES + 1), content_type=None, max_bytes=AVATAR_MAX_BYTES)
+                    candidate.write_bytes(sanitized.content)
+                except HTTPException:
+                    _safe_remove_file(candidate)
+                    summary["removed"] += 1
         return summary
     except Exception:
         db.rollback()
@@ -351,7 +383,7 @@ async def upload_avatar(request: Request, file: UploadFile = File(...), db: Sess
     """上传头像"""
     sanitized = sanitize_image_upload(
         filename=file.filename or "",
-        content=await file.read(),
+        content=await file.read(AVATAR_MAX_BYTES + 1),
         content_type=file.content_type,
         max_bytes=AVATAR_MAX_BYTES,
     )
@@ -376,8 +408,10 @@ async def get_avatar(filename: str):
     safe = Path(filename).name
     validate_image_filename(safe)
     path = _get_avatar_upload_dir() / safe
-    if not path.exists():
+    if path.is_symlink() or not path.is_file():
         raise HTTPException(status_code=404, detail="头像不存在")
+    with path.open("rb") as source:
+        sanitize_image_upload(filename=safe, content=source.read(AVATAR_MAX_BYTES + 1), content_type=None, max_bytes=AVATAR_MAX_BYTES)
     media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     return FileResponse(
         str(path),

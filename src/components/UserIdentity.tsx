@@ -47,7 +47,20 @@ export const UserAvatar: React.FC<UserAvatarProps> = ({
   title,
 }) => {
   const displayName = getUserDisplayName(user, fallbackName)
-  const avatarUrl = getUserAvatarUrl(user)
+  const [updatedProfile, setUpdatedProfile] = useState<Record<string, any> | null>(null)
+  useEffect(() => {
+    setUpdatedProfile(null)
+    const update = (event: Event) => {
+      const profile = (event as CustomEvent).detail
+      if (profile && ((user?.id && profile.id === user.id)
+        || (user?.username && profile.username === user.username))) {
+        setUpdatedProfile(profile)
+      }
+    }
+    window.addEventListener('pcids:user-profile-updated', update)
+    return () => window.removeEventListener('pcids:user-profile-updated', update)
+  }, [user?.id, user?.username, user?.avatar_url])
+  const avatarUrl = getUserAvatarUrl(updatedProfile || user)
   const [imageBroken, setImageBroken] = useState(false)
 
   useEffect(() => {

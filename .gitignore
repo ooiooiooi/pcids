@@ -133,6 +133,7 @@ tools/codearts_release_debugger/browser_runtime/*
 tools/burners/*
 !tools/burners/AL321/
 tools/burners/AL321/*
+!tools/burners/AL321/run-program-flash-stream.ps1
 !tools/burners/AL321/drivers/
 tools/burners/AL321/drivers/*
 !tools/burners/AL321/drivers/switch-al321-driver.ps1
@@ -141,6 +142,11 @@ tools/burners/GOWIN/*
 !tools/burners/GOWIN/drivers/
 tools/burners/GOWIN/drivers/*
 !tools/burners/GOWIN/drivers/switch-gowin-usb-mode.ps1
+!tools/burners/XDS510plus/
+tools/burners/XDS510plus/*
+!tools/burners/XDS510plus/drivers/
+tools/burners/XDS510plus/drivers/*
+!tools/burners/XDS510plus/drivers/ensure-xds510plus-mode.ps1
 !tools/burners/HDSC/
 tools/burners/HDSC/*
 !tools/burners/HDSC/hdsc_ccid_agent.py

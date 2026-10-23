@@ -418,6 +418,11 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         self.assertEqual([repo.name for repo in visible], ["legacy.bin"])
 
     def test_web_refresh_uses_stable_path_identity_and_queues_data_sync(self):
+        import tempfile
+        local_copy = tempfile.NamedTemporaryFile(suffix=".pcenc")
+        self.addCleanup(local_copy.close)
+        local_copy.write(b"valid local copy")
+        local_copy.flush()
         project_id = "web-project"
         project_key = f"proj_{project_id}"
         setting = RepositoryProjectSetting(
@@ -446,7 +451,8 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
             remote_repo_id="web-private",
             display_path="/firmware/BOOT.bin",
             download_uri="https://devops.example.com/download?id=file&token=old",
-            file_url="D:/pcids/BOOT.bin.pcenc",
+            file_url=local_copy.name,
+            file_detail_json=json.dumps({"local_exists": True, "local_path": local_copy.name}),
             repo_detail_json=json.dumps(
                 {"repository_mode": "private", "private_source": "web"},
                 ensure_ascii=False,
@@ -507,7 +513,7 @@ class RepositoryCodeartsSyncTests(unittest.TestCase):
         rows = self.db.query(Repository).filter(Repository.project_key == project_key).all()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].id, original_id)
-        self.assertEqual(rows[0].file_url, "D:/pcids/BOOT.bin.pcenc")
+        self.assertEqual(rows[0].file_url, local_copy.name)
         self.assertIn("token=new", rows[0].download_uri)
         self.assertEqual(rows[0].version, "2026.07.30")
         self.assertEqual(json.loads(rows[0].repo_detail_json)["project_name"], "远端真实项目")

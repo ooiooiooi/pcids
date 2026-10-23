@@ -198,8 +198,8 @@ function getNodeLocationState(node?: AnyNode | null) {
   )
   const explicitLocalExists = resolveExplicitBoolean(node?.local_exists, fileDetail.local_exists)
   const explicitServerExists = resolveExplicitBoolean(node?.server_exists, fileDetail.server_exists)
-  const localExists = explicitLocalExists ?? Boolean(localPath && storageLocation !== 'server')
-  const serverExists = explicitServerExists ?? Boolean(serverPath || serverTarget)
+  const localExists = explicitLocalExists === true
+  const serverExists = explicitServerExists === true
   const remoteDownloadable = Boolean(node?.remote_downloadable ?? node?.download_uri ?? fileDetail.download_url ?? fileDetail.download_url_with_id)
 
   return {
@@ -348,6 +348,10 @@ const Repository: React.FC = () => {
   const [codeartsStatusCheckedAt, setCodeartsStatusCheckedAt] = useState(0)
   const [projectOptions, setProjectOptions] = useState<Array<{ label: string; value: string; repositoryMode: CodeartsRepositoryMode }>>([])
   const [currentProjectKey, setCurrentProjectKey] = useState<string>('')
+  const activeProjectRef = useRef(currentProjectKey)
+  activeProjectRef.current = currentProjectKey
+  const connectionCheckSequence = useRef(0)
+  const connectionCheckInFlight = useRef<{ projectKey: string; promise: Promise<boolean>; requestId: object } | null>(null)
   const [repositoryMode, setRepositoryMode] = useState<CodeartsRepositoryMode>('web')
   const initialProjectContextRef = useRef(getRepositoryProjectContext())
 
@@ -544,6 +548,7 @@ const Repository: React.FC = () => {
   }
 
   const refreshCodeartsConfig = async (projectKey = currentProjectKey) => {
+    const sequence = ++connectionCheckSequence.current
     if (!projectKey) {
       setCodeartsCfg({})
       setCodeartsConnected(false)
@@ -553,24 +558,22 @@ const Repository: React.FC = () => {
     }
     try {
       const params = { project_key: projectKey || undefined }
-      const [res, statusRes]: any[] = await Promise.all([
+      const [res]: any[] = await Promise.all([
         repositoryApi.getCodeartsConfig(params),
-        repositoryApi.getCodeartsStatus(params),
+        ensureFreshCodeartsConnection(true, projectKey),
       ])
+      if (projectKey !== activeProjectRef.current || sequence !== connectionCheckSequence.current) return
       if (res?.code === 0) setCodeartsCfg(res.data || {})
-      const connected = Boolean(statusRes?.code === 0 && statusRes?.data?.connected)
-      setCodeartsConnected(connected)
-      setCodeartsConnectionDetail(String(statusRes?.data?.detail || ''))
-      setCodeartsStatusCheckedAt(Date.now())
     } catch {
+      if (projectKey !== activeProjectRef.current || sequence !== connectionCheckSequence.current) return
       setCodeartsConnected(false)
       setCodeartsConnectionDetail('CodeArts 连接检测失败')
       setCodeartsStatusCheckedAt(Date.now())
     }
   }
 
-  const ensureFreshCodeartsConnection = async (force = false) => {
-    if (!currentProjectKey) {
+  const ensureFreshCodeartsConnection = async (force = false, projectKey = currentProjectKey): Promise<boolean> => {
+    if (!projectKey) {
       setCodeartsConnected(false)
       setCodeartsConnectionDetail('请先选择项目')
       setCodeartsStatusCheckedAt(Date.now())
@@ -580,19 +583,32 @@ const Repository: React.FC = () => {
     if (!force && now - codeartsStatusCheckedAt < CODEARTS_CONNECTION_STATUS_TTL_MS) {
       return codeartsConnected
     }
+    const pending = connectionCheckInFlight.current
+    if (pending?.projectKey === projectKey) return pending.promise
+    const requestId = {}
+    const promise: Promise<boolean> = (async () => {
+      try {
+        const statusRes: any = await repositoryApi.getCodeartsStatus({ project_key: projectKey })
+        if (projectKey !== activeProjectRef.current || connectionCheckInFlight.current?.requestId !== requestId) return false
+        const connected = statusRes?.code === 0 && statusRes?.data?.connected === true
+        setCodeartsConnected(connected)
+        setCodeartsConnectionDetail(String(statusRes?.data?.detail || ''))
+        setCodeartsStatusCheckedAt(Date.now())
+        return connected
+      } catch (error: any) {
+        if (projectKey !== activeProjectRef.current || connectionCheckInFlight.current?.requestId !== requestId) return false
+        const detail = String(error?.response?.data?.detail || 'CodeArts 连接检测失败').trim()
+        setCodeartsConnected(false)
+        setCodeartsConnectionDetail(detail)
+        setCodeartsStatusCheckedAt(Date.now())
+        return false
+      }
+    })()
+    connectionCheckInFlight.current = { projectKey, promise, requestId }
     try {
-      const statusRes: any = await repositoryApi.getCodeartsStatus({ project_key: currentProjectKey || undefined })
-      const connected = Boolean(statusRes?.code === 0 && statusRes?.data?.connected)
-      setCodeartsConnected(connected)
-      setCodeartsConnectionDetail(String(statusRes?.data?.detail || ''))
-      setCodeartsStatusCheckedAt(Date.now())
-      return connected
-    } catch (error: any) {
-      const detail = String(error?.response?.data?.detail || 'CodeArts 连接检测失败').trim()
-      setCodeartsConnected(false)
-      setCodeartsConnectionDetail(detail)
-      setCodeartsStatusCheckedAt(Date.now())
-      return false
+      return await promise
+    } finally {
+      if (connectionCheckInFlight.current?.promise === promise) connectionCheckInFlight.current = null
     }
   }
 
@@ -658,7 +674,19 @@ const Repository: React.FC = () => {
   }
 
   useEffect(() => {
-    refreshCodeartsConfig()
+    setCodeartsConnected(false)
+    setCodeartsStatusCheckedAt(0)
+    void refreshCodeartsConfig()
+    const recheck = () => {
+      setCodeartsConnected(false)
+      void refreshCodeartsConfig()
+    }
+    const timer = window.setInterval(recheck, CODEARTS_CONNECTION_STATUS_TTL_MS)
+    window.addEventListener('focus', recheck)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', recheck)
+    }
   }, [currentProjectKey])
 
   useEffect(() => {
@@ -1000,7 +1028,7 @@ const Repository: React.FC = () => {
 
   const handleDownloadArtifact = async (target: DownloadTarget, node: AnyNode, jumpAfterDownload = false) => {
     if (!node?.project_id || !node?.download_uri) return
-    const connected = await ensureFreshCodeartsConnection()
+    const connected = await ensureFreshCodeartsConnection(true)
     if (!connected) {
       message.warning(codeartsConnectionDetail || 'CodeArts 当前无法连接，请稍后重试或改用离线副本')
       setDownloadTaskNotice({ type: 'error', message: codeartsConnectionDetail || 'CodeArts 当前无法连接' })
@@ -1185,7 +1213,7 @@ const Repository: React.FC = () => {
 
   const handleOnlineInstallClick = async (node: AnyNode) => {
     const locationState = getNodeLocationState(node)
-    const connected = await ensureFreshCodeartsConnection()
+    const connected = await ensureFreshCodeartsConnection(true)
     if (!connected) {
       message.warning(codeartsConnectionDetail || 'CodeArts 当前无法连接，请使用已下载到本地的制品进行离线安装')
       return

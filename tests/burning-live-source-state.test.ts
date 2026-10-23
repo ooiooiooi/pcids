@@ -18,10 +18,15 @@ test('burning wizard does not persist mutable business selection state', () => {
 test('artifact source display and submission use current repository state', () => {
   assert.match(
     source,
-    /const effectiveInstallSource = selectedRepository\s*\?\s*getArtifactLocationInfo\(selectedRepository\)\.installSource\s*:\s*'codearts'/,
+    /const effectiveInstallSource = requestedInstallSource \|\| defaultInstallSource/,
   )
-  assert.match(source, /install_source: effectiveInstallSource/)
+  assert.match(source, /install_source: currentInstallSource/)
   assert.match(source, /effectiveInstallSource === 'server'/)
   assert.match(source, /effectiveInstallSource === 'codearts'/)
   assert.match(source, /repositoryApi\.getList\(\{ page: 1, page_size: 500, _ts: Date\.now\(\) \}\)/)
+  assert.match(source, /repositoryApi\.getById\(Number\(selectedRepository\.id\)\)/)
+  assert.match(source, /currentInstallSource === 'local' && !freshLocationState\.localExists/)
+  assert.match(source, /currentInstallSource === 'server' && !freshLocationState\.serverExists/)
+  assert.doesNotMatch(source, /explicitLocalExists \?\? Boolean\(localPath\)/)
+  assert.match(source, /taskApi\.preflight\(submission\)/)
 })

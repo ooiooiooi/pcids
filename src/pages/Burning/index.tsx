@@ -16,7 +16,6 @@ import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm, { ActionConfirmDialog } from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
 import { resolveArtifactSelectionAfterRefresh } from './artifactSelectionState'
-import { DEFAULT_IDE_OPTIONS } from '../../constants/meta'
 import KylinIcon from '../../assets/images/os-kylin-logo.svg'
 import HarmonyIcon from '../../assets/images/os-harmony.svg'
 import SylixIcon from '../../assets/images/os-sylixos.png'
@@ -201,7 +200,6 @@ const renderSingleLineTooltipText = (value: any) => {
   return <EllipsisText value={text} />
 }
 
-const DEFAULT_BOARD_IDE_OPTIONS = ['', ...DEFAULT_IDE_OPTIONS]
 
 const HYBRID_BURN_MODE_OPTIONS = [
   { label: 'TFTP+串口（系统异常/未分区）', value: 'TFTP+串口' },
@@ -320,8 +318,8 @@ const getRepositoryLocationState = (item: any) => {
   const serverTarget = String(item?.server_target || fileDetail?.server_target || item?.storage_target || fileDetail?.storage_target || '').trim()
   const explicitLocalExists = resolveExplicitBoolean(item?.local_exists, fileDetail?.local_exists)
   const explicitServerExists = resolveExplicitBoolean(item?.server_exists, fileDetail?.server_exists)
-  const localExists = explicitLocalExists ?? Boolean(localPath)
-  const serverExists = explicitServerExists ?? Boolean(serverPath || serverTarget)
+  const localExists = explicitLocalExists === true
+  const serverExists = explicitServerExists === true
   const remoteDownloadable = Boolean(item?.remote_downloadable ?? item?.download_uri ?? fileDetail?.download_url ?? fileDetail?.download_url_with_id)
   return {
     localExists: localExists && Boolean(localPath),
@@ -349,7 +347,7 @@ const getArtifactLocationInfo = (item: any) => {
   if (locationState.serverExists) {
     return { value: '服务器', color: 'blue', detail: serverPath || '-', filters: ['服务器'], installSource: 'server' }
   }
-  if (locationState.localExists || item?.source_type === 'local_upload') {
+  if (locationState.localExists) {
     return { value: '本地', color: 'blue', detail: localPath || '-', filters: ['本地'], installSource: 'local' }
   }
   return {
@@ -369,13 +367,13 @@ const getArtifactCurrentPath = (item: any) => {
     return [localPath, serverPath].filter(Boolean).join(' | ') || '-'
   }
   if (locationState.serverExists) return serverPath || '-'
-  if (locationState.localExists || item?.source_type === 'local_upload') return localPath || '-'
+  if (locationState.localExists) return localPath || '-'
   return item?.display_path || item?.download_uri || '-'
 }
 
 const createInitialWizardData = (initialState?: any) => ({
   software: initialState?.softwareId || null,
-  installSource: 'codearts',
+  installSource: ['local', 'server', 'codearts'].includes(initialState?.installSource) ? initialState.installSource : '',
   boardId: null,
   osId: initialState?.osId || (initialState?.taskType === 'os' ? DEFAULT_OS_ID : null),
   burnerId: null,
@@ -555,9 +553,18 @@ const Burning: React.FC = () => {
   const [isBoardDetailOpen, setIsBoardDetailOpen] = useState(false)
   const [versionBaselineReady, setVersionBaselineReady] = useState(false)
   const [versionBaselineChecksum, setVersionBaselineChecksum] = useState('')
-  const [boardIdeOptions, setBoardIdeOptions] = useState<string[]>(DEFAULT_BOARD_IDE_OPTIONS)
+  const [boardIdeOptions, setBoardIdeOptions] = useState<string[]>([''])
   const [hybridConnectionPassed, setHybridConnectionPassed] = useState(false)
   const [wizardSubmitLoading, setWizardSubmitLoading] = useState(false)
+  const wizardSubmitInFlight = useRef(false)
+  const executingTaskIds = useRef(new Set<number>())
+  const [versionMismatchDialog, setVersionMismatchDialog] = useState<{
+    repositoryName: string
+    historyChecksum: string
+    currentChecksum: string
+    integrityFailed: boolean
+  } | null>(null)
+  const versionMismatchResolver = useRef<((confirmed: boolean) => void) | null>(null)
   const [wizardBoardPage, setWizardBoardPage] = useState(1)
   const [wizardBoardPageSize, setWizardBoardPageSize] = useState(5)
   const [deletingTaskId, setDeletingTaskId] = useState<number | null>(null)
@@ -565,6 +572,28 @@ const Burning: React.FC = () => {
   const [terminateDialogTask, setTerminateDialogTask] = useState<any | null>(null)
   const [terminateReason, setTerminateReason] = useState('')
   const canOverrideTask = hasPermission('burning:override')
+  const closeVersionMismatchDialog = (confirmed: boolean) => {
+    const resolve = versionMismatchResolver.current
+    versionMismatchResolver.current = null
+    setVersionMismatchDialog(null)
+    resolve?.(confirmed && canOverrideTask)
+  }
+
+  useEffect(() => {
+    return () => {
+      versionMismatchResolver.current?.(false)
+      versionMismatchResolver.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isWizardOpen || !canOverrideTask) {
+      closeVersionMismatchDialog(false)
+    }
+  }, [isWizardOpen, canOverrideTask])
+  useEffect(() => {
+    closeVersionMismatchDialog(false)
+  }, [currentProject.projectKey])
   const isTaskActive = (task?: any) => [1, 4].includes(Number(task?.status))
   const runningTaskIds = useMemo(
     () => dataSource
@@ -588,11 +617,10 @@ const Burning: React.FC = () => {
         const values = Array.isArray(res?.data)
           ? res.data.map((item: any) => String(item?.name || '').trim()).filter(Boolean)
           : []
-        if (values.length > 0) {
-          setBoardIdeOptions(['', ...values])
-        }
+        setBoardIdeOptions(['', ...values])
       } catch {
-        setBoardIdeOptions(DEFAULT_BOARD_IDE_OPTIONS)
+        setBoardIdeOptions([''])
+        message.error('IDE 选项加载失败，请刷新后重试')
       }
     }
     void fetchIdeOptions()
@@ -858,7 +886,6 @@ const Burning: React.FC = () => {
     artifactSelectionUserTouchedRef.current = false
     const nextWizardData = {
       ...createInitialWizardData(initialState),
-      installSource: 'codearts',
     }
     setWizardData(nextWizardData)
     setBurnerOnlineMap({})
@@ -1115,22 +1142,11 @@ const Burning: React.FC = () => {
   }
 
   const selectedRepository = repositories.find((repo) => repo.id === wizardData.software)
-  const selectedRepositoryLocation = selectedRepository ? getRepositoryLocationState(selectedRepository) : null
   const defaultInstallSource = selectedRepository
     ? getArtifactLocationInfo(selectedRepository).installSource
     : 'codearts'
   const requestedInstallSource = String(wizardData.installSource || '').trim()
-  const effectiveInstallSource = selectedRepository
-    ? (
-      requestedInstallSource === 'local' && selectedRepositoryLocation?.localExists
-        ? 'local'
-        : requestedInstallSource === 'server' && selectedRepositoryLocation?.serverExists
-          ? 'server'
-          : requestedInstallSource === 'codearts' && selectedRepositoryLocation?.remoteDownloadable
-            ? 'codearts'
-            : defaultInstallSource
-    )
-    : 'codearts'
+  const effectiveInstallSource = requestedInstallSource || defaultInstallSource
   const selectedOsType = wizardData.osId ? osTypeMap[Number(wizardData.osId)] : ''
   const isHarmonyOs = selectedOsType === 'harmony'
   const isSylixOs = selectedOsType === 'yinghui'
@@ -1418,119 +1434,28 @@ const Burning: React.FC = () => {
       if (res?.code === 0 && res?.data) {
         return res.data
       }
-    } catch {
-      // ignore and fall back to cached data
+    } catch (error) {
+      throw new Error('无法重新确认制品文件状态，请刷新后重试')
     }
-    return selectedRepository
+    throw new Error('无法重新确认制品文件状态，请刷新后重试')
   }
 
-  const confirmVersionMismatchBeforeSubmit = async (historyChecksum: string, currentChecksum: string) => {
+  const confirmVersionMismatchBeforeSubmit = async (historyChecksum: string, currentChecksum: string, repositoryName?: string, integrityFailed = false) => {
     if (!canOverrideTask) return false
+    if (versionMismatchResolver.current) return false
     return new Promise<boolean>((resolve) => {
-      Modal.confirm({
-        title: '版本一致性比对失败，是否强制覆盖执行？',
-        content: (
-          <div>
-            <div style={{ marginBottom: 8 }}>当前制品与该制品上次成功烧录的校验码不一致。</div>
-            <div style={{ marginBottom: 8 }}>制品：{selectedRepository?.name || '-'}</div>
-            <div style={{ marginBottom: 8, wordBreak: 'break-all' }}>当前校验码：{currentChecksum}</div>
-            <div style={{ wordBreak: 'break-all' }}>历史基线：{historyChecksum}</div>
-          </div>
-        ),
-        okText: '强制覆盖并继续',
-        cancelText: '取消',
-        centered: true,
-        onOk: () => resolve(true),
-        onCancel: () => resolve(false),
+      versionMismatchResolver.current = resolve
+      setVersionMismatchDialog({
+        repositoryName: repositoryName || selectedRepository?.name || '-',
+        historyChecksum,
+        currentChecksum,
+        integrityFailed,
       })
     })
   }
 
   const validateOsConfig = () => {
     if (!validateOsRequiredFields(true)) return false
-    return validateCommonTaskOptions()
-    if (!wizardData.osId) {
-      message.warning('请选择操作系统')
-      return false
-    }
-    if (isHarmonyOs) {
-      if (!String(wizardData.harmonyDeviceId || '').trim()) {
-        message.warning('请选择鸿蒙设备')
-        return false
-      }
-      return validateCommonTaskOptions()
-    }
-    if (isSylixOs) {
-      if (!String(wizardData.targetIp || '').trim()) {
-        message.warning('请输入目标地址')
-        return false
-      }
-      if (hasInvalidWhitespace(wizardData.targetIp)) {
-        message.warning('目标地址格式不正确，请勿包含空格')
-        return false
-      }
-      if (!isValidPort(wizardData.ftpPort)) {
-        message.warning('FTP端口需在1-65535之间')
-        return false
-      }
-      if (!String(wizardData.loginUsername || '').trim()) {
-        message.warning('请输入登录用户')
-        return false
-      }
-      if (!wizardData.loginPasswordless && !String(wizardData.loginPassword || '').trim()) {
-        message.warning('请输入登录密码，或勾选免密登录')
-        return false
-      }
-      if (!String(wizardData.installDir || '').trim()) {
-        message.warning('请输入安装目录')
-        return false
-      }
-      return validateCommonTaskOptions()
-    }
-    if (!String(wizardData.targetIp || '').trim()) {
-      message.warning('请输入目标地址')
-      return false
-    }
-    if (hasInvalidWhitespace(wizardData.targetIp)) {
-      message.warning('目标地址格式不正确，请勿包含空格')
-      return false
-    }
-    if (!String(wizardData.targetPort || '').trim()) {
-      message.warning('请输入目标端口')
-      return false
-    }
-    if (!isValidPort(wizardData.targetPort)) {
-      message.warning('目标端口需在1-65535之间')
-      return false
-    }
-    if (!String(wizardData.connectionProtocol || '').trim()) {
-      message.warning('请选择连接协议')
-      return false
-    }
-    if (isSshOnlyOs && wizardData.connectionProtocol !== 'SSH') {
-      message.warning('银河麒麟/统信UOS仅支持SSH连接')
-      return false
-    }
-    if (!String(wizardData.authType || '').trim()) {
-      message.warning('请选择认证方式')
-      return false
-    }
-    if (!String(wizardData.loginUsername || '').trim()) {
-      message.warning('请输入登录用户名')
-      return false
-    }
-    if (wizardData.authType === 'password' && !String(wizardData.loginPassword || '').trim()) {
-      message.warning('请输入登录密码')
-      return false
-    }
-    if (!String(wizardData.installDir || '').trim()) {
-      message.warning('请输入安装目录')
-      return false
-    }
-    if (!osConnectionResult?.success) {
-      message.warning('请先完成连接测试并确保通过')
-      return false
-    }
     return validateCommonTaskOptions()
   }
 
@@ -2425,7 +2350,9 @@ const Burning: React.FC = () => {
   }, [isWizardOpen, platform, currentStep, recommendedBurnerIdsKey])
 
   const handleWizardFinish = async () => {
-    if (wizardSubmitLoading) return
+    if (wizardSubmitInFlight.current) return
+    wizardSubmitInFlight.current = true
+    setWizardSubmitLoading(true)
     try {
       if (!selectedRepository) {
         message.warning('请选择可执行文件')
@@ -2454,21 +2381,6 @@ const Burning: React.FC = () => {
       if (currentInstallSource === 'server' && !freshLocationState.serverExists) {
         message.warning('当前服务器副本已不存在，请重新下载到服务器后再创建任务')
         return
-      }
-      let overrideConfirmed = false
-      if (effectiveWizardOptions.includes('version')) {
-        const historyChecksum = String(versionBaselineChecksum || '').trim().toLowerCase()
-        const currentChecksum = String(getRepositoryChecksum(freshRepository) || '').trim().toLowerCase()
-        if (historyChecksum && currentChecksum && historyChecksum !== currentChecksum) {
-          if (!canOverrideTask) {
-            message.warning('当前制品与历史基线不一致，且你没有强制覆盖权限，无法继续提交')
-            return
-          }
-          overrideConfirmed = await confirmVersionMismatchBeforeSubmit(historyChecksum, currentChecksum)
-          if (!overrideConfirmed) {
-            return
-          }
-        }
       }
       const activeBoardConfigKeys = new Set(
         platform === 'board' || platform === 'hybrid'
@@ -2550,7 +2462,7 @@ const Burning: React.FC = () => {
         remark: String(wizardData.remark || '').trim() || undefined,
         extra_config: wizardData.config || undefined,
       }
-      const createRes: any = await taskApi.create({
+      const submission = {
         software_name: freshRepository?.name || selectedRepository.name,
         repository_id: freshRepository?.id || selectedRepository.id,
         task_type: platform || undefined,
@@ -2576,21 +2488,41 @@ const Burning: React.FC = () => {
         expected_checksum: configPayload.expected_checksum,
         version_check: configPayload.version_check ? 1 : 0,
         history_checksum: configPayload.history_checksum,
-        override_confirmed: overrideConfirmed ? 1 : 0,
         // 创建成功后由后端直接推上执行轨道，不会再额外生成新任务
         auto_execute: true,
-      })
+      }
+      const preflightRes: any = await taskApi.preflight(submission)
+      const checks = preflightRes?.data
+      if (preflightRes?.code !== 0 || !checks) throw new Error('提交前校验失败，请重试')
+      let overrideToken: string | undefined
+      if (checks.version_mismatch) {
+        if (!checks.can_override || !canOverrideTask || !checks.override_token) {
+          message.warning('版本一致性比对失败，当前账号没有强制覆盖权限')
+          return
+        }
+        const confirmed = await confirmVersionMismatchBeforeSubmit(
+          checks.baseline, checks.baseline?.length === 32 ? checks.md5 : checks.sha256,
+          checks.repository_name, !checks.integrity_passed,
+        )
+        if (!confirmed) return
+        overrideToken = checks.override_token
+      } else if (!checks.integrity_passed) {
+        message.error('完整性校验失败，请重新下载正确文件')
+        return
+      }
+      const createRes: any = await taskApi.create({ ...submission, override_token: overrideToken })
       const isAutoExecuted = createRes?.data?.auto_executed === true || createRes?.data?.auto_executed === 1
       const createdTaskId = Number(createRes?.data?.id || 0)
       const createdTaskNo = String(createRes?.data?.task_no || createRes?.data?.id || '-')
       // 改用受控轻提示（参考登录成功的轻提示风格），避免大弹窗遮挡列表。
       // 用稳定 key：重复提交时只更新内容，不叠加多个 message。
-      const tipText = isAutoExecuted
+      const recordedFailure = Number(createRes?.data?.status) === 3
+      const tipText = recordedFailure ? createRes.message : isAutoExecuted
         ? `任务创建成功（${createdTaskNo}），已自动开始执行`
         : `任务创建成功（${createdTaskNo}），等待手动启动执行`
       message.open({
         key: `task-created-${createdTaskId || 'unknown'}`,
-        type: 'success',
+        type: recordedFailure ? 'warning' : 'success',
         content: tipText,
         duration: 4,
       })
@@ -2600,6 +2532,7 @@ const Burning: React.FC = () => {
       const errorText = getBurningRequestErrorMessage(e, '创建失败，请检查上方必填项和设备配置')
       message.error(errorText)
     } finally {
+      wizardSubmitInFlight.current = false
       setWizardSubmitLoading(false)
     }
   }
@@ -2683,10 +2616,29 @@ const Burning: React.FC = () => {
   }
 
   const handleExecute = async (id: number) => {
+    if (executingTaskIds.current.has(id)) return
+    executingTaskIds.current.add(id)
     const messageKey = `execute-task-${id}`
     message.open({ key: messageKey, type: 'loading', content: '正在启动烧录安装任务，请稍候...', duration: 0 })
     try {
-      const res: any = await taskApi.execute(id)
+      const preflight: any = await taskApi.preflightExisting(id)
+      const checks = preflight?.data
+      if (preflight?.code !== 0 || !checks) throw new Error('执行前校验失败')
+      let overrideToken: string | undefined
+      if (checks.version_mismatch) {
+        if (!checks.can_override || !canOverrideTask || !checks.override_token) {
+          throw new Error('版本一致性比对失败，当前账号没有强制覆盖权限')
+        }
+        message.destroy(messageKey)
+        if (!await confirmVersionMismatchBeforeSubmit(
+          checks.baseline, checks.baseline?.length === 32 ? checks.md5 : checks.sha256,
+          checks.repository_name, !checks.integrity_passed,
+        )) return
+        overrideToken = checks.override_token
+      } else if (!checks.integrity_passed) {
+        throw new Error('完整性校验失败，请重新下载')
+      }
+      const res: any = await taskApi.execute(id, overrideToken)
       const nextTaskId = Number(res?.data?.id || 0)
       message.open({
         key: messageKey,
@@ -2706,6 +2658,8 @@ const Burning: React.FC = () => {
         content: getBurningRequestErrorMessage(e, '任务启动失败，请检查任务配置、设备连接和执行工具后重试'),
         duration: 5,
       })
+    } finally {
+      executingTaskIds.current.delete(id)
     }
   }
 
@@ -2747,12 +2701,7 @@ const Burning: React.FC = () => {
   }
 
   const handleOverride = async (taskId: number) => {
-    try {
-      await taskApi.override(taskId)
-      message.success('已允许强制覆盖')
-      await handleOpenConsistency(taskId)
-      fetchTasks()
-    } catch { /* interceptor handles it */ }
+    await handleExecute(taskId)
   }
 
   const handleTaskKeywordSearch = (value?: string) => {
@@ -2832,9 +2781,9 @@ const Burning: React.FC = () => {
       title: '执行人',
       dataIndex: 'executor',
       key: 'executor',
-      render: (text: string) => {
+      render: (text: string, record: any) => {
         const name = text || '-'
-        return <UserIdentity fallbackName={name} avatarSize={23} />
+        return <UserIdentity user={record.executor_user} fallbackName={name} avatarSize={23} />
       },
     },
     { title: '状态', dataIndex: 'status', key: 'status', render: (_s: number, record: any) => {
@@ -4307,6 +4256,24 @@ const Burning: React.FC = () => {
         )}
         {!consistencyTask && !reportLoading && <div>暂无数据</div>}
       </Modal>
+
+      <ActionConfirmDialog
+        open={!!versionMismatchDialog}
+        title="强制覆盖确认"
+        okText={versionMismatchDialog?.integrityFailed ? '确认并记录失败' : '覆盖并继续'}
+        cancelText="取消"
+        onConfirm={() => closeVersionMismatchDialog(true)}
+        onCancel={() => closeVersionMismatchDialog(false)}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowWrap: 'anywhere' }}>
+          <div>{versionMismatchDialog?.integrityFailed
+            ? '版本不一致且完整性校验失败。确认后仅记录失败任务和完整校验码，不会执行烧录或安装。'
+            : '当前制品与上次成功烧录的版本不一致，确认强制覆盖并继续？'}</div>
+          <div>制品：{versionMismatchDialog?.repositoryName}</div>
+          <div>当前校验码：{versionMismatchDialog?.currentChecksum}</div>
+          <div>历史基线：{versionMismatchDialog?.historyChecksum}</div>
+        </div>
+      </ActionConfirmDialog>
 
       <ActionConfirmDialog
         open={!!terminateDialogTask}

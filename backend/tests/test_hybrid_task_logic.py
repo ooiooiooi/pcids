@@ -88,7 +88,7 @@ class HybridTaskLogicTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             expected_path = system_temp_root / "PCIDS" / "tftp" / "bspls2kpcm2k01.elf"
-            self.assertEqual(Path(staged_path), expected_path)
+            self.assertEqual(Path(staged_path).resolve(), expected_path.resolve())
             self.assertEqual(filename, "bspls2kpcm2k01.elf")
             self.assertEqual(expected_path.read_bytes(), b"pcids-sylixos")
 

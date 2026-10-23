@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,11 +15,15 @@ from backend.models.base import Base
 from backend.models.user import User
 from backend.routers import auth
 from backend.utils.db import get_db
+from PIL import Image
 
 
-_PNG_1X1 = base64.b64decode(
+_CORRUPT_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2pK7sAAAAASUVORK5CYII="
 )
+_PNG_BUFFER = BytesIO()
+Image.new("RGBA", (1, 1), (255, 0, 0, 255)).save(_PNG_BUFFER, format="PNG")
+_PNG_1X1 = _PNG_BUFFER.getvalue()
 
 
 def _make_client(tmp_path: Path):
@@ -57,7 +62,7 @@ def _make_client(tmp_path: Path):
     app.dependency_overrides[auth.get_current_user] = override_get_current_user
 
     upload_root = tmp_path / "uploads"
-    avatar_root = upload_root / "avatars"
+    avatar_root = tmp_path / "avatars"
     avatar_root.mkdir(parents=True, exist_ok=True)
 
     patches = [
@@ -85,6 +90,35 @@ def test_avatar_upload_rejects_html_disguised_as_png(tmp_path: Path):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "上传内容不是合法图片"
+
+
+def test_avatar_upload_rejects_corrupt_png(tmp_path: Path):
+    client, _, _, patches, _, _ = _make_client(tmp_path)
+    try:
+        response = client.post("/api/auth/avatar", files={"file": ("avatar.png", _CORRUPT_PNG, "image/png")})
+        assert response.status_code == 400
+        assert "安全解码" in response.json()["detail"]
+    finally:
+        for item in reversed(patches):
+            item.stop()
+        close_all_sessions()
+
+
+def test_avatar_upload_reencodes_and_strips_metadata(tmp_path: Path):
+    from PIL.PngImagePlugin import PngInfo
+    output = BytesIO()
+    metadata = PngInfo()
+    metadata.add_text("Comment", "<script>marker</script>")
+    Image.new("RGB", (2, 2)).save(output, format="PNG", pnginfo=metadata)
+    client, _, _, patches, avatar_root, _ = _make_client(tmp_path)
+    try:
+        response = client.post("/api/auth/avatar", files={"file": ("avatar.png", output.getvalue(), "image/png")})
+        assert response.status_code == 200
+        assert b"<script>" not in next(avatar_root.iterdir()).read_bytes()
+    finally:
+        for item in reversed(patches):
+            item.stop()
+        close_all_sessions()
 
 
 def test_avatar_upload_rejects_file_over_2mb(tmp_path: Path):
@@ -177,3 +211,71 @@ def test_sanitize_stored_avatars_removes_invalid_legacy_html_file(tmp_path: Path
 
     assert summary["removed"] == 1
     assert bad_file.exists() is False
+
+
+def test_legacy_api_avatar_migrates_from_old_directory(tmp_path: Path):
+    client, sessions, user_id, patches, avatar_root, upload_root = _make_client(tmp_path)
+    legacy_root = upload_root / "avatars"
+    legacy_root.mkdir(parents=True)
+    legacy = legacy_root / "old.png"
+    legacy.write_bytes(_PNG_1X1)
+    try:
+        with sessions() as db:
+            db.get(User, user_id).avatar_url = "/api/auth/avatar/old.png"
+            db.commit()
+        with patch("backend.routers.auth.SessionLocal", sessions):
+            auth.sanitize_stored_avatars()
+        with sessions() as db:
+            url = db.get(User, user_id).avatar_url
+        assert url != "/api/auth/avatar/old.png"
+        assert client.get(url).status_code == 200
+        assert not legacy.exists()
+        assert len(list(avatar_root.iterdir())) == 1
+    finally:
+        for item in reversed(patches):
+            item.stop()
+        close_all_sessions()
+
+
+def test_avatar_symlink_is_never_served_or_reencoded(tmp_path: Path):
+    client, sessions, user_id, patches, avatar_root, _ = _make_client(tmp_path)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_PNG_1X1)
+    link = avatar_root / "linked.png"
+    link.symlink_to(outside)
+    try:
+        assert client.get("/api/auth/avatar/linked.png").status_code == 404
+        with sessions() as db:
+            db.get(User, user_id).avatar_url = "/api/auth/avatar/linked.png"
+            db.commit()
+        with patch("backend.routers.auth.SessionLocal", sessions):
+            auth.sanitize_stored_avatars()
+        assert not link.is_symlink()
+        assert outside.read_bytes() == _PNG_1X1
+        with sessions() as db:
+            assert db.get(User, user_id).avatar_url is None
+    finally:
+        for item in reversed(patches):
+            item.stop()
+        close_all_sessions()
+
+
+def test_nosniff_covers_unhandled_errors_and_cors_preflight():
+    from fastapi.middleware.cors import CORSMiddleware
+    from backend.main import SecurityHeadersMiddleware
+    app = FastAPI()
+    app.add_middleware(CORSMiddleware, allow_origins=["http://frontend"], allow_methods=["*"])
+    app.add_middleware(SecurityHeadersMiddleware)
+    @app.get("/error")
+    def unexpected_error():
+        raise RuntimeError("private internal information")
+    with TestClient(app) as client:
+        error = client.get("/error")
+        assert error.status_code == 500
+        assert error.headers["x-content-type-options"] == "nosniff"
+        assert "private internal information" not in error.text
+        preflight = client.options("/error", headers={
+            "Origin": "http://frontend", "Access-Control-Request-Method": "GET",
+        })
+        assert preflight.status_code == 200
+        assert preflight.headers["x-content-type-options"] == "nosniff"

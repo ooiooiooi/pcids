@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+import warnings
 
 from fastapi import HTTPException
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 
 AVATAR_MAX_BYTES = 2 * 1024 * 1024
@@ -160,8 +163,27 @@ def sanitize_image_upload(
     if declared_type and declared_type not in _ALLOWED_CONTENT_TYPES[actual_extension]:
         raise HTTPException(status_code=400, detail="文件声明类型与图片真实类型不匹配")
 
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(content)) as image:
+                if image.width * image.height > 16_000_000:
+                    raise ValueError("Image dimensions exceed limit")
+                image.verify()
+            with Image.open(BytesIO(content)) as image:
+                image.load()
+                clean = ImageOps.exif_transpose(image).convert("RGB" if actual_extension == "jpg" else "RGBA")
+                clean.info.clear()
+                output = BytesIO()
+                clean.save(output, format="JPEG" if actual_extension == "jpg" else "PNG")
+                encoded = output.getvalue()
+                if len(encoded) > max_bytes:
+                    raise ValueError("Re-encoded image exceeds limit")
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise HTTPException(status_code=400, detail="图片损坏、尺寸过大或无法安全解码") from exc
+
     return SanitizedImage(
-        content=content,
+        content=encoded,
         extension=actual_extension,
         media_type=_CANONICAL_EXTENSION_TO_MIME[actual_extension],
     )

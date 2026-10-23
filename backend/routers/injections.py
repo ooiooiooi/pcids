@@ -1156,7 +1156,7 @@ async def execute_injection(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _: None = Depends(require_permission("injection:execute"))
+    _: None = Depends(require_permission("injection:add"))
 ):
     """
     执行异常注入脚本并生成执行记录
@@ -1202,7 +1202,7 @@ async def execute_injection(
 async def scan_power_off_ports(
     _db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
-    _: None = Depends(require_permission("injection:execute")),
+    _: None = Depends(require_permission("injection:add")),
 ):
     ports = await _scan_power_ports_or_raise()
     return {"code": 0, "message": "success", "data": ports}
@@ -1213,7 +1213,7 @@ async def test_network_error_connection(
     payload: dict,
     _db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
-    _: None = Depends(require_permission("injection:execute")),
+    _: None = Depends(require_permission("injection:add")),
 ):
     try:
         result = await test_network_connection(payload, target=payload.get("target_ip"))
@@ -1227,7 +1227,7 @@ async def test_storage_full_connection(
     payload: dict,
     _db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
-    _: None = Depends(require_permission("injection:execute")),
+    _: None = Depends(require_permission("injection:add")),
 ):
     try:
         result = await test_network_connection(payload, target=payload.get("target_ip"))
@@ -1241,7 +1241,7 @@ async def test_permission_error_connection(
     payload: dict,
     _db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
-    _: None = Depends(require_permission("injection:execute")),
+    _: None = Depends(require_permission("injection:add")),
 ):
     try:
         result = await test_network_connection({**payload, "extra_commands": ["chmod", "chattr", "lsattr"]}, target=payload.get("target_ip"))
@@ -1298,7 +1298,7 @@ async def recover_power_off_run(
     run_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _: None = Depends(require_permission("injection:execute")),
+    _: None = Depends(require_permission("injection:add")),
 ):
     ensure_schema()
     session = _power_off_sessions.get(run_id)

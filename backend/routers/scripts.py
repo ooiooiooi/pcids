@@ -16,6 +16,7 @@ from backend.routers.auth import get_current_user
 from backend.utils.datetime_utils import database_time_to_local
 from backend.utils.permission import require_permission
 from backend.utils.script_binding import validate_script_binding_payload
+from backend.utils.user_identity import user_identity
 
 router = APIRouter()
 
@@ -269,11 +270,13 @@ async def get_scripts(
         query = query.order_by(Script.updated_at.desc())
         
     scripts = query.offset((page - 1) * page_size).limit(page_size).all()
+    names = {s.modified_by for s in scripts if s.modified_by}
+    modifiers = {u.username: user_identity(u) for u in db.query(User).filter(User.username.in_(names)).all()} if names else {}
 
     return {
         "code": 0,
         "message": "success",
-        "data": [script_to_dict(s) for s in scripts],
+        "data": [{**script_to_dict(s), "modifier_user": modifiers.get(s.modified_by)} for s in scripts],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -296,7 +299,10 @@ async def get_script(
     return {
         "code": 0,
         "message": "success",
-        "data": script_to_dict(script),
+        "data": {
+            **script_to_dict(script),
+            "modifier_user": user_identity(db.query(User).filter(User.username == script.modified_by).first()),
+        },
     }
 
 

@@ -33,7 +33,7 @@ def get_product_upload_root() -> Path:
 
 
 def get_avatar_upload_root() -> Path:
-    root = get_upload_root() / "avatars"
+    root = get_app_data_root() / "avatars"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

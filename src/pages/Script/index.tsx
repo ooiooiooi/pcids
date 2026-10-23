@@ -9,7 +9,6 @@ import { ActionButtonGroup, ActionLinkButton, PagePrimaryButton } from '../../co
 import UserIdentity from '../../components/UserIdentity'
 import ActionConfirm from '../../components/ActionConfirm'
 import EllipsisText from '../../components/EllipsisText'
-import { DEFAULT_IDE_OPTIONS } from '../../constants/meta'
 
 const NONE_ASSOCIATED_IDE_VALUE = '__NONE_ASSOCIATED_IDE__'
 
@@ -143,7 +142,9 @@ const buildScriptPayload = (values: any, options?: { forceBoardTaskType?: boolea
     task_type: nextTaskType,
     associated_ide: values?.associated_ide === NONE_ASSOCIATED_IDE_VALUE ? '' : (values?.associated_ide || ''),
     associated_board: normalizeMultiValue(values?.associated_board).join(','),
-    content: String(values?.content || ''),
+    ...(Object.prototype.hasOwnProperty.call(values || {}, 'content')
+      ? { content: String(values.content ?? '') }
+      : {}),
   }
 }
 
@@ -250,7 +251,7 @@ const Script: React.FC = () => {
   const [editingScriptType, setEditingScriptType] = useState('shell')
   const [contentModalReadOnly, setContentModalReadOnly] = useState(false)
   const [deletingScriptId, setDeletingScriptId] = useState<number | null>(null)
-  const [ideOptions, setIdeOptions] = useState<string[]>(DEFAULT_IDE_OPTIONS)
+  const [ideOptions, setIdeOptions] = useState<string[]>([])
   const canViewScript = hasPermission('script:view')
   const canEditScript = hasPermission('script:edit')
   const ideSelectOptions = useMemo(() => ([
@@ -297,11 +298,10 @@ const Script: React.FC = () => {
         const options = Array.isArray(res?.data)
           ? res.data.map((item: any) => String(item?.name || '').trim()).filter(Boolean)
           : []
-        if (options.length > 0) {
-          setIdeOptions(options)
-        }
+        setIdeOptions(options)
       } catch {
-        setIdeOptions(DEFAULT_IDE_OPTIONS)
+        setIdeOptions([])
+        message.error('IDE 选项加载失败，请刷新后重试')
       }
     }
     void fetchIdeOptions()
