@@ -5,8 +5,22 @@ import axios, { AxiosInstance } from 'axios'
 import { message } from 'antd'
 import { resolveBackendServiceErrorFromAxios, notifyBackendServiceError } from './backendErrorCenter'
 import { API_BASE_URL } from './backendRuntime'
+import { createSessionExpiryHandler } from './sessionExpiry'
 
-let isRedirectingToLogin = false
+const sessionExpiry = createSessionExpiryHandler({
+  getToken: () => localStorage.getItem('token'),
+  clearCredentials: () => {
+    localStorage.removeItem('token')
+    localStorage.removeItem('user')
+    localStorage.removeItem('username')
+  },
+  redirect: () => {
+    if (!window.location.hash.startsWith('#/login')) {
+      window.location.replace('#/login')
+    }
+  },
+  notify: (text) => { message.error(text) },
+})
 
 function formatValidationErrorDetail(detail: any) {
   if (!Array.isArray(detail)) {
@@ -31,24 +45,6 @@ function getResponseErrorMessage(data: any, fallback: string) {
   const detail = typeof data?.detail === 'string' ? data.detail.trim() : ''
   const responseMessage = typeof data?.message === 'string' ? data.message.trim() : ''
   return detail || responseMessage || fallback
-}
-
-function redirectToLogin() {
-  if (isRedirectingToLogin) return
-  isRedirectingToLogin = true
-
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  localStorage.removeItem('username')
-
-  if (!window.location.hash.startsWith('#/login')) {
-    window.location.replace('#/login')
-    return
-  }
-
-  window.setTimeout(() => {
-    isRedirectingToLogin = false
-  }, 300)
 }
 
 // 创建 axios 实例
@@ -77,6 +73,9 @@ request.interceptors.request.use(
 // 响应拦截器
 request.interceptors.response.use(
   (response) => {
+    if (String(response.config.url || '').includes('/auth/login')) {
+      sessionExpiry.reset()
+    }
     return response.data
   },
   (error) => {
@@ -93,20 +92,27 @@ request.interceptors.response.use(
       return Promise.reject(error)
     }
 
+    const isLoginApi = String(error.config?.url || '').includes('/auth/login')
+    if (error.response?.status === 401 && !isLoginApi) {
+      const authorization = String(error.config?.headers?.Authorization || '')
+      const requestToken = /^Bearer\s+(.+)$/i.exec(authorization)?.[1] || null
+      sessionExpiry.handle(
+        requestToken,
+        (error.config as any)?.skipAutoErrorMessage
+          ? undefined
+          : getResponseErrorMessage(error.response.data, '登录已过期，请重新登录'),
+      )
+      return Promise.reject(error)
+    }
+
     if ((error.config as any)?.skipAutoErrorMessage) {
       return Promise.reject(error)
     }
 
     if (error.response) {
       const { status, data } = error.response
-      const requestUrl = String(error.config?.url || '')
-      const isLoginApi = requestUrl.includes('/auth/login')
-      const shouldRedirectToLogin = status === 401 && !isLoginApi
 
-      if (shouldRedirectToLogin) {
-        message.error(getResponseErrorMessage(data, '登录已过期，请重新登录'))
-        redirectToLogin()
-      } else if (status === 401) {
+      if (status === 401) {
         message.error(getResponseErrorMessage(data, '请求未通过认证'))
       } else if (status === 403) {
         // 如果是登录接口，不需要在这里弹出错误，交由页面处理

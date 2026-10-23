@@ -2125,6 +2125,8 @@ def _cleanup_repository_artifacts_after_execution(
     repo: Optional[Repository],
     task: Optional[BurningTask],
     config: Optional[dict],
+    *,
+    verify_deletion: bool = False,
 ) -> None:
     if not repo:
         return
@@ -2145,10 +2147,14 @@ def _cleanup_repository_artifacts_after_execution(
     try:
         if cleanup_local and location_state["local_exists"]:
             _remove_repository_file_by_path(location_state["local_path"])
+            if verify_deletion and location_state["local_path"] and os.path.exists(location_state["local_path"]):
+                raise OSError("Local artifact still exists after cleanup")
             next_local_exists = False
             next_local_path = None
         if cleanup_server and location_state["server_exists"]:
             _remove_repository_server_artifact(location_state["server_path"], location_state["server_target"])
+            if verify_deletion and location_state["server_path"] and os.path.exists(location_state["server_path"]):
+                raise OSError("Server artifact still exists after cleanup")
             next_server_exists = False
             next_server_path = None
             next_server_target = None
@@ -2217,8 +2223,9 @@ async def execute_task(
     old_token = payload.get("override_token") or task_config.get("_override_token")
     verification_task = BurningTask(**TaskCreate.model_validate(source_task, from_attributes=True).model_dump(exclude={"auto_execute", "override_token"}))
     repo, selected_burner, task_config = _prepare_submission_config(db, verification_task, current_user)
-    checks = await _submission_checks(db, verification_task, repo, task_config, selected_burner, current_user)
-    _validate_submit_stage_consistency_override(verification_task, task_config, checks, current_user, old_token)
+    checks = await _checked_submission(
+        db, verification_task, repo, task_config, selected_burner, current_user, old_token,
+    )
     if not repo or not repo.file_url:
         raise HTTPException(status_code=400, detail="当前任务没有可用的制品文件，请先确认软件包已正确绑定后再执行")
 
@@ -2476,7 +2483,8 @@ def _verify_override_token(token: Optional[str], task: BurningTask, config: dict
 
 
 async def _submission_checks(db: Session, task: BurningTask, repo: Repository, config: dict,
-                             burner: Optional[Burner], user: User, *, preflight_only: bool = False) -> dict:
+                             burner: Optional[Burner], user: User, *, preflight_only: bool = False,
+                             cleanup_tracker: Optional[dict] = None) -> dict:
     task.integrity = int(bool(config.get("integrity", task.integrity)))
     task.version_check = int(bool(config.get("version_check", task.version_check)))
     task.keep_local = int(bool(config.get("keep_local", task.keep_local)))
@@ -2490,6 +2498,11 @@ async def _submission_checks(db: Session, task: BurningTask, repo: Repository, c
     repo, cleanup_plan = await asyncio.to_thread(
         _ensure_repository_file_available_for_execution, db, repo, user, burner=burner, config=preparation_config,
     )
+    if cleanup_tracker is not None:
+        cleanup_tracker.update(
+            plan=cleanup_plan,
+            location=_get_repository_location_state(repo, _safe_json_loads(repo.file_detail_json)),
+        )
     if not preflight_only:
         config.update(cleanup_plan)
     path = _resolve_existing_local_repository_artifact_path(repo)
@@ -2528,6 +2541,64 @@ def _validate_submit_stage_consistency_override(task: BurningTask, config: dict,
         config["_override_token"] = token
     if not checks["integrity_passed"] and not task.override_confirmed:
         raise HTTPException(status_code=400, detail="完整性校验失败")
+
+
+def _cleanup_failed_submission(db: Session, repository_id: int, tracker: dict) -> None:
+    plan = dict(tracker.get("plan") or {})
+    if not any(plan.get(key) for key in (
+        "cleanup_local_artifact_after_execution", "cleanup_server_artifact_after_execution",
+    )):
+        return
+    try:
+        db.rollback()
+        # Serialize the usage check with task claims and repository metadata writes.
+        if db.get_bind().dialect.name == "sqlite":
+            db.execute(text("BEGIN IMMEDIATE"))
+        repo = db.query(Repository).populate_existing().filter(Repository.id == repository_id).first()
+        if not repo:
+            db.rollback()
+            return
+        shared = db.query(BurningTask.id).filter(
+            BurningTask.repository_id == repository_id,
+            BurningTask.status.in_([
+                int(TaskStatus.PENDING), int(TaskStatus.RUNNING), int(TaskStatus.TERMINATING),
+            ]),
+        ).first()
+        if shared:
+            logger.info("task.submission.cleanup_deferred | repository_id=%s", repository_id)
+            db.rollback()
+            return
+        current = _get_repository_location_state(repo, _safe_json_loads(repo.file_detail_json))
+        owned = tracker["location"]
+        plan["cleanup_local_artifact_after_execution"] = bool(
+            plan.get("cleanup_local_artifact_after_execution")
+            and current["local_path"] == owned["local_path"]
+        )
+        plan["cleanup_server_artifact_after_execution"] = bool(
+            plan.get("cleanup_server_artifact_after_execution")
+            and current["server_path"] == owned["server_path"]
+            and current["server_target"] == owned["server_target"]
+        )
+        _cleanup_repository_artifacts_after_execution(db, repo, None, plan, verify_deletion=True)
+        db.rollback()
+    except Exception:
+        db.rollback()
+        logger.exception("task.submission.cleanup_failed | repository_id=%s", repository_id)
+
+
+async def _checked_submission(db: Session, task: BurningTask, repo: Repository, config: dict,
+                              burner: Optional[Burner], user: User, token: Optional[str]) -> dict:
+    tracker: dict = {}
+    repository_id = repo.id
+    try:
+        checks = await _submission_checks(
+            db, task, repo, config, burner, user, cleanup_tracker=tracker,
+        )
+        _validate_submit_stage_consistency_override(task, config, checks, user, token)
+        return checks
+    except Exception:
+        _cleanup_failed_submission(db, repository_id, tracker)
+        raise
 
 
 def _record_submission_integrity_failure(task: BurningTask, config: dict, checks: dict) -> None:
@@ -8348,8 +8419,9 @@ async def create_task(
     if bool(task.override_confirmed) or override_token:
         _require_override_permission(current_user)
     task.current_md5 = task.current_sha256 = task.integrity_passed = task.consistency_passed = None
-    checks = await _submission_checks(db, task, selected_repo, config, selected_burner, current_user)
-    _validate_submit_stage_consistency_override(task, config, checks, current_user, override_token)
+    checks = await _checked_submission(
+        db, task, selected_repo, config, selected_burner, current_user, override_token,
+    )
     task.config_json = json.dumps(config, ensure_ascii=False)
     if not checks["integrity_passed"]:
         _record_submission_integrity_failure(task, config, checks)
