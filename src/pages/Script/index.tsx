@@ -344,6 +344,7 @@ const Script: React.FC = () => {
     try {
       const payload = {
         ...buildScriptPayload(values, { forceBoardTaskType: true }),
+        content: String(values?.content ?? ''),
         status: 0,
       }
       const res: any = await scriptApi.create(payload)

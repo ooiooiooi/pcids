@@ -236,7 +236,7 @@ function escapeHtml(value: string): string {
 function getStandaloneTitlebarMarkup(): string {
   return `
   <header class="desktop-titlebar">
-    <span class="desktop-titlebar__title">程控安装部署系统</span>
+    <span class="desktop-titlebar__title">嵌入式软件安装性测试工具</span>
     <nav class="desktop-titlebar__controls" aria-label="窗口控制">
       <button type="button" aria-label="最小化" title="最小化" onclick="window.electronAPI?.windowControls.minimize()">&#8722;</button>
       <button type="button" aria-label="最大化或还原" title="最大化或还原" onclick="window.electronAPI?.windowControls.toggleMaximize()">&#9633;</button>
@@ -294,7 +294,7 @@ function getStartupPageUrl(): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>程控安装部署系统</title>
+  <title>嵌入式软件安装性测试工具</title>
   <style>
     :root {
       color-scheme: light;
@@ -382,7 +382,7 @@ function getStartupPageUrl(): string {
 <body>
   ${getStandaloneTitlebarMarkup()}
   <main>
-    <p class="brand">程控安装部署系统</p>
+    <p class="brand">嵌入式软件安装性测试工具</p>
     <div class="row">
       <div class="spinner" aria-hidden="true"></div>
       <h1>正在启动本地服务</h1>

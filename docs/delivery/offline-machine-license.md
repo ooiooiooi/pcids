@@ -69,7 +69,7 @@ npm run build:license-tool:win
 1. 安装并至少启动一次 PCIDS。
 2. 将完整签发工具目录临时复制到目标电脑并运行 `PCIDS-License-Issuer.exe`。
 3. “签发资料目录”选择签发工具所在目录。
-4. “软件 data 目录”选择 PCIDS 安装目录下的 `data`，例如 `C:\Program Files\程控安装部署系统\data`。
+4. “软件 data 目录”选择 PCIDS 安装目录下的 `data`，例如 `C:\Program Files\嵌入式软件安装性测试工具\data`。
 5. 填写客户编号、客户名称、该客户授权机器总数和可选截止日期。
 6. 点击“生成并安装 License”，生成文件位于 `<data>\license\pcids.lic`。
 7. 确认 PCIDS 授权有效后，带走完整签发工具目录；目标电脑只保留 License。
@@ -79,7 +79,7 @@ npm run build:license-tool:win
 ```powershell
 .venv\Scripts\python.exe scripts\license_issuer.py issue `
   --issuer-dir D:\PCIDS-License-Issuer `
-  --data-dir "C:\Program Files\程控安装部署系统\data" `
+  --data-dir "C:\Program Files\嵌入式软件安装性测试工具\data" `
   --customer-id CUSTOMER-001 `
   --customer-name 示例客户 `
   --limit 12 `

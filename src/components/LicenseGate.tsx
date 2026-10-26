@@ -116,7 +116,7 @@ const LicenseGate = ({ children }: { children: ReactNode }) => {
         <div className="login-desktop-titlebar">
           <div className="login-desktop-titlebar__brand">
             <img src={SoftwareLogo} alt="" />
-            <span>嵌入式安装性测试工具</span>
+            <span>嵌入式软件安装性测试工具</span>
           </div>
           <DesktopWindowControls />
         </div>

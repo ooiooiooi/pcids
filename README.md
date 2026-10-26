@@ -1,4 +1,4 @@
-# 程控安装部署系统（PCIDS）
+# 嵌入式软件安装性测试工具（PCIDS）
 
 PCIDS（Programmatic Control Installation & Deployment System）是一套面向嵌入式软件安装性测试与现场部署的桌面系统。  
 它把“制品获取、烧录器管理、脚本执行、安装部署、异常注入、协议验证、履历留存”串成一条完整业务链，适用于板卡烧录、目标机安装、混合协同部署和交付验收场景。
@@ -249,7 +249,7 @@ npx.cmd electron-builder --win nsis
 输出目录：
 
 ```text
-release/程控安装部署系统 Setup 1.0.0.exe
+release/嵌入式软件安装性测试工具 Setup 1.0.0.exe
 ```
 
 ### 轻量安装包原则

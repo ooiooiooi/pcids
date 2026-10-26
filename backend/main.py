@@ -648,7 +648,7 @@ async def lifespan(app: FastAPI):
         print("应用关闭")
 
 app = FastAPI(
-    title="程控安装部署系统 API",
+    title="嵌入式软件安装性测试工具 API",
     description="Programmatic Control Installation & Deployment System",
     version="1.0.0",
     lifespan=lifespan
@@ -721,7 +721,7 @@ async def root():
     if FRONTEND_INDEX_FILE.exists():
         return FileResponse(FRONTEND_INDEX_FILE)
     return {
-        "message": "程控安装部署系统 API",
+        "message": "嵌入式软件安装性测试工具 API",
         "docs": "/docs",
         "redoc": "/redoc"
     }

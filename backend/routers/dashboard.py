@@ -493,7 +493,7 @@ def _build_task_preview(
     version = str((getattr(repo, "version", None) if repo else "") or "").strip()
     artifact_text = " ".join(part for part in [software, f"v{version}" if version and not version.lower().startswith("v") else version] if part)
     primary_text = f"{target} · {artifact_text} {status_label}".strip()
-    project_name = _resolve_repository_project_name(repo, repository_by_project_key) or "程控安装部署系统"
+    project_name = _resolve_repository_project_name(repo, repository_by_project_key) or "嵌入式软件安装性测试工具"
     task_no = str(item.task_no or f"任务 {item.id}").strip()
     detail_text = _task_duration_text(item)
     return {

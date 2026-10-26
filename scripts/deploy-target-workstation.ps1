@@ -8,7 +8,7 @@
   license dialogs are visible to the operator.
 
   Expected staged layout:
-    D:\PCIDS-Deploy\PCIDS\程控安装部署系统 Setup 1.0.0.exe
+    D:\PCIDS-Deploy\PCIDS\嵌入式软件安装性测试工具 Setup 1.0.0.exe
     D:\PCIDS-Deploy\burners\
     D:\PCIDS-Deploy\protocol_adapters\
     D:\PCIDS-Deploy\codearts_browser_runtime\

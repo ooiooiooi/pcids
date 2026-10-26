@@ -232,8 +232,8 @@ class ScriptBase(BaseModel):
 
 
 class ScriptCreate(ScriptBase):
-    """创建脚本请求"""
-    pass
+    """创建脚本请求；基本信息保存后可单独编辑脚本内容。"""
+    content: str = ""
 
 
 class ScriptUpdate(BaseModel):

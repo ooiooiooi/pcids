@@ -2,7 +2,7 @@
   "name": "pcids",
   "version": "1.0.0",
   "private": true,
-  "description": "程控安装部署系统 - Programmatic Control Installation & Deployment System",
+  "description": "嵌入式软件安装性测试工具 - Programmatic Control Installation & Deployment System",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -54,7 +54,7 @@
   },
   "build": {
     "appId": "com.pcids.app",
-    "productName": "程控安装部署系统",
+    "productName": "嵌入式软件安装性测试工具",
     "directories": {
       "output": "release"
     },

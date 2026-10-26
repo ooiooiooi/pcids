@@ -34,11 +34,11 @@ README = """PCIDS Windows 离线授权签发工具
 现场操作
 --------
 1. 把整个文件夹临时复制到需要授权的 Windows 电脑。
-2. 先安装并至少启动一次“程控安装部署系统”。
+2. 先安装并至少启动一次“嵌入式软件安装性测试工具”。
 3. 右键运行 PCIDS-License-Issuer.exe；一般不需要管理员权限。
 4. “签发资料目录”选择本目录。
 5. “软件 data 目录”选择 PCIDS 安装目录下的 data，例如：
-   C:\\Program Files\\程控安装部署系统\\data
+   C:\\Program Files\\嵌入式软件安装性测试工具\\data
 6. 填写客户编号、客户名称、该客户允许授权的机器总数；截止日期可留空。
 7. 点击“生成并安装 License”。工具将写入：
    <软件 data 目录>\\license\\pcids.lic

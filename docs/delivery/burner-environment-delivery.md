@@ -18,7 +18,7 @@ PCIDS 的完整环境不是一个安装包，而是以下四部分：
 ```text
 D:\PCIDS-Deploy\
   PCIDS\
-    程控安装部署系统 Setup 1.0.0.exe
+    嵌入式软件安装性测试工具 Setup 1.0.0.exe
   burners\
     AL321\
     GDLINK\
@@ -86,7 +86,7 @@ Get-Volume | Select-Object DriveLetter, SizeRemaining
 Get-ChildItem D:\PCIDS-Deploy -Recurse -File |
   Measure-Object -Property Length -Sum
 
-Get-FileHash "D:\PCIDS-Deploy\PCIDS\程控安装部署系统 Setup 1.0.0.exe" -Algorithm SHA256
+Get-FileHash "D:\PCIDS-Deploy\PCIDS\嵌入式软件安装性测试工具 Setup 1.0.0.exe" -Algorithm SHA256
 ```
 
 ## 3. 推荐安装顺序
@@ -97,7 +97,7 @@ Get-FileHash "D:\PCIDS-Deploy\PCIDS\程控安装部署系统 Setup 1.0.0.exe" -A
 
 ```powershell
 Start-Process `
-  -FilePath "D:\PCIDS-Deploy\PCIDS\程控安装部署系统 Setup 1.0.0.exe" `
+  -FilePath "D:\PCIDS-Deploy\PCIDS\嵌入式软件安装性测试工具 Setup 1.0.0.exe" `
   -ArgumentList "/S" `
   -Wait
 ```

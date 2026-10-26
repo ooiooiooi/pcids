@@ -42,13 +42,16 @@ test('CodeArts 项目同步完成后触发数据仓库同步', () => {
   assert.match(source, /await triggerRepositoryDataSync\(projectKey\)/)
 })
 
-test('repository mode only shows its own projects and stays empty without one', () => {
-  assert.match(source, /const \[repositoryMode, setRepositoryMode\] = useState<CodeartsRepositoryMode>\('web'\)/)
+test('repository page only exposes release projects and hides repository mode labels', () => {
+  assert.match(source, /const repositoryMode: CodeartsRepositoryMode = 'release'/)
+  assert.match(source, /if \(n\.repository_mode === 'private'\) continue/)
+  assert.doesNotMatch(source, /<Segmented/)
+  assert.doesNotMatch(source, /label: '(发布库|私有库|Web 页面库)'/)
+  assert.doesNotMatch(source, /setRepositoryMode/)
   assert.match(source, /if \(!key\) return \[\]/)
   assert.match(source, /projects\.find\(\(project\) => project\.repositoryMode === repositoryMode\)/)
   assert.match(source, /currentProject\.repositoryMode === repositoryMode/)
   assert.match(source, /initialProjectContextRef\.current = \{ projectKey: '', projectName: '' \}/)
-  assert.match(source, /setRepositoryMode\(nextMode\)/)
   assert.match(source, /setRepositoryProjectContext\(\{ projectKey: '', projectName: '' \}\)/)
 })
 

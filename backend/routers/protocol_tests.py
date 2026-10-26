@@ -2130,7 +2130,7 @@ body {{
   </div>
 
   <div class="report-footer">
-    <span>程控安装部署系统 v1.0.0 · 通信协议验证报告</span>
+    <span>嵌入式软件安装性测试工具 v1.0.0 · 通信协议验证报告</span>
     <span>生成时间：{_safe_text(_fmt_datetime(datetime.now()))}</span>
   </div>
 </div>

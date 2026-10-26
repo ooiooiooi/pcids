@@ -11,7 +11,6 @@ import {
   Input,
   Modal,
   Row,
-  Segmented,
   Select,
   Space,
   Spin,
@@ -352,7 +351,7 @@ const Repository: React.FC = () => {
   activeProjectRef.current = currentProjectKey
   const connectionCheckSequence = useRef(0)
   const connectionCheckInFlight = useRef<{ projectKey: string; promise: Promise<boolean>; requestId: object } | null>(null)
-  const [repositoryMode, setRepositoryMode] = useState<CodeartsRepositoryMode>('web')
+  const repositoryMode: CodeartsRepositoryMode = 'release'
   const initialProjectContextRef = useRef(getRepositoryProjectContext())
 
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
@@ -739,6 +738,7 @@ const Repository: React.FC = () => {
     const walk = (items: AnyNode[]) => {
       for (const n of items) {
         if (String(n.key).startsWith('proj_')) {
+          if (n.repository_mode === 'private') continue
           projects.push({
             label: String(n.title),
             value: String(n.key),
@@ -757,7 +757,6 @@ const Repository: React.FC = () => {
     const restoringInitialProject = !currentProjectKey && Boolean(initialProjectContextRef.current.projectKey)
     if (currentProject && (restoringInitialProject || currentProject.repositoryMode === repositoryMode)) {
       if (currentProjectKey !== currentProject.value) setCurrentProjectKey(currentProject.value)
-      if (repositoryMode !== currentProject.repositoryMode) setRepositoryMode(currentProject.repositoryMode)
       if (restoringInitialProject) initialProjectContextRef.current = { projectKey: '', projectName: '' }
       setRepositoryProjectContext({ projectKey: currentProject.value, projectName: currentProject.label })
       setExpandedKeys((prev) => (prev.includes(currentProject.value) ? prev : [...prev, currentProject.value]))
@@ -795,7 +794,6 @@ const Repository: React.FC = () => {
 
   const handleProjectChange = (projectKey: string) => {
     const selectedProject = projectOptions.find((item) => item.value === projectKey)
-    if (selectedProject) setRepositoryMode(selectedProject.repositoryMode)
     setCurrentProjectKey(projectKey)
     setRepositoryProjectContext({ projectKey, projectName: selectedProject?.label || '' })
     setSelectedKeys([projectKey])
@@ -1001,29 +999,6 @@ const Repository: React.FC = () => {
     } finally {
       setSyncingCodearts(false)
     }
-  }
-
-  const handleRepositoryModeChange = async (value: string | number) => {
-    const nextMode: CodeartsRepositoryMode = value === 'web' ? 'web' : (value === 'private' ? 'private' : 'release')
-    if (nextMode === repositoryMode) return
-    // Once the operator explicitly selects a repository mode, a project
-    // restored from the previous session must not switch the segmented control
-    // back to its old mode.
-    initialProjectContextRef.current = { projectKey: '', projectName: '' }
-    setRepositoryMode(nextMode)
-    const targetProject = projectOptions.find((project) => project.repositoryMode === nextMode)
-    if (!targetProject) {
-      setCurrentProjectKey('')
-      setSelectedKeys([])
-      setSelectedNodeKey('')
-      setExpandedKeys([])
-      setSearchKeyword('')
-      setRepositoryProjectContext({ projectKey: '', projectName: '' })
-      return
-    }
-    handleProjectChange(targetProject.value)
-    const modeLabel = nextMode === 'web' ? 'Web 页面库' : nextMode === 'private' ? '私有库' : '发布库'
-    message.success(`已切换到${modeLabel}项目，需要更新数据时请点击同步CodeArts`)
   }
 
   const handleDownloadArtifact = async (target: DownloadTarget, node: AnyNode, jumpAfterDownload = false) => {
@@ -2061,16 +2036,6 @@ const Repository: React.FC = () => {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <Segmented
-            value={repositoryMode}
-            disabled={!canSyncRepository || syncingCodearts}
-            onChange={handleRepositoryModeChange}
-            options={[
-              { label: '发布库', value: 'release' },
-              { label: '私有库', value: 'private' },
-              { label: 'Web 页面库', value: 'web' },
-            ]}
-          />
           <Permission code="repository:sync">
             <ActionLinkButton icon={<ReloadOutlined />} loading={syncingCodearts} onClick={handleSyncCurrentProject}>
               同步CodeArts

@@ -1141,7 +1141,7 @@ const App: React.FC = () => {
         <div className="desktop-app-loading__titlebar">
           <div className="app-header-brand" style={{ display: 'flex', alignItems: 'center', color: 'var(--pcids-brand-color)', fontWeight: 800, fontSize: 18 }}>
             <img src={SoftwareLogo} alt="软件图标" style={{ width: 24, height: 24, marginRight: 8, objectFit: 'contain' }} />
-            <span>嵌入式安装性测试工具</span>
+            <span>嵌入式软件安装性测试工具</span>
           </div>
           <DesktopWindowControls />
         </div>
@@ -1168,7 +1168,7 @@ const App: React.FC = () => {
       >
         <div className="app-header-brand" style={{ display: 'flex', alignItems: 'center', color: 'var(--pcids-brand-color)', fontWeight: 800, fontSize: 18, width: 216 }}>
           <img src={SoftwareLogo} alt="软件图标" style={{ width: 24, height: 24, marginRight: 8, objectFit: 'contain' }} />
-          <span>嵌入式安装性测试工具</span>
+          <span>嵌入式软件安装性测试工具</span>
         </div>
         <div className="app-header-actions">
           <div className="app-header-tools">

@@ -3,6 +3,7 @@
 !macro CloseRunningPcidsProcesses
   DetailPrint "Closing running PCIDS processes..."
   ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM "程控安装部署系统.exe"' $8
+  ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM "嵌入式软件安装性测试工具.exe"' $8
   ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM "pcids_backend.exe"' $8
   Sleep 1000
 !macroend

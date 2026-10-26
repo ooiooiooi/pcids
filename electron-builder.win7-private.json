@@ -1,6 +1,6 @@
 {
   "appId": "com.pcids.win7.private-test",
-  "productName": "程控安装部署系统-Win7私有库测试版",
+  "productName": "嵌入式软件安装性测试工具-Win7私有库测试版",
   "electronVersion": "22.3.27",
   "directories": {
     "output": "release-win7-private"
